@@ -26,14 +26,17 @@ from testagent.common.errors import (
     TestAgentError,
 )
 from testagent.common.logging import StructuredFormatter, get_logger, mask_api_key, mask_pii
+from testagent.common.security import DataSanitizer, KeyManager
 
 __all__ = [
     "AgentContextOverflowError",
     "AgentError",
     "AgentTimeoutError",
     "ConfigError",
+    "DataSanitizer",
     "DatabaseError",
     "HarnessError",
+    "KeyManager",
     "LLMError",
     "LLMRateLimitError",
     "LLMTokenLimitError",
