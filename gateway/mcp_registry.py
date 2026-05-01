@@ -202,6 +202,9 @@ class MCPRegistry:
                 extra={"extra_data": {"server": server_name}},
             )
 
+    def is_registered(self, server_name: str) -> bool:
+        return server_name in self._servers
+
     async def lookup(self, server_name: str) -> MCPServerInfo:
         info = self._servers.get(server_name)
         if info is None:
