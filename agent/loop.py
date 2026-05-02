@@ -15,6 +15,17 @@ logger = get_logger(__name__)
 _JSON_DUMPS = json.dumps
 _IDENTITY_RE_INJECTION_THRESHOLD = 5
 
+TOOL_HANDLERS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {}
+
+
+def register_tool_handler(tool_name: str, handler: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+    """Register a tool handler that dispatch_tool will route to."""
+    TOOL_HANDLERS[tool_name] = handler
+    logger.debug(
+        "Tool handler registered",
+        extra={"extra_data": {"tool_name": tool_name, "handler": handler.__name__}},
+    )
+
 
 async def agent_loop(
     messages: list[dict[str, Any]],
@@ -179,12 +190,19 @@ def estimate_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 async def dispatch_tool(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
-    """分发工具调用到对应的 handler(占位实现, Phase 3 完善)"""
+    """Dispatch tool call to the registered handler, or return an error if unknown."""
+    handler = TOOL_HANDLERS.get(tool_name)
+    if handler is None:
+        logger.warning(
+            "Unknown tool called",
+            extra={"extra_data": {"tool_name": tool_name}},
+        )
+        return {"error": f"Unknown tool: {tool_name}", "tool_name": tool_name}
     logger.debug(
-        "Tool dispatch placeholder",
+        "Dispatching tool",
         extra={"extra_data": {"tool_name": tool_name}},
     )
-    return {"tool_name": tool_name, "input": tool_input, "status": "placeholder"}
+    return await handler(tool_input)
 
 
 async def _default_dispatch_fn(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
