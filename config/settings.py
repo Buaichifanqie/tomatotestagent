@@ -3,10 +3,12 @@ from __future__ import annotations
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_SECRET_FIELDS = frozenset({
-    "openai_api_key",
-    "meilisearch_api_key",
-})
+_SECRET_FIELDS = frozenset(
+    {
+        "openai_api_key",
+        "meilisearch_api_key",
+    }
+)
 
 
 class TestAgentSettings(BaseSettings):

@@ -22,12 +22,7 @@ class TestAgentError(Exception):
         return "".join(parts)
 
     def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}("
-            f"message={self.message!r}, "
-            f"code={self.code!r}, "
-            f"details={self.details!r})"
-        )
+        return f"{self.__class__.__name__}(message={self.message!r}, code={self.code!r}, details={self.details!r})"
 
 
 class ConfigError(TestAgentError):

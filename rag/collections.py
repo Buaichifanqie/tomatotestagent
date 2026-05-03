@@ -20,3 +20,10 @@ class CollectionManager:
             if isinstance(access_list, list) and agent_type in access_list:
                 accessible.append(name)
         return accessible
+
+    def get_description(self, collection_name: str) -> str:
+        info = RAG_COLLECTIONS.get(collection_name)
+        if info is None:
+            return ""
+        desc = info.get("description", "")
+        return str(desc) if desc is not None else ""

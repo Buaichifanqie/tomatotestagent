@@ -13,14 +13,16 @@ from testagent.common.logging import get_logger
 
 logger = get_logger(__name__)
 
-VALID_MESSAGE_TYPES: frozenset[str] = frozenset({
-    "task_assignment",
-    "result_report",
-    "query",
-    "notification",
-    "ack",
-    "error",
-})
+VALID_MESSAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "task_assignment",
+        "result_report",
+        "query",
+        "notification",
+        "ack",
+        "error",
+    }
+)
 
 SENDER_RECEIVER_PATTERN: str = r"^(planner|executor_\d+|analyzer|gateway|cli|broadcast)$"
 
@@ -83,12 +85,7 @@ class ErrorPayload(MessagePayload):
 
 
 PayloadType = Annotated[
-    TaskAssignmentPayload
-    | ResultReportPayload
-    | QueryPayload
-    | NotificationPayload
-    | AckPayload
-    | ErrorPayload,
+    TaskAssignmentPayload | ResultReportPayload | QueryPayload | NotificationPayload | AckPayload | ErrorPayload,
     Field(discriminator="type"),
 ]
 
@@ -107,19 +104,13 @@ class AgentMessage(BaseModel):
     @classmethod
     def _validate_message_type(cls, v: str) -> str:
         if v not in VALID_MESSAGE_TYPES:
-            raise ValueError(
-                f"Invalid message_type: {v!r}. "
-                f"Must be one of {sorted(VALID_MESSAGE_TYPES)}"
-            )
+            raise ValueError(f"Invalid message_type: {v!r}. Must be one of {sorted(VALID_MESSAGE_TYPES)}")
         return v
 
     @model_validator(mode="after")
     def _validate_payload_consistency(self) -> Self:
         if self.message_type != self.payload.type:
-            raise ValueError(
-                f"message_type {self.message_type!r} does not match "
-                f"payload type {self.payload.type!r}"
-            )
+            raise ValueError(f"message_type {self.message_type!r} does not match payload type {self.payload.type!r}")
         if self.message_type == "ack" and self.in_reply_to is None and isinstance(self.payload, AckPayload):
             self.in_reply_to = self.payload.acked_message_id
         return self

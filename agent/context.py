@@ -5,10 +5,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from testagent.common.logging import get_logger
+from testagent.rag.collections import CollectionManager
 
 if TYPE_CHECKING:
     from testagent.config.settings import TestAgentSettings
     from testagent.models.session import TestSession
+    from testagent.rag.pipeline import RAGPipeline
 
 logger = get_logger(__name__)
 
@@ -28,8 +30,14 @@ class AssembledContext:
 
 
 class ContextAssembler:
-    def __init__(self, settings: TestAgentSettings) -> None:
+    def __init__(
+        self,
+        settings: TestAgentSettings,
+        rag_pipeline: RAGPipeline | None = None,
+    ) -> None:
         self._settings = settings
+        self._rag_pipeline = rag_pipeline
+        self._collection_manager = CollectionManager()
 
     async def assemble(
         self,
@@ -42,13 +50,17 @@ class ContextAssembler:
         tools_section = self._build_tools_section(agent_type)
         tools = self._get_tools_for_agent(agent_type)
         skill_hints = await self._load_skill_hints(agent_type)
-        rag_context = await self._load_rag_context(agent_type, rag_query)
+        rag_context = await self._build_rag_context(agent_type, rag_query)
 
         system_parts: list[str] = [agents_section, soul_section, tools_section]
 
         if skill_hints:
             hints_text = "\n".join(f"- {s.get('name', 'unknown')}: {s.get('description', '')}" for s in skill_hints)
             system_parts.append(f"# Available Skills\n\n{hints_text}")
+
+        if rag_context:
+            rag_section = "\n\n".join(rag_context)
+            system_parts.append(f"# Retrieved Knowledge\n\n{rag_section}")
 
         return AssembledContext(
             system_prompt="\n\n".join(system_parts),
@@ -218,15 +230,60 @@ class ContextAssembler:
         )
         return []
 
-    async def _load_rag_context(
+    async def _build_rag_context(
         self,
         agent_type: AgentType,
         rag_query: str | None,
     ) -> list[str]:
-        _ = agent_type
-        if rag_query:
+        if not rag_query or not rag_query.strip() or not self._rag_pipeline:
+            return []
+
+        agent_name = agent_type.value
+        collections = self._collection_manager.get_accessible_collections(agent_name)
+
+        if not collections:
             logger.debug(
-                "RAG context loading placeholder",
-                extra={"extra_data": {"agent_type": agent_type.value, "rag_query": rag_query}},
+                "No accessible RAG collections for agent type",
+                extra={"extra_data": {"agent_type": agent_name}},
             )
-        return []
+            return []
+
+        logger.debug(
+            "Querying RAG collections",
+            extra={
+                "extra_data": {
+                    "agent_type": agent_name,
+                    "collections": collections,
+                    "rag_query": rag_query,
+                }
+            },
+        )
+
+        context_parts: list[str] = []
+        for collection in collections:
+            try:
+                results = await self._rag_pipeline.query(
+                    query_text=rag_query,
+                    collection=collection,
+                    top_k=3,
+                )
+            except Exception:
+                logger.warning(
+                    "RAG query failed for collection",
+                    extra={"extra_data": {"collection": collection, "agent_type": agent_name}},
+                    exc_info=True,
+                )
+                continue
+
+            if not results:
+                continue
+
+            collection_desc = self._collection_manager.get_description(collection)
+            header = f"## {collection} — {collection_desc}" if collection_desc else f"## {collection}"
+            items: list[str] = [header]
+            for r in results:
+                items.append(f"- [{r.doc_id}] (score: {r.score:.3f}) {r.content}")
+
+            context_parts.append("\n".join(items))
+
+        return context_parts

@@ -29,7 +29,7 @@ def mask_api_key(text: str) -> str:
     def _replace(m: re.Match[str]) -> str:
         prefix = m.group(1)
         full = m.group(0)
-        suffix = full[len(prefix):]
+        suffix = full[len(prefix) :]
         if len(suffix) <= 4:
             return f"{prefix}***"
         return f"{prefix}{suffix[:4]}***"
@@ -50,9 +50,7 @@ class StructuredFormatter(logging.Formatter):
             "message": _sanitize(record.getMessage()),
         }
         if record.exc_info and record.exc_info[0] is not None:
-            log_entry["exception"] = _sanitize(
-                self.formatException(record.exc_info)
-            )
+            log_entry["exception"] = _sanitize(self.formatException(record.exc_info))
         if hasattr(record, "extra_data") and isinstance(record.extra_data, dict):
             sanitized_extra: dict[str, object] = {}
             for k, v in record.extra_data.items():
