@@ -196,3 +196,109 @@ class SessionManager:
         }
         for queue in subs:
             await queue.put(message)
+
+
+async def run_session(
+    skill_name: str | None = None,
+    plan_path: str | None = None,
+    env: str = "dev",
+    url: str | None = None,
+) -> dict[str, Any]:
+    """Execute a full test session through the Planner→Executor→Analyzer pipeline.
+
+    This is the primary entry point used by the CLI ``testagent run`` command.
+    It creates a session, runs the three-agent lifecycle, and returns aggregated results.
+    """
+    from testagent.agent.analyzer import AnalyzerAgent
+    from testagent.agent.context import ContextAssembler
+    from testagent.agent.executor import ExecutorAgent
+    from testagent.agent.planner import PlannerAgent
+    from testagent.config.settings import get_settings
+    from testagent.llm.local_provider import LLMProviderFactory
+
+    settings = get_settings()
+    llm = LLMProviderFactory.create(settings)
+    context_assembler = ContextAssembler(settings=settings)
+    manager = SessionManager()
+
+    session = await manager.create_session(
+        name=f"cli-run-{skill_name or 'manual'}",
+        trigger_type="manual",
+        input_context={
+            "skill": skill_name,
+            "plan_path": plan_path,
+            "env": env,
+            "url": url,
+        },
+    )
+    session_id: str = session["id"]
+    _logger.info("CLI run session created", extra={"extra_data": {"session_id": session_id, "skill": skill_name}})
+
+    planner = PlannerAgent(llm=llm, context_assembler=context_assembler)
+    executor = ExecutorAgent(llm=llm, context_assembler=context_assembler)
+    analyzer = AnalyzerAgent(llm=llm, context_assembler=context_assembler)
+
+    await manager.transition(session_id, "planning")
+    plan_result = await planner.execute(
+        {
+            "task_type": "plan",
+            "skill": skill_name,
+            "plan_path": plan_path,
+            "env": env,
+        }
+    )
+    _logger.info(
+        "Planning completed",
+        extra={
+            "extra_data": {
+                "session_id": session_id,
+                "plan": plan_result.get("plan"),
+            }
+        },
+    )
+
+    await manager.transition(session_id, "executing")
+    execute_result = await executor.execute(
+        {
+            "task_type": "execute",
+            "skill": skill_name,
+            "env": env,
+            "url": url,
+        }
+    )
+    _logger.info(
+        "Execution completed",
+        extra={
+            "extra_data": {
+                "session_id": session_id,
+                "result": execute_result.get("result"),
+            }
+        },
+    )
+
+    await manager.transition(session_id, "analyzing")
+    analyze_result = await analyzer.execute(
+        {
+            "task_type": "analyze",
+            "session_id": session_id,
+            "execute_result": execute_result.get("result"),
+        }
+    )
+    _logger.info(
+        "Analysis completed",
+        extra={
+            "extra_data": {
+                "session_id": session_id,
+                "analysis": analyze_result.get("analysis"),
+            }
+        },
+    )
+
+    await manager.transition(session_id, "completed")
+
+    return {
+        "session_id": session_id,
+        "status": "completed",
+        "tasks": [],
+        "duration": "-",
+    }

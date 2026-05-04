@@ -77,7 +77,7 @@ def run(
     )
 
     try:
-        from testagent.gateway.session import run_session  # type: ignore[attr-defined]
+        from testagent.gateway.session import run_session
     except ImportError:
         typer.echo("Session execution module not available. Use 'testagent serve' to start the gateway first.")
         raise typer.Exit(1) from None
@@ -150,7 +150,7 @@ def ci(
 ) -> None:
     """Run a skill in CI mode (non-interactive)."""
     try:
-        from testagent.gateway.session import run_session  # type: ignore[attr-defined]
+        from testagent.gateway.session import run_session
     except ImportError:
         typer.echo("Session execution module not available. Use 'testagent serve' to start the gateway first.")
         raise typer.Exit(1) from None
