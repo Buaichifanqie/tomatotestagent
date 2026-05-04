@@ -172,14 +172,10 @@ class HTTPRunner(BaseRunner):
             results["headers"] = header_results
 
         if "json_path" in assertions:
-            all_passed = self._validate_json_path(
-                response_body, assertions["json_path"], results
-            ) and all_passed
+            all_passed = self._validate_json_path(response_body, assertions["json_path"], results) and all_passed
 
         if "json_schema" in assertions and HAS_JSONSCHEMA:
-            all_passed = self._validate_json_schema(
-                response_body, assertions["json_schema"], results
-            ) and all_passed
+            all_passed = self._validate_json_schema(response_body, assertions["json_schema"], results) and all_passed
 
         if "json_schema" in assertions and not HAS_JSONSCHEMA:
             results["json_schema"] = {

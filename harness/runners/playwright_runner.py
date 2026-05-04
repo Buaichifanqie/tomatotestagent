@@ -13,27 +13,29 @@ logger = get_logger(__name__)
 
 BROWSER_TYPES = frozenset({"chromium", "firefox", "webkit"})
 
-PLAYWRIGHT_ACTIONS: frozenset[str] = frozenset({
-    "navigate",
-    "click",
-    "fill",
-    "type",
-    "select",
-    "check",
-    "uncheck",
-    "hover",
-    "wait_for_selector",
-    "wait_for_navigation",
-    "screenshot",
-    "evaluate",
-    "get_text",
-    "get_attribute",
-    "is_visible",
-    "assert_text",
-    "assert_visible",
-    "assert_url",
-    "assert_title",
-})
+PLAYWRIGHT_ACTIONS: frozenset[str] = frozenset(
+    {
+        "navigate",
+        "click",
+        "fill",
+        "type",
+        "select",
+        "check",
+        "uncheck",
+        "hover",
+        "wait_for_selector",
+        "wait_for_navigation",
+        "screenshot",
+        "evaluate",
+        "get_text",
+        "get_attribute",
+        "is_visible",
+        "assert_text",
+        "assert_visible",
+        "assert_url",
+        "assert_title",
+    }
+)
 
 
 class PlaywrightRunner(BaseRunner):
@@ -110,9 +112,11 @@ class PlaywrightRunner(BaseRunner):
                     assertion_results.update(action_result)
 
             duration_ms = self._now_ms() - start_ms
-            all_passed = all(
-                v.get("passed", False) for v in assertion_results.values() if isinstance(v, dict)
-            ) if assertion_results else True
+            all_passed = (
+                all(v.get("passed", False) for v in assertion_results.values() if isinstance(v, dict))
+                if assertion_results
+                else True
+            )
 
             return self._make_result(
                 status="passed" if all_passed else "failed",
@@ -203,11 +207,13 @@ class PlaywrightRunner(BaseRunner):
         else:
             await method(selector, value, timeout, action)
 
-        self._action_log.append({
-            "action": action_type,
-            "selector": selector,
-            "index": index,
-        })
+        self._action_log.append(
+            {
+                "action": action_type,
+                "selector": selector,
+                "index": index,
+            }
+        )
 
         return result
 
