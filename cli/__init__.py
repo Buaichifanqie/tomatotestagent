@@ -1,3 +1,3 @@
-import typer
+from testagent.cli.main import app
 
-app = typer.Typer(name="testagent", help="TestAgent - AI-powered testing agent platform")
+__all__ = ["app"]
