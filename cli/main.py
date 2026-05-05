@@ -146,9 +146,21 @@ def chat() -> None:
 @app.command()
 def ci(
     skill: str = typer.Argument(help="Skill name to run in CI mode"),
-    exit_code: bool = typer.Option(False, "--exit-code", "-e", help="Return non-zero exit code on failure"),
+    exit_code: bool = typer.Option(False, "--exit-code", help="Return non-zero exit code on failure"),
+    junit: Path | None = typer.Option(None, "--junit", "-j", help="Path to output JUnit XML report", exists=False),  # noqa: B008
+    timeout: int = typer.Option(300, "--timeout", "-t", help="Global timeout in seconds", min=1),
+    env: str = typer.Option("ci", "--env", "-e", help="Target environment"),
+    url: str | None = typer.Option(None, "--url", "-u", help="Target URL (overrides env config)"),
 ) -> None:
-    """Run a skill in CI mode (non-interactive)."""
+    """Run a skill in CI mode (non-interactive).
+
+    Designed for CI/CD pipelines. Supports JUnit XML report output,
+    configurable timeout, and non-zero exit code on failure.
+    """
+    if timeout <= 0:
+        typer.echo("Timeout must be a positive integer.")
+        raise typer.Exit(1)
+
     try:
         from testagent.gateway.session import run_session
     except ImportError:
@@ -157,7 +169,26 @@ def ci(
 
     import asyncio
 
-    results = asyncio.run(run_session(skill_name=skill, env="ci"))
+    _output.print_header(skill=skill, target=url or env, timeout=f"{timeout}s")
+
+    import time
+
+    start_time = time.monotonic()
+
+    try:
+        results = asyncio.run(run_session(skill_name=skill, env=env, url=url))
+    except TimeoutError:
+        typer.echo(f"CI run timed out after {timeout}s")
+        timeout_error = {
+            "name": skill,
+            "status": "error",
+            "duration": str(timeout),
+            "error": "Global timeout exceeded",
+        }
+        _write_junit_report([timeout_error], junit)
+        raise typer.Exit(1) from None
+
+    elapsed = time.monotonic() - start_time
     tasks: list[dict[str, Any]] = results.get("tasks", [])
 
     for i, task in enumerate(tasks, 1):
@@ -165,11 +196,23 @@ def ci(
 
     passed = sum(1 for t in tasks if t.get("status") == "passed")
     failed = sum(1 for t in tasks if t.get("status") == "failed")
-    duration = results.get("duration", "-")
+    duration = results.get("duration", f"{elapsed:.1f}s")
     _output.print_summary(passed, failed, duration)
+
+    _write_junit_report(tasks, junit)
 
     if exit_code and failed > 0:
         raise typer.Exit(1)
+
+
+def _write_junit_report(tasks: list[dict[str, Any]], path: Path | None) -> None:
+    if path is None:
+        return
+    from testagent.cli.junit import generate_junit_xml
+
+    xml_content = generate_junit_xml(tasks)
+    path.write_text(xml_content, encoding="utf-8")
+    typer.echo(f"JUnit report written to {path}")
 
 
 @app.command()
