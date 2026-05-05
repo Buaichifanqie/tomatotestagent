@@ -235,6 +235,16 @@ class DockerSandbox:
         output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
         return output.strip()
 
+    async def get_tmpdir(self, sandbox_id: str) -> str:
+        meta = self._containers.get(sandbox_id)
+        if meta is None:
+            raise DockerSandboxError(
+                f"Unknown sandbox: {sandbox_id}",
+                code="SANDBOX_NOT_FOUND",
+                details={"sandbox_id": sandbox_id},
+            )
+        return str(meta["tmpdir"])
+
     async def get_artifacts(self, sandbox_id: str) -> list[dict[str, object]]:
         meta = self._containers.get(sandbox_id)
         if meta is None:

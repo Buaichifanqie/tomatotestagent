@@ -57,6 +57,21 @@ class ISandbox(Protocol):
         """
         ...
 
+    async def get_tmpdir(self, sandbox_id: str) -> str:
+        """Return the host-side temporary directory path for this sandbox.
+
+        The directory is shared into the sandbox (mounted at a well-known
+        location such as ``/tmp/testagent``) so that the host can place
+        files (e.g. generated test scripts) that the sandbox can execute.
+
+        Returns:
+            Absolute host path to the temporary directory.
+
+        Raises:
+            :class:`SandboxError`: If *sandbox_id* is unknown.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Resource profiles — maps test type → (cpu, memory, timeout)

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
 import time
-from typing import ClassVar, Protocol, runtime_checkable
+import uuid
+from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from testagent.harness.sandbox import ISandbox
 
 from testagent.common.errors import HarnessError
 from testagent.common.logging import get_logger
@@ -26,20 +31,35 @@ class UnknownTaskTypeError(RunnerError):
 
 @runtime_checkable
 class IRunner(Protocol):
-    async def setup(self, config: dict[str, object]) -> None: ...
-
+    async def setup(
+        self,
+        config: dict[str, object],
+        sandbox: ISandbox | None = None,
+        sandbox_id: str | None = None,
+    ) -> None: ...
     async def execute(self, test_script: str) -> TestResult: ...
-
     async def teardown(self) -> None: ...
-
     async def collect_results(self) -> TestResult: ...
 
 
 class BaseRunner:
     runner_type: str = ""
 
-    async def setup(self, config: dict[str, object]) -> None:
-        raise NotImplementedError
+    def __init__(self) -> None:
+        self._sandbox: ISandbox | None = None
+        self._sandbox_id: str | None = None
+        self._sandbox_tmpdir: str | None = None
+
+    async def setup(
+        self,
+        config: dict[str, object],
+        sandbox: ISandbox | None = None,
+        sandbox_id: str | None = None,
+    ) -> None:
+        self._sandbox = sandbox
+        self._sandbox_id = sandbox_id
+        if sandbox is not None and sandbox_id is not None:
+            self._sandbox_tmpdir = await sandbox.get_tmpdir(sandbox_id)
 
     async def execute(self, test_script: str) -> TestResult:
         raise NotImplementedError
@@ -77,6 +97,77 @@ class BaseRunner:
 
     def _now_ms(self) -> float:
         return time.monotonic() * 1000
+
+    @property
+    def _in_docker_mode(self) -> bool:
+        return self._sandbox is not None
+
+    async def _write_script(self, script_content: str, filename: str | None = None) -> str:
+        """Write a script to the sandbox temp directory.
+
+        Returns the in-container path (``/tmp/testagent/<filename>``).
+        Only available when running in Docker mode.
+        """
+        if not self._sandbox or not self._sandbox_id:
+            raise RunnerError(
+                "Cannot write script without a sandbox reference",
+                code="DOCKER_MODE_REQUIRED",
+            )
+
+        from testagent.harness.sandbox import ISandbox
+
+        sandbox = self._sandbox
+        if not isinstance(sandbox, ISandbox):
+            raise RunnerError("Sandbox does not conform to ISandbox protocol", code="INVALID_SANDBOX")
+
+        if filename is None:
+            filename = f"test_{uuid.uuid4().hex[:12]}.py"
+        tmpdir = await sandbox.get_tmpdir(self._sandbox_id)
+        self._sandbox_tmpdir = tmpdir
+        host_path = os.path.join(tmpdir, filename)
+        with open(host_path, "w", encoding="utf-8") as f:
+            f.write(script_content)
+        container_path = f"/tmp/testagent/{filename}"
+        logger.debug(
+            "Wrote script for Docker execution",
+            extra={"host_path": host_path, "container_path": container_path},
+        )
+        return container_path
+
+    async def _run_in_sandbox(self, command: str, timeout: int | None = None) -> dict[str, object]:
+        """Execute a command inside the sandbox.
+
+        Only available when running in Docker mode.
+        """
+        if not self._sandbox or not self._sandbox_id:
+            raise RunnerError(
+                "Cannot run in sandbox without a sandbox reference",
+                code="DOCKER_MODE_REQUIRED",
+            )
+
+        from testagent.harness.sandbox import ISandbox
+
+        sandbox = self._sandbox
+        if not isinstance(sandbox, ISandbox):
+            raise RunnerError("Sandbox does not conform to ISandbox protocol", code="INVALID_SANDBOX")
+
+        return await sandbox.execute(self._sandbox_id, command, timeout=timeout or 60)
+
+    def _generate_docker_exec_script(self, test_script: str) -> str:
+        """Generate a standalone Python script for execution inside the Docker container.
+
+        Subclasses must override this to generate the appropriate script
+        for their test type (API vs Web).
+        """
+        raise NotImplementedError
+
+    def _parse_docker_output(self, output: dict[str, object]) -> TestResult:
+        """Parse the stdout/stderr from a Docker execution into a TestResult.
+
+        Subclasses must override this to parse the output appropriate
+        for their test type.
+        """
+        raise NotImplementedError
 
 
 class RunnerFactory:

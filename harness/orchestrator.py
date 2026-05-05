@@ -112,7 +112,7 @@ class HarnessOrchestrator:
         try:
             runner = self._runner_factory.get_runner(task.task_type)
 
-            await runner.setup(task.task_config)
+            await runner.setup(task.task_config, sandbox=sandbox_instance, sandbox_id=sandbox_id)
 
             test_script: str = (
                 json.dumps(task.task_config) if isinstance(task.task_config, dict) else str(task.task_config)
