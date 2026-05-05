@@ -17,7 +17,10 @@ class DatabaseMCPServer(BaseMCPServer):
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "database_url": {"type": "string", "description": "SQLAlchemy async database URL (e.g. sqlite+aiosqlite:///test.db)"},
+                    "database_url": {
+                        "type": "string",
+                        "description": "SQLAlchemy async database URL (e.g. sqlite+aiosqlite:///test.db)",
+                    },
                     "sql": {"type": "string", "description": "SQL query to execute (SELECT only)"},
                     "params": {"type": "object", "description": "Query parameters as key-value pairs"},
                     "max_rows": {"type": "integer", "description": "Maximum rows to return, default 100"},

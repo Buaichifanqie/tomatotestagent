@@ -40,6 +40,7 @@ def rag_query(
     top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
 ) -> None:
     """Query documents from RAG collection."""
+
     async def _query() -> list[dict[str, object]]:
         from testagent.config.settings import get_settings
         from testagent.rag.factories import create_pipeline

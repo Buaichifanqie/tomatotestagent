@@ -158,6 +158,16 @@ class LocalProcessSandbox:
                 )
         return artifacts
 
+    async def get_tmpdir(self, sandbox_id: str) -> str:
+        meta = self._sandboxes.get(sandbox_id)
+        if meta is None:
+            raise LocalProcessSandboxError(
+                f"Unknown sandbox: {sandbox_id}",
+                code="SANDBOX_NOT_FOUND",
+                details={"sandbox_id": sandbox_id},
+            )
+        return str(meta["working_dir"])
+
     async def destroy(self, sandbox_id: str) -> None:
         meta = self._sandboxes.pop(sandbox_id, None)
         if meta is None:

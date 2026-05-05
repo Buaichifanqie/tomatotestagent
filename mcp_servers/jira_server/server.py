@@ -23,7 +23,10 @@ class JiraMCPServer(BaseMCPServer):
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "base_url": {"type": "string", "description": "Jira instance base URL (e.g. https://your-domain.atlassian.net)"},
+                    "base_url": {
+                        "type": "string",
+                        "description": "Jira instance base URL (e.g. https://your-domain.atlassian.net)",
+                    },
                     "auth_token": {"type": "string", "description": "Jira API token or Bearer token"},
                     "project_key": {"type": "string", "description": "Project key (e.g. PROJ)"},
                     "summary": {"type": "string", "description": "Issue summary/title"},

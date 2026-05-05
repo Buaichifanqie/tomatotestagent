@@ -34,5 +34,8 @@ class MicroVMSandbox:
     async def get_artifacts(self, sandbox_id: str) -> list[dict[str, object]]:
         raise MicroVMNotImplementedError
 
+    async def get_tmpdir(self, sandbox_id: str) -> str:
+        raise MicroVMNotImplementedError
+
     async def destroy(self, sandbox_id: str) -> None:
         raise MicroVMNotImplementedError
