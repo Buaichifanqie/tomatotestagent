@@ -7,6 +7,7 @@ _SECRET_FIELDS = frozenset(
     {
         "openai_api_key",
         "meilisearch_api_key",
+        "postgres_password",
     }
 )
 
@@ -20,6 +21,16 @@ class TestAgentSettings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./testagent.db"
     database_echo: bool = False
+    database_backend: str = "sqlite"
+
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "testagent"
+    postgres_user: str = "testagent"
+    postgres_password: SecretStr = SecretStr("")
+    postgres_pool_size: int = 10
+    postgres_max_overflow: int = 20
+    postgres_pool_recycle: int = 3600
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -46,6 +57,12 @@ class TestAgentSettings(BaseSettings):
     docker_timeout_web: int = 120
 
     data_retention_days: int = 90
+
+    def get_database_url(self) -> str:
+        if self.database_backend == "postgresql":
+            password = self.postgres_password.get_secret_value()
+            return f"postgresql+asyncpg://{self.postgres_user}:{password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        return "sqlite+aiosqlite:///./testagent.db"
 
     model_config = SettingsConfigDict(
         env_prefix="TESTAGENT_",

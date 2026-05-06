@@ -77,7 +77,7 @@ def get_engine() -> AsyncEngine:
     if _engine is not None:
         return _engine
     settings = get_settings()
-    url = settings.database_url
+    url = settings.get_database_url()
     is_sqlite = url.startswith("sqlite")
     connect_args = _build_connect_args() if is_sqlite else {}
     engine_kwargs: dict[str, object] = {
@@ -86,6 +86,10 @@ def get_engine() -> AsyncEngine:
     }
     if is_sqlite and ":memory:" in url:
         engine_kwargs["poolclass"] = StaticPool
+    if not is_sqlite:
+        engine_kwargs["pool_size"] = settings.postgres_pool_size
+        engine_kwargs["max_overflow"] = settings.postgres_max_overflow
+        engine_kwargs["pool_recycle"] = settings.postgres_pool_recycle
     _engine = create_async_engine(url, **engine_kwargs)
     if is_sqlite:
         event.listen(_engine.sync_engine, "connect", _set_sqlite_pragmas_sync)
