@@ -62,7 +62,7 @@ class TestAgentSettings(BaseSettings):
         if self.database_backend == "postgresql":
             password = self.postgres_password.get_secret_value()
             return f"postgresql+asyncpg://{self.postgres_user}:{password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        return "sqlite+aiosqlite:///./testagent.db"
+        return self.database_url
 
     model_config = SettingsConfigDict(
         env_prefix="TESTAGENT_",

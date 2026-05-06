@@ -1,5 +1,6 @@
 from testagent.db.engine import (
     close_db,
+    create_async_engine,
     get_engine,
     get_session,
     get_session_factory,
@@ -29,6 +30,7 @@ __all__ = [
     "async_downgrade",
     "async_upgrade_head",
     "close_db",
+    "create_async_engine",
     "downgrade",
     "generate_migration",
     "get_current_revision",

@@ -3,12 +3,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import event, make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine as sa_create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from testagent.common.logging import get_logger
-from testagent.config.settings import get_settings
+from testagent.config.settings import TestAgentSettings, get_settings
 
 if TYPE_CHECKING:
     import sqlite3
@@ -16,11 +17,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_engine = None
+_engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-def _build_connect_args() -> dict[str, object]:
+def _build_sqlite_connect_args() -> dict[str, object]:
     return {"check_same_thread": False}
 
 
@@ -72,27 +73,39 @@ def _set_sqlite_pragmas_sync(dbapi_conn: sqlite3.Connection, _connection_record:
         cursor.close()
 
 
+def create_async_engine(settings: TestAgentSettings) -> AsyncEngine:
+    url = settings.get_database_url()
+    is_sqlite = settings.database_backend == "sqlite"
+    engine_kwargs: dict[str, object] = {
+        "echo": settings.database_echo,
+    }
+    if is_sqlite:
+        engine_kwargs["connect_args"] = _build_sqlite_connect_args()
+        parsed_url = make_url(url)
+        if parsed_url.database is None or ":memory:" in url:
+            engine_kwargs["poolclass"] = StaticPool
+    else:
+        engine_kwargs["pool_size"] = settings.postgres_pool_size
+        engine_kwargs["max_overflow"] = settings.postgres_max_overflow
+        engine_kwargs["pool_recycle"] = settings.postgres_pool_recycle
+        engine_kwargs["pool_pre_ping"] = True
+    engine = sa_create_async_engine(url, **engine_kwargs)
+    if is_sqlite:
+        event.listen(engine.sync_engine, "connect", _set_sqlite_pragmas_sync)
+    logger.info(
+        "Async engine created: backend=%s",
+        settings.database_backend,
+        extra={"extra_data": {"backend": settings.database_backend}},
+    )
+    return engine
+
+
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is not None:
         return _engine
     settings = get_settings()
-    url = settings.get_database_url()
-    is_sqlite = url.startswith("sqlite")
-    connect_args = _build_connect_args() if is_sqlite else {}
-    engine_kwargs: dict[str, object] = {
-        "echo": settings.database_echo,
-        "connect_args": connect_args,
-    }
-    if is_sqlite and ":memory:" in url:
-        engine_kwargs["poolclass"] = StaticPool
-    if not is_sqlite:
-        engine_kwargs["pool_size"] = settings.postgres_pool_size
-        engine_kwargs["max_overflow"] = settings.postgres_max_overflow
-        engine_kwargs["pool_recycle"] = settings.postgres_pool_recycle
-    _engine = create_async_engine(url, **engine_kwargs)
-    if is_sqlite:
-        event.listen(_engine.sync_engine, "connect", _set_sqlite_pragmas_sync)
+    _engine = create_async_engine(settings)
     return _engine
 
 
