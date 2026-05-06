@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, DateTime, String
+from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from testagent.models.base import BaseModel
+from testagent.models.base import BaseModel, DateTimeTZ, JSONType
 
 if TYPE_CHECKING:
     from testagent.models.plan import TestPlan
@@ -23,8 +23,8 @@ class TestSession(BaseModel):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
-    input_context: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    input_context: Mapped[dict[str, object] | None] = mapped_column(JSONType, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTimeTZ, nullable=True)
 
     plans: Mapped[list["TestPlan"]] = relationship(  # noqa: UP037
         back_populates="session", cascade="all, delete-orphan"

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, ForeignKey, String, Text
+from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from testagent.models.base import BaseModel
+from testagent.models.base import BaseModel, JSONType
 
 if TYPE_CHECKING:
     from testagent.models.result import TestResult
@@ -28,6 +28,6 @@ class Defect(BaseModel):
     reproduction_steps: Mapped[str | None] = mapped_column(Text, nullable=True)
     jira_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
-    root_cause: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    root_cause: Mapped[dict[str, object] | None] = mapped_column(JSONType, nullable=True)
 
     result: Mapped["TestResult"] = relationship()  # noqa: UP037

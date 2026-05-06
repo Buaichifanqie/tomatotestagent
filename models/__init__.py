@@ -1,4 +1,4 @@
-from testagent.models.base import Base, BaseModel
+from testagent.models.base import Base, BaseModel, DateTimeTZ, JSONType
 from testagent.models.defect import DEFECT_CATEGORIES, DEFECT_SEVERITIES, DEFECT_STATUSES, Defect
 from testagent.models.mcp_config import MCPConfig
 from testagent.models.plan import (
@@ -28,7 +28,9 @@ __all__ = [
     "TRIGGER_TYPES",
     "Base",
     "BaseModel",
+    "DateTimeTZ",
     "Defect",
+    "JSONType",
     "MCPConfig",
     "SkillDefinition",
     "TestPlan",
