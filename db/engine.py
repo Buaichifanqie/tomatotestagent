@@ -156,3 +156,84 @@ def reset_engine() -> None:
     global _engine, _session_factory
     _engine = None
     _session_factory = None
+
+
+_executor_engines: dict[str, AsyncEngine] = {}
+_executor_session_factories: dict[str, async_sessionmaker[AsyncSession]] = {}
+
+
+def _build_executor_schema_url(settings: TestAgentSettings, executor_id: str) -> str:
+    base_url = settings.get_database_url()
+    if settings.database_backend == "postgresql":
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(base_url)
+        path = parsed.path.rstrip("/")
+        new_path = f"{path}_{executor_id}"
+        return urlunparse(parsed._replace(path=new_path))
+    return base_url
+
+
+async def create_executor_schema(executor_id: str) -> AsyncEngine:
+    settings = get_settings()
+    if settings.database_backend != "postgresql":
+        return get_engine()
+
+    if executor_id in _executor_engines:
+        return _executor_engines[executor_id]
+
+    url = _build_executor_schema_url(settings, executor_id)
+    engine = sa_create_async_engine(
+        url,
+        pool_size=settings.postgres_pool_size,
+        max_overflow=settings.postgres_max_overflow,
+        pool_recycle=settings.postgres_pool_recycle,
+        pool_pre_ping=True,
+        echo=settings.database_echo,
+    )
+    from testagent.models.base import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    _executor_engines[executor_id] = engine
+    factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    _executor_session_factories[executor_id] = factory
+    logger.info(
+        "Executor schema created: executor_id=%s",
+        executor_id,
+        extra={"extra_data": {"executor_id": executor_id}},
+    )
+    return engine
+
+
+async def get_executor_session(executor_id: str) -> AsyncGenerator[AsyncSession, None]:
+    if executor_id not in _executor_session_factories:
+        await create_executor_schema(executor_id)
+    factory = _executor_session_factories[executor_id]
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def drop_executor_schema(executor_id: str) -> None:
+    engine = _executor_engines.pop(executor_id, None)
+    _executor_session_factories.pop(executor_id, None)
+    if engine is not None:
+        from testagent.models.base import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+        logger.info(
+            "Executor schema dropped: executor_id=%s",
+            executor_id,
+            extra={"extra_data": {"executor_id": executor_id}},
+        )
