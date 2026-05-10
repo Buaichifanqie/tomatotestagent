@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import httpx
 
@@ -175,27 +175,23 @@ class APIEmbeddingService:
                 headers = await self._get_auth_headers()
                 response = await client.post("/embeddings", json=payload, headers=headers)
 
-                if response.status_code == 429:
-                    delay = _RETRY_BASE_DELAY * (2**attempt)
-                    logger.warning(
-                        "OpenAI Embedding API rate limited (429) with key %s..., retrying in %.1fs (attempt %d/%d)",
-                        headers["Authorization"][:15],
-                        delay,
-                        attempt + 1,
-                        _MAX_RETRIES,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
                 if response.status_code in _RETRY_STATUSES:
                     delay = _RETRY_BASE_DELAY * (2**attempt)
-                    logger.warning(
-                        "OpenAI Embedding API %d, retrying in %.1fs (attempt %d/%d)",
-                        response.status_code,
-                        delay,
-                        attempt + 1,
-                        _MAX_RETRIES,
-                    )
+                    if response.status_code == 429:
+                        logger.warning(
+                            "OpenAI Embedding API rate limited (429), retrying in %.1fs (attempt %d/%d)",
+                            delay,
+                            attempt + 1,
+                            _MAX_RETRIES,
+                        )
+                    else:
+                        logger.warning(
+                            "OpenAI Embedding API %d, retrying in %.1fs (attempt %d/%d)",
+                            response.status_code,
+                            delay,
+                            attempt + 1,
+                            _MAX_RETRIES,
+                        )
                     await asyncio.sleep(delay)
                     continue
 
@@ -205,46 +201,21 @@ class APIEmbeddingService:
                 return [item["embedding"] for item in sorted_data]
 
             except httpx.HTTPStatusError as exc:
+                raise RAGError(
+                    f"OpenAI Embedding API error: {exc.response.status_code}",
+                    code="EMBED_API_ERROR",
+                    details={"status_code": exc.response.status_code},
+                ) from exc
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
                 last_exc = exc
-                if exc.response.status_code == 429:
-                    delay = _RETRY_BASE_DELAY * (2**attempt)
-                    logger.warning(
-                        "OpenAI Embedding API rate limited (429) on attempt %d/%d, rotating key and retrying in %.1fs",
-                        attempt + 1,
-                        _MAX_RETRIES,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                elif exc.response.status_code in _RETRY_STATUSES:
-                    await asyncio.sleep(_RETRY_BASE_DELAY * (2**attempt))
-                    continue
-                else:
-                    raise RAGError(
-                        f"OpenAI Embedding API error: {exc.response.status_code}",
-                        code="EMBED_API_ERROR",
-                        details={"status_code": exc.response.status_code},
-                    ) from exc
-            except httpx.TimeoutException as exc:
-                last_exc = exc
+                delay = _RETRY_BASE_DELAY * (2**attempt)
                 logger.warning(
-                    "OpenAI Embedding API timeout, retrying in %.1fs (attempt %d/%d)",
-                    _RETRY_BASE_DELAY * (2**attempt),
+                    "OpenAI Embedding API connection error (attempt %d/%d), retrying in %.1fs",
                     attempt + 1,
                     _MAX_RETRIES,
+                    delay,
                 )
-                await asyncio.sleep(_RETRY_BASE_DELAY * (2**attempt))
-                continue
-            except httpx.ConnectError as exc:
-                last_exc = exc
-                logger.warning(
-                    "OpenAI Embedding API connection error, retrying in %.1fs (attempt %d/%d)",
-                    _RETRY_BASE_DELAY * (2**attempt),
-                    attempt + 1,
-                    _MAX_RETRIES,
-                )
-                await asyncio.sleep(_RETRY_BASE_DELAY * (2**attempt))
-                continue
+                await asyncio.sleep(delay)
 
         raise RAGDegradedError(
             f"OpenAI Embedding API failed after {_MAX_RETRIES} retries",
@@ -306,14 +277,25 @@ class EmbeddingFailover:
         self._fallback_failures = 0
         self._circuit_open = False
 
-    async def embed(self, text: str) -> list[float]:
+    async def _execute(
+        self,
+        method: str,
+        arg: str | list[str],
+    ) -> list[float] | list[list[float]]:
+        if isinstance(arg, list) and not arg:
+            return []
+
+        is_batch = isinstance(arg, list)
+
         if self._circuit_open and self._fallback is not None:
             logger.info(
                 "Circuit breaker open, using fallback embedding service directly (primary_failures=%d)",
                 self._primary_failures,
             )
+            fb_method = getattr(self._fallback, method)
             try:
-                return await self._fallback.embed(text)
+                result = await fb_method(arg)
+                return cast("list[float] | list[list[float]]", result)
             except Exception as fb_exc:
                 self._fallback_failures += 1
                 raise RAGDegradedError(
@@ -327,14 +309,16 @@ class EmbeddingFailover:
                     },
                 ) from fb_exc
 
+        primary_method = getattr(self._primary, method)
         try:
-            result = await self._primary.embed(text)
+            result = await primary_method(arg)
             self._primary_failures = 0
             self._circuit_open = False
-            return result
+            return cast("list[float] | list[list[float]]", result)
         except Exception as primary_exc:
             logger.warning(
-                "Primary embedding service failed: %s",
+                "Primary embedding service %s failed: %s",
+                "batch" if is_batch else "single",
                 str(primary_exc),
                 exc_info=primary_exc,
             )
@@ -344,13 +328,15 @@ class EmbeddingFailover:
                 self._circuit_open = True
 
             if self._fallback is not None:
+                fb_method = getattr(self._fallback, method)
                 try:
-                    result = await self._fallback.embed(text)
+                    result = await fb_method(arg)
                     self._fallback_failures = 0
-                    return result
+                    return cast("list[float] | list[list[float]]", result)
                 except Exception as fallback_exc:
                     logger.error(
-                        "Fallback embedding service also failed: %s",
+                        "Fallback embedding service %s also failed: %s",
+                        "batch" if is_batch else "single",
                         str(fallback_exc),
                         exc_info=fallback_exc,
                     )
@@ -376,80 +362,14 @@ class EmbeddingFailover:
                         "circuit_open": self._circuit_open,
                     },
                 ) from primary_exc
+
+    async def embed(self, text: str) -> list[float]:
+        result = await self._execute("embed", text)
+        return result  # type: ignore[return-value]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-
-        if self._circuit_open and self._fallback is not None:
-            logger.info(
-                "Circuit breaker open, using fallback embedding service for batch (primary_failures=%d)",
-                self._primary_failures,
-            )
-            try:
-                return await self._fallback.embed_batch(texts)
-            except Exception as fb_exc:
-                self._fallback_failures += 1
-                raise RAGDegradedError(
-                    "Embedding service unavailable, degraded to pure BM25",
-                    code="EMBED_SERVICE_DEGRADED",
-                    details={
-                        "fallback_error": str(fb_exc),
-                        "primary_failures": self._primary_failures,
-                        "fallback_failures": self._fallback_failures,
-                        "circuit_open": self._circuit_open,
-                    },
-                ) from fb_exc
-
-        try:
-            results = await self._primary.embed_batch(texts)
-            self._primary_failures = 0
-            self._circuit_open = False
-            return results
-        except Exception as primary_exc:
-            logger.warning(
-                "Primary embedding service batch failed: %s",
-                str(primary_exc),
-                exc_info=primary_exc,
-            )
-            self._primary_failures += 1
-
-            if self._primary_failures >= self._circuit_breaker_threshold:
-                self._circuit_open = True
-
-            if self._fallback is not None:
-                try:
-                    results = await self._fallback.embed_batch(texts)
-                    self._fallback_failures = 0
-                    return results
-                except Exception as fallback_exc:
-                    logger.error(
-                        "Fallback embedding service batch also failed: %s",
-                        str(fallback_exc),
-                        exc_info=fallback_exc,
-                    )
-                    self._fallback_failures += 1
-                    raise RAGDegradedError(
-                        "Embedding service unavailable, degraded to pure BM25",
-                        code="EMBED_SERVICE_DEGRADED",
-                        details={
-                            "primary_error": str(primary_exc),
-                            "fallback_error": str(fallback_exc),
-                            "primary_failures": self._primary_failures,
-                            "fallback_failures": self._fallback_failures,
-                            "circuit_open": self._circuit_open,
-                        },
-                    ) from fallback_exc
-            else:
-                raise RAGDegradedError(
-                    "Embedding service unavailable, degraded to pure BM25",
-                    code="EMBED_SERVICE_DEGRADED",
-                    details={
-                        "primary_error": str(primary_exc),
-                        "primary_failures": self._primary_failures,
-                        "circuit_open": self._circuit_open,
-                    },
-                ) from primary_exc
+        result = await self._execute("embed_batch", texts)
+        return result  # type: ignore[return-value]
 
     def get_dimension(self) -> int:
         return self._primary.get_dimension()
