@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from testagent.common.logging import get_logger
 from testagent.rag.fusion import rrf_fusion
 from testagent.rag.ingestion import Chunk, DocumentIngestor, TextChunker
+from testagent.rag.reranker import IReranker, NoopReranker
 
 if TYPE_CHECKING:
     from testagent.rag.embedding import IEmbeddingService
@@ -32,10 +33,12 @@ class RAGPipeline:
         embedding_service: IEmbeddingService,
         vector_store: IVectorStore,
         fulltext: IFullTextSearch,
+        reranker: IReranker | None = None,
     ) -> None:
         self._embedding_service = embedding_service
         self._vector_store = vector_store
         self._fulltext = fulltext
+        self._reranker: IReranker = reranker or NoopReranker()
         self._ingestor = DocumentIngestor()
         self._text_chunker = TextChunker()
 
@@ -116,16 +119,21 @@ class RAGPipeline:
         )
 
         fused = rrf_fusion(vector_results, keyword_results, k=60)
-        fused = fused[:top_k]
+
+        reranked = await self._reranker.rerank(
+            query=query_text,
+            documents=fused,
+            top_k=top_k,
+        )
 
         return [
             RAGResult(
                 doc_id=str(r["id"]),
-                content=str(r.get("document", "")),
-                score=float(r.get("score", 0.0)),
+                content=str(r.get("document", r.get("content", ""))),
+                score=float(r.get("rerank_score", r.get("score", 0.0))),
                 metadata=dict(r.get("metadata", {})),
             )
-            for r in fused
+            for r in reranked
         ]
 
     async def write_back(

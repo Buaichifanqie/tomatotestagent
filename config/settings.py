@@ -43,11 +43,18 @@ class TestAgentSettings(BaseSettings):
     local_model_url: str = "http://localhost:11434"
 
     chroma_persist_dir: str = "./chroma_data"
+    vector_store_backend: str = "chromadb"
+    milvus_host: str = "localhost"
+    milvus_port: int = 19530
+    milvus_collection_prefix: str = "testagent_"
     meilisearch_url: str = "http://localhost:7700"
     meilisearch_api_key: SecretStr = SecretStr("")
     embedding_mode: str = "local"
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     openai_embedding_model: str = "text-embedding-3-small"
+
+    reranker_enabled: bool = False
+    reranker_model: str = "BAAI/bge-reranker-large"
 
     agent_max_rounds: int = 50
     agent_token_threshold: int = 100000
