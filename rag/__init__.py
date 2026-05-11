@@ -12,6 +12,10 @@ from testagent.rag.reranker import (
 from testagent.rag.vector_store import ChromaDBVectorStore, IVectorStore
 from testagent.rag.vector_store_factory import VectorStoreFactory
 
+# NOTE: ChromaToMilvusMigrator is intentionally not re-exported here.
+# Import it directly: from testagent.rag.migrate_chroma_to_milvus import ChromaToMilvusMigrator
+# This avoids RuntimeWarning when running "python -m testagent.rag.migrate_chroma_to_milvus"
+
 __all__ = [
     "RAG_COLLECTIONS",
     "ChromaDBVectorStore",

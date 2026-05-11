@@ -48,7 +48,7 @@ class TestAgentSettings(BaseSettings):
     milvus_port: int = 19530
     milvus_collection_prefix: str = "testagent_"
     meilisearch_url: str = "http://localhost:7700"
-    meilisearch_api_key: SecretStr = SecretStr("")
+    meilisearch_api_key: SecretStr = SecretStr("testagent-dev-master-key")
     embedding_mode: str = "local"
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     openai_embedding_model: str = "text-embedding-3-small"

@@ -219,6 +219,60 @@ class DocumentIngestor:
                 details={"source": source},
             )
 
+        if source_path.is_dir():
+            return await self._ingest_directory(source_path, collection, metadata)
+
+        return await self._ingest_file(source_path, collection, metadata)
+
+    async def _ingest_directory(
+        self,
+        directory: Path,
+        collection: str,
+        metadata: dict[str, object] | None = None,
+    ) -> list[Chunk]:
+        supported_extensions = set(self._EXTENSION_MAP.keys())
+        files: list[Path] = []
+        for ext in supported_extensions:
+            files.extend(directory.rglob(f"*{ext}"))
+        files.sort(key=lambda p: (str(p.parent), str(p.name)))
+
+        if not files:
+            logger.warning("No supported files found in directory: %s", directory)
+            return []
+
+        all_chunks: list[Chunk] = []
+        for file_path in files:
+            try:
+                chunks = await self._ingest_file(file_path, collection, metadata)
+                all_chunks.extend(chunks)
+            except RAGIngestionError as exc:
+                logger.warning("Skipping file %s: %s", file_path, exc)
+                continue
+
+        logger.info(
+            "Ingested %d chunks from %d files in directory %s into collection %s",
+            len(all_chunks),
+            len(files),
+            str(directory),
+            collection,
+            extra={
+                "extra_data": {
+                    "total_chunks": len(all_chunks),
+                    "file_count": len(files),
+                    "directory": str(directory),
+                    "collection": collection,
+                }
+            },
+        )
+        return all_chunks
+
+    async def _ingest_file(
+        self,
+        source_path: Path,
+        collection: str,
+        metadata: dict[str, object] | None = None,
+    ) -> list[Chunk]:
+        source = str(source_path)
         try:
             content = source_path.read_text(encoding="utf-8")
         except Exception as exc:

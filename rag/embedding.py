@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
 import os
+import random
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import httpx
@@ -91,6 +94,40 @@ class LocalEmbeddingService:
 
     def get_dimension(self) -> int:
         return _LOCAL_DIMENSION
+
+
+class SimpleEmbeddingService:
+    __test__ = False
+
+    def __init__(self, dimension: int = _LOCAL_DIMENSION) -> None:
+        self._dimension = dimension
+        logger.info(
+            "Using SimpleEmbeddingService with dimension %d (no external model required)",
+            dimension,
+        )
+
+    def _hash_to_vector(self, text: str) -> list[float]:
+        seed_bytes = hashlib.sha256(text.encode("utf-8")).digest()
+        seed = int.from_bytes(seed_bytes[:8], "big")
+        rng = random.Random(seed)
+        vec = [rng.gauss(0.0, 1.0) for _ in range(self._dimension)]
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm > 0:
+            vec = [x / norm for x in vec]
+        return vec
+
+    async def embed(self, text: str) -> list[float]:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._hash_to_vector, text
+        )
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        loop = asyncio.get_running_loop()
+        tasks = [loop.run_in_executor(None, self._hash_to_vector, t) for t in texts]
+        return await asyncio.gather(*tasks)
+
+    def get_dimension(self) -> int:
+        return self._dimension
 
 
 class APIEmbeddingService:
@@ -421,8 +458,17 @@ class EmbeddingFactory:
             try:
                 primary = LocalEmbeddingService(model_name=settings.embedding_model)
                 return EmbeddingFailover(primary=primary, fallback=None)
-            except RAGDegradedError:
-                raise
+            except RAGDegradedError as exc:
+                logger.warning(
+                    "Failed to load local embedding model '%s': %s",
+                    settings.embedding_model,
+                    exc,
+                )
+                logger.info(
+                    "Falling back to SimpleEmbeddingService (deterministic hash-based embeddings)"
+                )
+                simple = SimpleEmbeddingService()
+                return EmbeddingFailover(primary=simple, fallback=None)
             except Exception as exc:
                 raise RAGDegradedError(
                     f"Failed to create local embedding service: {exc}",

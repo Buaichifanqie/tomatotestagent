@@ -37,12 +37,12 @@ class MilvusVectorStore:
         self._index_type = index_type
         self._metric_type = metric_type
         self._client: Any = None
-        self._collections: dict[str, Any] = {}
+        self._collections: set[str] = set()
         self._init_client()
 
     def _init_client(self) -> None:
         try:
-            from pymilvus import MilvusClient  # type: ignore[import-not-found]
+            from pymilvus import MilvusClient  # type: ignore[import-untyped]
 
             self._client = MilvusClient(
                 uri=f"http://{self._host}:{self._port}",
@@ -68,73 +68,31 @@ class MilvusVectorStore:
     def _collection_name(self, name: str) -> str:
         return f"{self._collection_prefix}{name}"
 
-    def _get_or_create_collection(self, name: str, dimension: int) -> Any:
+    def _ensure_collection(self, name: str, dimension: int) -> None:
         full_name = self._collection_name(name)
         if full_name in self._collections:
-            return self._collections[full_name]
+            return
 
         try:
-            from pymilvus import Collection, CollectionSchema, DataType, FieldSchema
-
-            if self._client.has_collection(full_name):
-                collection = Collection(full_name, using=self._client._using)
-            else:
-                fields = [
-                    FieldSchema(
-                        name="id",
-                        dtype=DataType.VARCHAR,
-                        is_primary=True,
-                        max_length=256,
-                    ),
-                    FieldSchema(
-                        name="embedding",
-                        dtype=DataType.FLOAT_VECTOR,
-                        dim=dimension,
-                    ),
-                    FieldSchema(
-                        name="document",
-                        dtype=DataType.VARCHAR,
-                        max_length=65535,
-                    ),
-                ]
-
-                schema = CollectionSchema(
-                    fields=fields,
+            if not self._client.has_collection(full_name):
+                self._client.create_collection(
+                    collection_name=full_name,
+                    dimension=dimension,
+                    primary_field_name="id",
+                    id_type="string",
+                    max_length=256,
+                    vector_field_name="embedding",
+                    metric_type=self._metric_type,
                     enable_dynamic_field=True,
                 )
-                collection = Collection(
-                    name=full_name,
-                    schema=schema,
-                    using=self._client._using if hasattr(self._client, "_using") else "default",
-                )
-
-                index_params: dict[str, Any] = {
-                    "index_type": self._index_type,
-                    "metric_type": self._metric_type,
-                }
-                if self._index_type == "IVF_FLAT":
-                    index_params["params"] = {"nlist": _DEFAULT_NLIST}
-                elif self._index_type == "HNSW":
-                    index_params["params"] = {
-                        "M": _DEFAULT_M,
-                        "efConstruction": _DEFAULT_EF_CONSTRUCTION,
-                    }
-
-                collection.create_index(
-                    field_name="embedding",
-                    index_params=index_params,
-                )
-                collection.load()
 
                 logger.info(
-                    "Created Milvus collection '%s' (dim=%d, index=%s)",
+                    "Created Milvus collection '%s' (dim=%d)",
                     full_name,
                     dimension,
-                    self._index_type,
                 )
 
-            self._collections[full_name] = collection
-            return collection
+            self._collections.add(full_name)
 
         except Exception as exc:
             raise RAGSearchError(
@@ -147,7 +105,7 @@ class MilvusVectorStore:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
-            self._get_or_create_collection,
+            self._ensure_collection,
             name,
             dimension,
         )
@@ -178,7 +136,7 @@ class MilvusVectorStore:
         if not ids:
             return
 
-        collection = self._get_or_create_collection(_DEFAULT_COLLECTION, dimension)
+        self._ensure_collection(_DEFAULT_COLLECTION, dimension)
         full_name = self._collection_name(_DEFAULT_COLLECTION)
 
         loop = asyncio.get_running_loop()
@@ -193,7 +151,10 @@ class MilvusVectorStore:
                 }
                 row.update(metadatas[i])
                 data.append(row)
-            collection.upsert(data)
+            self._client.upsert(
+                collection_name=full_name,
+                data=data,
+            )
 
         try:
             await loop.run_in_executor(None, _upsert_sync)
@@ -215,7 +176,7 @@ class MilvusVectorStore:
         top_k: int = _DEFAULT_TOP_K,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        collection = self._get_or_create_collection(
+        self._ensure_collection(
             _DEFAULT_COLLECTION,
             len(query_vector),
         )
@@ -244,29 +205,30 @@ class MilvusVectorStore:
                 if conditions:
                     expr = " and ".join(conditions)
 
-            results = collection.search(
+            results = self._client.search(
+                collection_name=full_name,
                 data=[query_vector],
                 anns_field="embedding",
-                param=search_params,
+                search_params=search_params,
                 limit=top_k,
-                expr=expr,
+                filter=expr,
                 output_fields=["document"],
             )
 
             formatted: list[dict[str, Any]] = []
             if results and len(results) > 0:
                 for hit in results[0]:
+                    entity = hit.get("entity", {}) or {}
                     metadata: dict[str, Any] = {}
-                    if hasattr(hit, "entity") and hit.entity:
-                        for field_name in hit.entity:
-                            if field_name not in ("id", "embedding", "document"):
-                                metadata[field_name] = hit.entity.get(field_name)
+                    for field_name, field_value in entity.items():
+                        if field_name not in ("id", "embedding", "document"):
+                            metadata[field_name] = field_value
                     formatted.append(
                         {
-                            "id": str(hit.id),
-                            "score": float(hit.score),
+                            "id": str(hit["id"]),
+                            "score": float(hit["distance"]),
                             "metadata": metadata,
-                            "document": hit.entity.get("document", "") if hit.entity else "",
+                            "document": entity.get("document", ""),
                         }
                     )
             return formatted
@@ -285,19 +247,19 @@ class MilvusVectorStore:
             logger.warning("delete called with empty doc_ids list")
             return
 
-        collection = self._collections.get(
-            self._collection_name(_DEFAULT_COLLECTION),
-        )
-        if collection is None:
+        full_name = self._collection_name(_DEFAULT_COLLECTION)
+        if full_name not in self._collections:
             logger.warning("No collection loaded for delete operation")
             return
 
-        full_name = self._collection_name(_DEFAULT_COLLECTION)
         loop = asyncio.get_running_loop()
 
         def _delete_sync() -> None:
             expr = f"id in [{', '.join(f'"{did}"' for did in doc_ids)}]"
-            collection.delete(expr)
+            self._client.delete(
+                collection_name=full_name,
+                filter=expr,
+            )
 
         try:
             await loop.run_in_executor(None, _delete_sync)
@@ -318,9 +280,7 @@ class MilvusVectorStore:
 
         def _health_sync() -> bool:
             try:
-                from pymilvus import utility
-
-                utility.get_server_version()
+                self._client.list_collections()
                 return True
             except Exception:
                 return False

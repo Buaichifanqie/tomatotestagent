@@ -62,18 +62,14 @@ class CrossEncoderReranker:
         if not documents:
             return []
 
-        model = await asyncio.get_event_loop().run_in_executor(
-            None, self._ensure_model
-        )
+        model = await asyncio.get_event_loop().run_in_executor(None, self._ensure_model)
 
         pairs: list[list[str]] = []
         for doc in documents:
             doc_text = str(doc.get("document", doc.get("content", "")))
             pairs.append([query, doc_text])
 
-        scores: list[float] = await asyncio.get_event_loop().run_in_executor(
-            None, model.predict, pairs
-        )
+        scores: list[float] = await asyncio.get_event_loop().run_in_executor(None, model.predict, pairs)
 
         scored_docs: list[tuple[float, dict[str, Any]]] = []
         for score, doc in zip(scores, documents, strict=True):
