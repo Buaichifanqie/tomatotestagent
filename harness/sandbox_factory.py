@@ -7,6 +7,7 @@ from testagent.common.errors import SandboxError
 from testagent.common.logging import get_logger
 from testagent.harness.docker_sandbox import DockerSandbox
 from testagent.harness.local_runner import LocalProcessSandbox
+from testagent.harness.microvm_sandbox import MicroVMSandbox
 
 logger = get_logger(__name__)
 
@@ -109,10 +110,4 @@ class SandboxFactory:
 # ---------------------------------------------------------------------------
 SandboxFactory.register(IsolationLevel.DOCKER, DockerSandbox)
 SandboxFactory.register(IsolationLevel.LOCAL, LocalProcessSandbox)
-
-try:
-    from testagent.harness.microvm_sandbox import MicroVMSandbox
-
-    SandboxFactory.register(IsolationLevel.MICROVM, MicroVMSandbox)
-except ImportError:
-    logger.info("MicroVMSandbox not available -- MICROVM isolation will raise at runtime")
+SandboxFactory.register(IsolationLevel.MICROVM, MicroVMSandbox)

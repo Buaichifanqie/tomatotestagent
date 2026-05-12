@@ -1,6 +1,6 @@
 from testagent.harness.docker_sandbox import DockerSandbox, DockerSandboxError
 from testagent.harness.local_runner import LocalProcessSandbox, LocalProcessSandboxError
-from testagent.harness.microvm_sandbox import MicroVMNotImplementedError, MicroVMSandbox
+from testagent.harness.microvm_sandbox import MicroVMSandbox, MicroVMSandboxError
 from testagent.harness.orchestrator import HarnessOrchestrator, OrchestratorError
 from testagent.harness.resource import ResourceManager
 from testagent.harness.sandbox import (
@@ -31,8 +31,8 @@ __all__ = [
     "IsolationLevel",
     "LocalProcessSandbox",
     "LocalProcessSandboxError",
-    "MicroVMNotImplementedError",
     "MicroVMSandbox",
+    "MicroVMSandboxError",
     "OrchestratorError",
     "ResourceManager",
     "ResourceProfile",
