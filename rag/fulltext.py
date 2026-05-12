@@ -46,6 +46,9 @@ class MeilisearchFullText:
         except Exception:
             await client.create_index(self._index_name, primary_key="id")
 
+        index = client.index(self._index_name)
+        await index.update_filterable_attributes(["collection"])
+
     @staticmethod
     def _build_filter_string(filters: dict[str, Any]) -> str:
         clauses: list[str] = []
@@ -127,7 +130,29 @@ class MeilisearchFullText:
                 details={"index": self._index_name, "query": query, "top_k": top_k},
             ) from exc
 
-        return self._format_results(result)
+        formatted = self._format_results(result)
+        logger.debug(
+            "Meilisearch search: query=%r, filter=%r, total_hits=%d, returned=%d",
+            query,
+            filter_str,
+            getattr(result, "totalHits", getattr(result, "estimatedTotalHits", 0)),
+            len(formatted),
+            extra={
+                "extra_data": {
+                    "query": query,
+                    "filter": filter_str,
+                    "total_hits": getattr(result, "totalHits", getattr(result, "estimatedTotalHits", 0)),
+                    "returned": len(formatted),
+                }
+            },
+        )
+        if formatted:
+            logger.debug(
+                "First hit: id=%r, content[:80]=%r",
+                formatted[0].get("id"),
+                formatted[0].get("document", "")[:80],
+            )
+        return formatted
 
     @staticmethod
     def _format_results(raw: Any) -> list[dict[str, Any]]:
