@@ -5,6 +5,7 @@ from kombu import Queue
 
 from testagent.config.settings import get_settings
 
+
 # Queue concurrency mapping (V1.0):
 #   planning : concurrency=1  — Planner Agent (serial)
 #   execution: concurrency=10 — Executor Agent (1–10 parallel)
