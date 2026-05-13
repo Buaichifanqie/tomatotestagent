@@ -285,11 +285,7 @@ class MicroVMSandbox:
             return
 
         proc = meta.get("process")
-        if (
-            proc is not None
-            and isinstance(proc, asyncio.subprocess.Process)
-            and proc.returncode is None
-        ):
+        if proc is not None and isinstance(proc, asyncio.subprocess.Process) and proc.returncode is None:
             try:
                 proc.kill()
                 await asyncio.wait_for(proc.wait(), timeout=5)

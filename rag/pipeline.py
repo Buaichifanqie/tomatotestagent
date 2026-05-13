@@ -75,9 +75,7 @@ class RAGPipeline:
         try:
             return await self._embedding_service.embed(text)
         except RAGDegradedError:
-            logger.warning(
-                "Embedding service degraded for single query, vector search will be skipped"
-            )
+            logger.warning("Embedding service degraded for single query, vector search will be skipped")
             return None
         except Exception as exc:
             logger.warning(

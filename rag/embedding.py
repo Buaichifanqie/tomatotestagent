@@ -117,9 +117,7 @@ class SimpleEmbeddingService:
         return vec
 
     async def embed(self, text: str) -> list[float]:
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self._hash_to_vector, text
-        )
+        return await asyncio.get_running_loop().run_in_executor(None, self._hash_to_vector, text)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         loop = asyncio.get_running_loop()
@@ -464,9 +462,7 @@ class EmbeddingFactory:
                     settings.embedding_model,
                     exc,
                 )
-                logger.info(
-                    "Falling back to SimpleEmbeddingService (deterministic hash-based embeddings)"
-                )
+                logger.info("Falling back to SimpleEmbeddingService (deterministic hash-based embeddings)")
                 simple = SimpleEmbeddingService()
                 return EmbeddingFailover(primary=simple, fallback=None)
             except Exception as exc:

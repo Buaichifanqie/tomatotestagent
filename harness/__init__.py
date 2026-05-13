@@ -3,6 +3,7 @@ from testagent.harness.local_runner import LocalProcessSandbox, LocalProcessSand
 from testagent.harness.microvm_sandbox import MicroVMSandbox, MicroVMSandboxError
 from testagent.harness.orchestrator import HarnessOrchestrator, OrchestratorError
 from testagent.harness.resource import ResourceManager
+from testagent.harness.resource_scheduler import ResourceScheduler, ResourceSchedulerError
 from testagent.harness.sandbox import (
     RESOURCE_PROFILES,
     SANDBOX_TASK_TYPES,
@@ -36,6 +37,8 @@ __all__ = [
     "OrchestratorError",
     "ResourceManager",
     "ResourceProfile",
+    "ResourceScheduler",
+    "ResourceSchedulerError",
     "SandboxFactory",
     "SandboxFactoryError",
     "SnapshotError",
