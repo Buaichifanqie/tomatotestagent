@@ -69,4 +69,40 @@ Verify that the core web pages load and render correctly.
 - Capture the browser console logs
 - Retry once after a 2s delay
 """,
+    "app_test": """---
+name: app_smoke_test
+version: "1.0.0"
+description: App smoke test skill
+trigger: "app.*smoke"
+required_mcp_servers:
+  - appium_server
+required_rag_collections:
+  - req_docs
+  - locator_library
+---
+
+## Objective
+
+Verify that the core mobile app flows are functional.
+
+## Flow
+
+1. Launch the app and wait for the splash screen
+2. Verify that the home screen key elements are visible
+3. Navigate through bottom tabs and verify each page
+4. Interact with core features (login, list, search)
+
+## Assertion Strategy
+
+- App session created successfully
+- Splash screen loads within 15s
+- Key elements are displayed and interactive
+- No ANR or unexpected Crash during flow
+
+## Failure Handling
+
+- Retry session creation once on failure
+- Screenshot and capture page source on element timeout
+- Report ANR/Crash as critical bug defects
+""",
 }
