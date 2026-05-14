@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -22,23 +23,36 @@ SESSION_TRANSITIONS: dict[str, set[str]] = {
     "completed": set(),
 }
 
-SESSION_EVENTS = frozenset(
-    {
-        "session.started",
-        "plan.generated",
-        "task.started",
-        "task.progress",
-        "task.completed",
-        "task.self_healing",
-        "result.analyzed",
-        "defect.filed",
-        "session.completed",
-        "session.failed",
-        "session.planning",
-        "session.executing",
-        "session.analyzing",
-    }
-)
+# MVP events
+_MVP_SESSION_EVENTS = {
+    "session.started",
+    "plan.generated",
+    "task.started",
+    "task.progress",
+    "task.completed",
+    "task.self_healing",
+    "result.analyzed",
+    "defect.filed",
+    "session.completed",
+    "session.failed",
+    "session.planning",
+    "session.executing",
+    "session.analyzing",
+}
+
+# V1.0 additional events (PRD F-E04)
+_V1_SESSION_EVENTS = {
+    "task.snapshot_saved",
+    "task.resuming",
+    "resource.usage",
+    "quality.trend_update",
+}
+
+SESSION_EVENTS = frozenset(_MVP_SESSION_EVENTS | _V1_SESSION_EVENTS)
+
+# Heartbeat timeout in seconds
+_HEARTBEAT_TIMEOUT = 30.0
+_SESSION_REDIS_PREFIX = "testagent:session:"
 
 
 class SessionStateError(TestAgentError):
@@ -50,11 +64,13 @@ class SessionNotFoundError(TestAgentError):
 
 
 class SessionManager:
-    def __init__(self) -> None:
+    def __init__(self, redis_client: Any = None) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._subscribers: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
         self._logger = _logger
+        self._redis = redis_client
+        self._heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def create_session(
         self,
@@ -196,6 +212,71 @@ class SessionManager:
         }
         for queue in subs:
             await queue.put(message)
+
+    async def broadcast_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        """广播事件到所有订阅该 session 的 WebSocket 客户端（V1.0 增强接口）。"""
+        await self._broadcast(session_id, event_type, payload)
+
+    async def unsubscribe(self, session_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        """显式取消订阅指定 session 的事件队列。"""
+        async with self._lock:
+            subs = self._subscribers.get(session_id, [])
+            if queue in subs:
+                subs.remove(queue)
+
+    async def heartbeat(self, session_id: str) -> bool:
+        """WebSocket 心跳检测 — 检查 session 是否仍处于活跃状态。"""
+        try:
+            session = await self.get_session(session_id)
+            return session.get("status") not in ("completed", "failed", "cancelled")
+        except SessionNotFoundError:
+            return False
+
+    async def _persist_to_redis(self, session: dict[str, Any]) -> None:
+        """将 session 状态持久化到 Redis（用于断连重连恢复）。"""
+        if self._redis is None:
+            return
+        key = f"{_SESSION_REDIS_PREFIX}{session['id']}"
+        try:
+            serialized = json.dumps(session, default=str)
+            result_or_coro = self._redis.set(key, serialized)
+            if asyncio.iscoroutine(result_or_coro):
+                await result_or_coro
+            expire_result = self._redis.expire(key, 3600)
+            if asyncio.iscoroutine(expire_result):
+                await expire_result
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to persist session to Redis",
+                extra={"extra_data": {"session_id": session["id"], "error": str(exc)}},
+            )
+
+    async def _load_from_redis(self, session_id: str) -> dict[str, Any] | None:
+        """从 Redis 恢复 session 状态。"""
+        if self._redis is None:
+            return None
+        key = f"{_SESSION_REDIS_PREFIX}{session_id}"
+        try:
+            result_or_coro = self._redis.get(key)
+            if asyncio.iscoroutine(result_or_coro):
+                raw = await result_or_coro
+            else:
+                raw = result_or_coro
+            if raw:
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                return cast("dict[str, Any]", json.loads(raw))
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to load session from Redis",
+                extra={"extra_data": {"session_id": session_id, "error": str(exc)}},
+            )
+        return None
+
+    async def get_active_sessions(self) -> list[dict[str, Any]]:
+        """获取所有活跃（非终态）session 列表。"""
+        async with self._lock:
+            return [s for s in self._sessions.values() if s.get("status") not in ("completed", "failed", "cancelled")]
 
 
 async def run_session(

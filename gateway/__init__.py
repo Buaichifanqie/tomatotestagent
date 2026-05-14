@@ -1,5 +1,6 @@
 from testagent.gateway.app import create_app
 from testagent.gateway.celery_app import celery_app
+from testagent.gateway.event_bus import EventBus
 from testagent.gateway.mcp_registry import MCPRegistry, MCPServerInfo
 from testagent.gateway.mcp_router import MCPRouter
 from testagent.gateway.middleware import (
@@ -10,6 +11,7 @@ from testagent.gateway.middleware import (
 )
 from testagent.gateway.router import router
 from testagent.gateway.session import (
+    SESSION_EVENTS,
     SessionManager,
     SessionNotFoundError,
     SessionStateError,
@@ -18,7 +20,9 @@ from testagent.gateway.tasks import execute_analysis_task, execute_planning_task
 from testagent.gateway.websocket import SessionWebSocketManager
 
 __all__ = [
+    "SESSION_EVENTS",
     "AuthMiddleware",
+    "EventBus",
     "MCPRegistry",
     "MCPRouter",
     "MCPServerInfo",
