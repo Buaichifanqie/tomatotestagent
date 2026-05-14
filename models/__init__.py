@@ -13,6 +13,7 @@ from testagent.models.plan import (
 from testagent.models.result import RESULT_STATUSES, TestResult
 from testagent.models.session import SESSION_STATUSES, TRIGGER_TYPES, TestSession
 from testagent.models.skill import SkillDefinition
+from testagent.models.snapshot import SNAPSHOT_STATUSES, ExecutionSnapshotModel
 
 __all__ = [
     "DEFECT_CATEGORIES",
@@ -22,6 +23,7 @@ __all__ = [
     "PLAN_STATUSES",
     "RESULT_STATUSES",
     "SESSION_STATUSES",
+    "SNAPSHOT_STATUSES",
     "STRATEGY_TYPES",
     "TASK_STATUSES",
     "TASK_TYPES",
@@ -30,6 +32,7 @@ __all__ = [
     "BaseModel",
     "DateTimeTZ",
     "Defect",
+    "ExecutionSnapshotModel",
     "JSONType",
     "MCPConfig",
     "SkillDefinition",

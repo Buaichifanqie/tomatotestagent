@@ -17,7 +17,9 @@ from testagent.harness.sandbox_factory import (
 )
 from testagent.harness.snapshot import (
     ExecutionSnapshot,
+    SnapshotCorruptedError,
     SnapshotError,
+    SnapshotNotFoundError,
     SnapshotService,
 )
 
@@ -41,6 +43,8 @@ __all__ = [
     "ResourceSchedulerError",
     "SandboxFactory",
     "SandboxFactoryError",
+    "SnapshotCorruptedError",
     "SnapshotError",
+    "SnapshotNotFoundError",
     "SnapshotService",
 ]
