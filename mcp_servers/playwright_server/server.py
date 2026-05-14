@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from testagent.common import get_logger
+from testagent.harness.self_healing import LocatorHealer
 from testagent.mcp_servers.base import BaseMCPServer
 from testagent.mcp_servers.playwright_server.tools import (
     browser_assert,
@@ -14,6 +16,13 @@ from testagent.mcp_servers.playwright_server.tools import (
     browser_screenshot,
     browser_type,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from testagent.llm.base import ILLMProvider
+
+_logger = get_logger(__name__)
 
 
 class PlaywrightMCPServer(BaseMCPServer):
@@ -141,13 +150,19 @@ class PlaywrightMCPServer(BaseMCPServer):
         "browser_get_network": browser_get_network,
     }
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        llm_provider: ILLMProvider | None = None,
+        on_self_healing: Callable[[str, str, str], None] | None = None,
+    ) -> None:
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
         self._console_messages: list[dict[str, object]] = []
         self._network_requests: list[dict[str, object]] = []
+        self._healer = LocatorHealer(llm_provider=llm_provider)
+        self._on_self_healing = on_self_healing
 
     async def _ensure_browser(self) -> None:
         if self._page is not None:
@@ -235,6 +250,10 @@ class PlaywrightMCPServer(BaseMCPServer):
                 extra_kwargs["console_messages"] = self._console_messages
             if "network_requests" in sig.parameters:
                 extra_kwargs["network_requests"] = self._network_requests
+            if "healer" in sig.parameters:
+                extra_kwargs["healer"] = self._healer
+            if "on_heal" in sig.parameters:
+                extra_kwargs["on_heal"] = self._on_self_healing
             result = await tool(**arguments, **extra_kwargs)
             if isinstance(result, (dict, list)):
                 return json.dumps(result)

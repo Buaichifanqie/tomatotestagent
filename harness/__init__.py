@@ -15,6 +15,7 @@ from testagent.harness.sandbox_factory import (
     SandboxFactory,
     SandboxFactoryError,
 )
+from testagent.harness.self_healing import HealingResult, LocatorHealer
 from testagent.harness.snapshot import (
     ExecutionSnapshot,
     SnapshotCorruptedError,
@@ -30,10 +31,12 @@ __all__ = [
     "DockerSandboxError",
     "ExecutionSnapshot",
     "HarnessOrchestrator",
+    "HealingResult",
     "ISandbox",
     "IsolationLevel",
     "LocalProcessSandbox",
     "LocalProcessSandboxError",
+    "LocatorHealer",
     "MicroVMSandbox",
     "MicroVMSandboxError",
     "OrchestratorError",

@@ -2,7 +2,58 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+from testagent.common import get_logger
+
+if TYPE_CHECKING:
+    from testagent.harness.self_healing import LocatorHealer
+
+_logger = get_logger(__name__)
+
+_HEALABLE_TOOLS = frozenset({"browser_click", "browser_type", "browser_assert"})
+
+_HealingCallback = Callable[[str, str, str], None] | None
+
+
+async def _try_heal_and_retry(
+    tool_name: str,
+    selector: str,
+    original_args: dict[str, Any],
+    page: Any,
+    healer: LocatorHealer | None,
+    on_heal: _HealingCallback = None,
+) -> dict[str, Any] | None:
+    if healer is None:
+        return None
+
+    try:
+        page_source = await page.content()
+    except Exception:
+        _logger.warning("无法获取页面源码用于自愈", extra={"extra_data": {"tool": tool_name}})
+        return None
+
+    error_msg = f"{tool_name} failed on selector: {selector}"
+    result = await healer.heal(selector, page_source, error_msg)
+
+    if result.healing_level == 0 or result.healed_selector == selector:
+        return None
+
+    if on_heal is not None:
+        try:
+            on_heal(selector, result.healed_selector, result.healed_selector)
+        except Exception:
+            _logger.warning("自愈回调执行失败")
+
+    return {
+        "healed": True,
+        "original_selector": selector,
+        "healed_selector": result.healed_selector,
+        "healing_level": result.healing_level,
+        "confidence": result.confidence,
+        "steps": result.steps,
+    }
 
 
 async def browser_navigate(
@@ -10,7 +61,7 @@ async def browser_navigate(
     wait_until: str = "load",
     *,
     page: Any = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     if page is None:
         return {"error": "Browser not initialized"}
     response = await page.goto(url, wait_until=wait_until)
@@ -26,14 +77,27 @@ async def browser_click(
     button: str = "left",
     *,
     page: Any = None,
-) -> dict[str, object]:
+    healer: LocatorHealer | None = None,
+    on_heal: _HealingCallback = None,
+) -> dict[str, Any]:
     if page is None:
         return {"error": "Browser not initialized"}
-    await page.click(selector, button=button)
-    return {
-        "selector": selector,
-        "clicked": True,
-    }
+    try:
+        await page.click(selector, button=button)
+        return {
+            "selector": selector,
+            "clicked": True,
+        }
+    except Exception:
+        heal_info = await _try_heal_and_retry("browser_click", selector, {}, page, healer, on_heal)
+        if heal_info is None:
+            raise
+        await page.click(heal_info["healed_selector"], button=button)
+        return {
+            "selector": heal_info["healed_selector"],
+            "clicked": True,
+            "self_healing": heal_info,
+        }
 
 
 async def browser_type(
@@ -42,17 +106,34 @@ async def browser_type(
     clear: bool = True,
     *,
     page: Any = None,
-) -> dict[str, object]:
+    healer: LocatorHealer | None = None,
+    on_heal: _HealingCallback = None,
+) -> dict[str, Any]:
     if page is None:
         return {"error": "Browser not initialized"}
-    if clear:
-        await page.fill(selector, "")
-    await page.type(selector, text)
-    return {
-        "selector": selector,
-        "typed": True,
-        "text": text,
-    }
+    try:
+        if clear:
+            await page.fill(selector, "")
+        await page.type(selector, text)
+        return {
+            "selector": selector,
+            "typed": True,
+            "text": text,
+        }
+    except Exception:
+        heal_info = await _try_heal_and_retry("browser_type", selector, {}, page, healer, on_heal)
+        if heal_info is None:
+            raise
+        healed = heal_info["healed_selector"]
+        if clear:
+            await page.fill(healed, "")
+        await page.type(healed, text)
+        return {
+            "selector": healed,
+            "typed": True,
+            "text": text,
+            "self_healing": heal_info,
+        }
 
 
 async def browser_screenshot(
@@ -60,7 +141,7 @@ async def browser_screenshot(
     full_page: bool = False,
     *,
     page: Any = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     if page is None:
         return {"error": "Browser not initialized"}
     if selector:
@@ -83,7 +164,9 @@ async def browser_assert(
     expected: str | None = None,
     *,
     page: Any = None,
-) -> dict[str, object]:
+    healer: LocatorHealer | None = None,
+    on_heal: _HealingCallback = None,
+) -> dict[str, Any]:
     if page is None:
         return {"error": "Browser not initialized"}
 
@@ -103,6 +186,23 @@ async def browser_assert(
     if assertion not in valid_assertions:
         return {"error": f"Unknown assertion: {assertion}. Valid: {', '.join(sorted(valid_assertions))}"}
 
+    result = await _execute_assertion(assertion, selector, expected, page)
+    if result.get("passed") is False and assertion not in {"url", "title"}:
+        heal_info = await _try_heal_and_retry("browser_assert", selector, {}, page, healer, on_heal)
+        if heal_info is not None:
+            healed = str(heal_info["healed_selector"])
+            retry_result = await _execute_assertion(assertion, healed, expected, page)
+            retry_result["self_healing"] = heal_info
+            return retry_result
+    return result
+
+
+async def _execute_assertion(
+    assertion: str,
+    selector: str,
+    expected: str | None,
+    page: Any,
+) -> dict[str, Any]:
     if assertion in {"visible", "hidden", "enabled", "disabled"}:
         try:
             if assertion == "visible":
@@ -197,16 +297,16 @@ async def browser_assert(
 
 async def browser_get_console(
     *,
-    console_messages: list[dict[str, object]] | None = None,
-) -> dict[str, object]:
+    console_messages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {"console_messages": list(console_messages) if console_messages else []}
 
 
 async def browser_get_network(
     url_pattern: str | None = None,
     *,
-    network_requests: list[dict[str, object]] | None = None,
-) -> dict[str, object]:
+    network_requests: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     requests = list(network_requests) if network_requests else []
     if url_pattern:
         try:

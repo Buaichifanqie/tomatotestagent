@@ -120,12 +120,14 @@ class SessionWebSocketManager:
                         await websocket.close(code=1000)
                         break
                     try:
-                        await websocket.send_json({
-                            "event": "heartbeat",
-                            "session_id": session_id,
-                            "data": {},
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        })
+                        await websocket.send_json(
+                            {
+                                "event": "heartbeat",
+                                "session_id": session_id,
+                                "data": {},
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            }
+                        )
                     except WebSocketDisconnect:
                         break
                 except WebSocketDisconnect:
