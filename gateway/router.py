@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi import Path as PathParam
 
+from testagent.agent.quality_trends import QualityTrendsAnalyzer
 from testagent.common import get_logger
 from testagent.common.errors import MCPServerUnavailableError, TestAgentError
 from testagent.gateway.session import SessionManager
@@ -341,6 +342,118 @@ async def get_test_report(
             },
         }
     }
+
+
+# --- Quality Trends endpoints ---
+
+
+_VALID_QUALITY_METRICS = frozenset({"pass_rate", "defect_density", "coverage", "flaky_rate"})
+
+
+async def _get_quality_analyzer() -> QualityTrendsAnalyzer:
+    from testagent.db.engine import get_session
+    from testagent.db.repository import DefectRepository, SessionRepository
+
+    async with get_session() as session:
+        session_repo = SessionRepository(session)
+        defect_repo = DefectRepository(session)
+        return QualityTrendsAnalyzer(session_repo=session_repo, defect_repo=defect_repo)
+
+
+@router.get("/api/v1/quality/trends")
+async def get_quality_trends(
+    metric: str = "pass_rate",
+    days: int = 30,
+) -> dict[str, Any]:
+    if metric not in _VALID_QUALITY_METRICS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_METRIC",
+                "message": f"Invalid metric '{metric}'. Valid metrics: {', '.join(sorted(_VALID_QUALITY_METRICS))}",
+            },
+        )
+    try:
+        analyzer = await _get_quality_analyzer()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "ANALYZER_INIT_FAILED",
+                "message": f"Failed to initialize quality analyzer: {exc}",
+            },
+        ) from exc
+
+    try:
+        if metric == "pass_rate":
+            data = await analyzer.get_pass_rate_trend(days=days)
+        elif metric == "defect_density":
+            data = await analyzer.get_defect_density_trend(days=days)
+        elif metric == "coverage":
+            data = await analyzer.get_coverage_trend(days=days)
+        elif metric == "flaky_rate":
+            data = await analyzer.get_flaky_rate_trend(days=days)
+        else:
+            data = []
+
+        return {"data": {"metric": metric, "days": days, "trends": data}}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "TREND_QUERY_FAILED",
+                "message": f"Failed to query {metric} trend: {exc}",
+            },
+        ) from exc
+
+
+@router.get("/api/v1/quality/summary")
+async def get_quality_summary(
+    session_manager: SessionManager = Depends(_get_session_manager),
+) -> dict[str, Any]:
+    try:
+        analyzer = await _get_quality_analyzer()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "ANALYZER_INIT_FAILED",
+                "message": f"Failed to initialize quality analyzer: {exc}",
+            },
+        ) from exc
+
+    try:
+        summary = await analyzer.get_summary()
+
+        await _broadcast_quality_update(session_manager, summary)
+
+        return {"data": summary}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "SUMMARY_QUERY_FAILED",
+                "message": f"Failed to get quality summary: {exc}",
+            },
+        ) from exc
+
+
+async def _broadcast_quality_update(session_manager: SessionManager, summary: dict[str, Any]) -> None:
+    try:
+        active = await session_manager.get_active_sessions()
+        for s in active:
+            sid = s.get("id", "")
+            if sid:
+                await session_manager.publish_event(
+                    session_id=sid,
+                    event="quality.trend_update",
+                    data={"summary": summary},
+                )
+    except Exception as exc:
+        _logger.warning(
+            "Failed to broadcast quality trend update",
+            extra={"extra_data": {"error": str(exc)}},
+        )
 
 
 # --- Health endpoint ---
