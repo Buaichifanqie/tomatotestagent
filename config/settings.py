@@ -63,6 +63,7 @@ class TestAgentSettings(BaseSettings):
     docker_timeout_api: int = 60
     docker_timeout_web: int = 120
 
+    repo_path: str = ""
     data_retention_days: int = 90
 
     def get_database_url(self) -> str:
