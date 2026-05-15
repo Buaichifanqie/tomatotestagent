@@ -1,0 +1,23 @@
+FROM testagent-harness-base AS testagent-api-runner
+
+LABEL org.testagent.component="api_runner"
+LABEL org.testagent.description="TestAgent API test runner — 1CPU / 512MB resource profile"
+LABEL org.testagent.version="0.1.0"
+LABEL org.testagent.resource.cpus="1"
+LABEL org.testagent.resource.memory="512m"
+LABEL org.testagent.resource.timeout="60"
+
+USER root
+
+COPY docker/docker-entrypoint.api.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+USER testagent
+
+ENV TESTAGENT_ALLOW_LOCAL=0
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["testagent", "run", "--skill", "api_smoke_test"]

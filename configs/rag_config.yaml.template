@@ -1,0 +1,85 @@
+# TestAgent RAG Configuration Template
+# Copy this file to configs/rag_config.yaml and customize for your environment.
+
+rag:
+  embedding:
+    provider: "openai"           # "openai" | "local"
+    model: "text-embedding-3-small"  # OpenAI: text-embedding-3-small / text-embedding-3-large
+    local_model: "bge-large-zh-v1.5"  # Local embedding model (for provider: local)
+    dimensions: 1536             # Embedding vector dimensions
+
+  chunking:
+    strategy: "hybrid"           # "markdown" | "code" | "hybrid"
+    max_tokens: 512
+    overlap: 64
+
+  retrieval:
+    top_k: 10
+    top_k_candidates: 20         # Per-retriever candidates before RRF fusion
+    rrf_k: 60                    # RRF constant
+    min_score: 0.1               # Minimum similarity score threshold
+
+  collections:
+    req_docs:
+      description: "Product requirement documents and PRDs"
+      source_path: "./docs/requirements"
+      index_strategy: "vector+fulltext"
+      metadata_filters:
+        - "module"
+        - "version"
+      access_roles:
+        - "planner"
+
+    api_docs:
+      description: "OpenAPI / Swagger API specifications"
+      source_path: "./docs/api"
+      index_strategy: "vector+fulltext"
+      metadata_filters:
+        - "version"
+        - "service"
+      access_roles:
+        - "planner"
+        - "executor"
+
+    defect_history:
+      description: "Historical defects from Jira and test runs"
+      source_path: ""
+      index_strategy: "vector+fulltext"
+      metadata_filters:
+        - "severity"
+        - "category"
+        - "component"
+      access_roles:
+        - "planner"
+        - "analyzer"
+
+    test_reports:
+      description: "Historical test execution reports"
+      source_path: "./reports"
+      index_strategy: "vector+fulltext"
+      metadata_filters:
+        - "date"
+        - "environment"
+        - "status"
+      access_roles:
+        - "analyzer"
+
+    locator_library:
+      description: "UI element locator library for web and app testing"
+      source_path: "./locators"
+      index_strategy: "vector+fulltext"
+      metadata_filters:
+        - "platform"
+        - "page"
+      access_roles:
+        - "executor"
+
+    failure_patterns:
+      description: "Known failure patterns and their root causes"
+      source_path: ""
+      index_strategy: "vector+fulltext"
+      metadata_filters:
+        - "category"
+        - "component"
+      access_roles:
+        - "analyzer"

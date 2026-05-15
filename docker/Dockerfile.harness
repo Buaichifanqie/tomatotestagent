@@ -1,0 +1,35 @@
+FROM python:3.12-slim AS testagent-harness-base
+
+LABEL org.testagent.component="harness"
+LABEL org.testagent.description="TestAgent Harness base image — API & Web test runner runtime"
+LABEL org.testagent.version="0.1.0"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/testagent
+
+COPY pyproject.toml /opt/testagent/
+COPY testagent/ /opt/testagent/testagent/
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir \
+        httpx>=0.27 \
+        jsonschema>=4.21 \
+        pytest>=8.0 \
+        pytest-asyncio>=0.23 \
+    && pip install --no-cache-dir -e /opt/testagent \
+    && rm -rf /root/.cache/pip
+
+RUN addgroup --system --gid 1001 testagent \
+    && adduser --system --uid 1001 --gid 1001 --disabled-password --no-create-home testagent
+
+USER testagent
+
+ENTRYPOINT ["testagent"]
+CMD ["--help"]

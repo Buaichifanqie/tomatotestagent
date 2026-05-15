@@ -1,0 +1,46 @@
+FROM testagent-harness-base AS testagent-web-runner
+
+LABEL org.testagent.component="web_runner"
+LABEL org.testagent.description="TestAgent Web test runner with Playwright + Chromium — 2CPU / 2GB resource profile"
+LABEL org.testagent.version="0.1.0"
+LABEL org.testagent.resource.cpus="2"
+LABEL org.testagent.resource.memory="2g"
+LABEL org.testagent.resource.timeout="120"
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir playwright>=1.40 \
+    && python3 -m playwright install --with-deps chromium \
+    && rm -rf /root/.cache/pip /root/.cache/ms-playwright
+
+COPY docker/docker-entrypoint.web.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+USER testagent
+
+ENV TESTAGENT_ALLOW_LOCAL=0
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/testagent/.cache/ms-playwright
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["testagent", "run", "--skill", "web_smoke_test"]

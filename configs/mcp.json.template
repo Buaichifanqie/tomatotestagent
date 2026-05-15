@@ -1,0 +1,74 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcp/main/schema.json",
+  "meta": {
+    "version": "1.0",
+    "description": "TestAgent MCP Server registration configuration template",
+    "docs": "Copy this file to configs/mcp.json and fill in your actual values."
+  },
+  "servers": {
+    "api_server": {
+      "description": "API test execution server - sends HTTP requests and validates responses",
+      "command": "python",
+      "args": ["-m", "testagent.mcp_servers.api_server"],
+      "env": {
+        "MCP_API_BASE_URL": "http://localhost:8080",
+        "MCP_API_TIMEOUT": "30",
+        "MCP_API_HEADERS": "{}"
+      },
+      "transport": "stdio",
+      "enabled": true
+    },
+    "playwright_server": {
+      "description": "Playwright browser automation server - drives Chromium for web UI testing",
+      "command": "python",
+      "args": ["-m", "testagent.mcp_servers.playwright_server"],
+      "env": {
+        "MCP_PLAYWRIGHT_HEADLESS": "true",
+        "MCP_PLAYWRIGHT_BROWSER": "chromium",
+        "MCP_PLAYWRIGHT_VIEWPORT": "1280x720",
+        "MCP_PLAYWRIGHT_TIMEOUT": "30000"
+      },
+      "transport": "stdio",
+      "enabled": true
+    },
+    "jira_server": {
+      "description": "Jira integration server - creates/updates defects and test reports",
+      "command": "python",
+      "args": ["-m", "testagent.mcp_servers.jira_server"],
+      "env": {
+        "MCP_JIRA_URL": "https://your-domain.atlassian.net",
+        "MCP_JIRA_EMAIL": "bot@example.com",
+        "MCP_JIRA_API_TOKEN": "${JIRA_API_TOKEN}",
+        "MCP_JIRA_PROJECT_KEY": "TEST"
+      },
+      "transport": "stdio",
+      "enabled": true
+    },
+    "git_server": {
+      "description": "Git integration server - creates branches, commits, and PRs for test results",
+      "command": "python",
+      "args": ["-m", "testagent.mcp_servers.git_server"],
+      "env": {
+        "MCP_GIT_REPO_PATH": "${PWD}",
+        "MCP_GIT_USER_NAME": "TestAgent Bot",
+        "MCP_GIT_USER_EMAIL": "bot@example.com",
+        "MCP_GIT_BRANCH_PREFIX": "testagent/"
+      },
+      "transport": "stdio",
+      "enabled": true
+    },
+    "database_server": {
+      "description": "Database query server - executes SQL queries for database verification",
+      "command": "python",
+      "args": ["-m", "testagent.mcp_servers.database_server"],
+      "env": {
+        "MCP_DB_CONNECTION_STRING": "${TEST_DATABASE_URL}",
+        "MCP_DB_MAX_ROWS": "100",
+        "MCP_DB_QUERY_TIMEOUT": "10",
+        "MCP_DB_READ_ONLY": "true"
+      },
+      "transport": "stdio",
+      "enabled": true
+    }
+  }
+}
