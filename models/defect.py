@@ -29,5 +29,7 @@ class Defect(BaseModel):
     jira_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
     root_cause: Mapped[dict[str, object] | None] = mapped_column(JSONType, nullable=True)
+    original_defect_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    occurrence_count: Mapped[int] = mapped_column(default=1, nullable=False)
 
     result: Mapped["TestResult"] = relationship()  # noqa: UP037

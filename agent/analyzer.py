@@ -10,6 +10,7 @@ from testagent.common.logging import get_logger
 
 if TYPE_CHECKING:
     from testagent.agent.context import ContextAssembler
+    from testagent.agent.defect_dedup import DefectDeduplicator
     from testagent.agent.root_cause import RootCauseAnalyzer
     from testagent.llm.base import ILLMProvider
 
@@ -27,10 +28,12 @@ class AnalyzerAgent:
         llm: ILLMProvider,
         context_assembler: ContextAssembler,
         root_cause_analyzer: RootCauseAnalyzer | None = None,
+        defect_deduplicator: DefectDeduplicator | None = None,
     ) -> None:
         self._llm = llm
         self._context_assembler = context_assembler
         self._root_cause_analyzer = root_cause_analyzer
+        self._defect_deduplicator = defect_deduplicator
         self._todo = TodoManager()
 
     @property
@@ -78,9 +81,12 @@ class AnalyzerAgent:
         if defects and self._root_cause_analyzer is not None:
             analysis = await self._enrich_with_root_cause(analysis, task)
 
+        if defects and self._defect_deduplicator is not None:
+            analysis = await self._enrich_with_dedup(analysis)
+
         logger.info(
             "AnalyzerAgent execution completed",
-            extra={"extra_data": {"defect_count": len(defects)}},
+            extra={"extra_data": {"defect_count": len(analysis.get("defects", []))}},
         )
 
         return {
@@ -119,6 +125,40 @@ class AnalyzerAgent:
                         "Root cause analysis failed for defect",
                         extra={"extra_data": {"defect_id": defect_data.get("id", ""), "error": str(exc)}},
                     )
+
+            enriched_defects.append(defect_data)
+
+        analysis["defects"] = enriched_defects
+        return analysis
+
+    async def _enrich_with_dedup(
+        self,
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        defect_deduplicator = self._defect_deduplicator
+        assert defect_deduplicator is not None
+
+        defects = analysis.get("defects", [])
+        enriched_defects: list[dict[str, Any]] = []
+
+        for defect_data in defects:
+            try:
+                dedup_result = await defect_deduplicator.check_duplicate(defect_data)
+
+                defect_data["dedup_info"] = dedup_result.to_dict()
+                defect_data["is_duplicate"] = dedup_result.is_duplicate
+
+                if dedup_result.is_duplicate:
+                    defect_data["original_defect_id"] = dedup_result.original_defect_id
+                    defect_data["action"] = "link_existing"
+
+                await defect_deduplicator.write_back_to_rag(defect_data, dedup_result)
+            except Exception as exc:
+                logger.warning(
+                    "Defect deduplication failed for defect, proceeding without dedup",
+                    extra={"extra_data": {"defect_id": defect_data.get("id", ""), "error": str(exc)}},
+                )
+                defect_data["is_duplicate"] = False
 
             enriched_defects.append(defect_data)
 

@@ -1,5 +1,6 @@
 from testagent.agent.analyzer import AnalyzerAgent
 from testagent.agent.context import AgentType, AssembledContext, ContextAssembler
+from testagent.agent.defect_dedup import DeduplicationResult, DefectDeduplicator
 from testagent.agent.executor import ExecutorAgent
 from testagent.agent.loop import TOOL_HANDLERS, dispatch_tool, register_tool_handler
 from testagent.agent.planner import PlannerAgent
@@ -13,6 +14,8 @@ __all__ = [
     "AnalyzerAgent",
     "AssembledContext",
     "ContextAssembler",
+    "DeduplicationResult",
+    "DefectDeduplicator",
     "ExecutorAgent",
     "PlannerAgent",
     "RootCauseAnalyzer",
