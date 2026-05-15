@@ -39,7 +39,17 @@ apiClient.interceptors.request.use(
 );
 
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    if (
+      response.data &&
+      typeof response.data === 'object' &&
+      'data' in response.data &&
+      !response.config.url?.includes('/rag/query')
+    ) {
+      response.data = response.data.data;
+    }
+    return response;
+  },
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('auth_token');
@@ -114,7 +124,7 @@ export const api = {
       apiClient.get<TrendsResponse>('/quality/trends', { params: { metric, days } }).then((r) => r.data),
 
     summary: () =>
-      apiClient.get<{ data: QualitySummary }>('/quality/summary').then((r) => r.data.data),
+      apiClient.get<QualitySummary>('/quality/summary').then((r) => r.data),
   },
 
   defects: {

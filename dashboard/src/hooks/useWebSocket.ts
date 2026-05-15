@@ -10,7 +10,7 @@ const WS_MAX_RETRIES = 10;
 
 function getWebSocketUrl(): string {
   const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
-  const wsBase = baseUrl.replace(/^http/, 'ws').replace(/\/api\/v1\/?$/, '');
+  const wsBase = baseUrl.replace(/^http/, 'ws');
   const token = localStorage.getItem('auth_token');
   const authParam = token ? `?token=${token}` : '';
   return `${wsBase}/ws${authParam}`;
