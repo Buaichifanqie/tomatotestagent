@@ -67,6 +67,7 @@ class SessionManager:
     def __init__(self, redis_client: Any = None) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._subscribers: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
+        self._global_subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._lock = asyncio.Lock()
         self._logger = _logger
         self._redis = redis_client
@@ -162,7 +163,7 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session is not None and session["status"] in ("completed", "failed"):
                 yield {
-                    "event": f"session.{session['status']}",
+                    "event_type": f"session.{session['status']}",
                     "session_id": session_id,
                     "data": session,
                     "timestamp": datetime.now(UTC).isoformat(),
@@ -178,7 +179,7 @@ class SessionManager:
             while True:
                 event = await queue.get()
                 yield event
-                if event.get("event") in ("session.completed", "session.failed"):
+                if event.get("event_type") in ("session.completed", "session.failed"):
                     break
         finally:
             async with self._lock:
@@ -199,18 +200,32 @@ class SessionManager:
             )
         await self._broadcast(session_id, event, data or {})
 
+    async def subscribe_global(self) -> asyncio.Queue[dict[str, Any]]:
+        """Subscribe to ALL session events globally."""
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        async with self._lock:
+            self._global_subscribers.append(q)
+        return q
+
+    async def unsubscribe_global(self, q: asyncio.Queue[dict[str, Any]]) -> None:
+        """Unsubscribe from global events."""
+        async with self._lock:
+            if q in self._global_subscribers:
+                self._global_subscribers.remove(q)
+
     async def _broadcast(self, session_id: str, event: str, data: dict[str, Any]) -> None:
         async with self._lock:
             subs = list(self._subscribers.get(session_id, []))
-        if not subs:
-            return
+            global_subs = list(self._global_subscribers)
         message: dict[str, Any] = {
-            "event": event,
+            "event_type": event,
             "session_id": session_id,
             "data": data,
             "timestamp": datetime.now(UTC).isoformat(),
         }
         for queue in subs:
+            await queue.put(message)
+        for queue in global_subs:
             await queue.put(message)
 
     async def broadcast_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:

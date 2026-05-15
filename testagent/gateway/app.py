@@ -77,7 +77,7 @@ def create_app() -> FastAPI:
             await websocket.accept()
             await websocket.send_json(
                 {
-                    "event": "error",
+                    "event_type": "error",
                     "session_id": session_id,
                     "data": {"code": "WS_UNAVAILABLE", "message": "WebSocket manager not available"},
                 }
@@ -86,8 +86,49 @@ def create_app() -> FastAPI:
             return
         await ws_manager.handle_websocket(websocket, session_id)
 
+    @app.websocket("/api/v1/ws")
+    async def global_websocket(websocket: WebSocket) -> None:
+        mgr: SessionManager | None = getattr(app.state, "session_manager", None)
+        if mgr is None:
+            await websocket.accept()
+            await websocket.send_json(
+                {
+                    "event_type": "error",
+                    "data": {"code": "SESSION_MANAGER_UNAVAILABLE", "message": "Session manager not available"},
+                }
+            )
+            await websocket.close()
+            return
+        await websocket.accept()
+        try:
+            import asyncio
+            from datetime import UTC, datetime
+
+            q = await mgr.subscribe_global()
+            try:
+                while True:
+                    try:
+                        message = await asyncio.wait_for(q.get(), timeout=30.0)
+                        message["timestamp"] = datetime.now(UTC).isoformat()
+                        await websocket.send_json(message)
+                    except asyncio.TimeoutError:
+                        try:
+                            await websocket.send_json({"event_type": "ping"})
+                        except Exception:
+                            break
+            finally:
+                await mgr.unsubscribe_global(q)
+        except Exception as exc:
+            _logger.warning(
+                "Global WebSocket connection error",
+                extra={"extra_data": {"error": str(exc)}},
+            )
+
     return app
 
 
 def _resolve_api_token(settings: Any) -> str | None:
     return os.environ.get("TESTAGENT_API_TOKEN") or os.environ.get("TESTAGENT_GATEWAY_TOKEN")
+
+
+app = create_app()

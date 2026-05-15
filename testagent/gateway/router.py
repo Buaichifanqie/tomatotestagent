@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -99,17 +100,38 @@ def _list_skill_files() -> list[Path]:
 
 @router.post("/api/v1/sessions", status_code=201)
 async def create_session(
-    name: str = Body(..., embed=True),
-    trigger_type: str = Body("manual", embed=True),
-    input_context: dict[str, object] | None = Body(None, embed=True),
+    body: dict[str, object] = Body(...),
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
+    skill_name = str(body.get("skill_name", body.get("name", "manual")))
+    test_type = str(body.get("test_type", "api"))
+    environment = str(body.get("environment", "dev"))
     session = await session_manager.create_session(
-        name=name,
-        trigger_type=trigger_type,
-        input_context=input_context,
+        name=skill_name,
+        trigger_type="manual",
+        input_context={
+            "test_type": test_type,
+            "skill_name": skill_name,
+            "environment": environment,
+        },
     )
-    return {"data": session}
+    return session
+
+
+@router.get("/api/v1/sessions")
+async def list_sessions(
+    page: int = 1,
+    page_size: int = 20,
+    status: str | None = None,
+    session_manager: SessionManager = Depends(_get_session_manager),
+) -> dict[str, Any]:
+    all_sessions = await session_manager.list_sessions()
+    if status:
+        all_sessions = [s for s in all_sessions if s.get("status") == status]
+    total = len(all_sessions)
+    start = (page - 1) * page_size
+    items = all_sessions[start : start + page_size]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/api/v1/sessions/{session_id}")
@@ -118,16 +140,25 @@ async def get_session(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     session = await session_manager.get_session(session_id)
-    return {"data": session}
+    return session
+
+
+@router.get("/api/v1/sessions/{session_id}/plan")
+async def get_session_plan(
+    session_id: str = PathParam(...),
+    session_manager: SessionManager = Depends(_get_session_manager),
+) -> dict[str, Any]:
+    await session_manager.get_session(session_id)
+    return {"tasks": [], "strategy": "sequential", "session_id": session_id}
 
 
 @router.get("/api/v1/sessions/{session_id}/plans")
 async def get_session_plans(
     session_id: str = PathParam(...),
     session_manager: SessionManager = Depends(_get_session_manager),
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     await session_manager.get_session(session_id)
-    return {"data": []}
+    return []
 
 
 @router.get("/api/v1/sessions/{session_id}/results")
@@ -136,7 +167,14 @@ async def get_session_results(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     await session_manager.get_session(session_id)
-    return {"data": []}
+    return {"items": [], "total": 0, "page": 1, "page_size": 20}
+
+
+@router.get("/api/v1/results/{task_id}")
+async def get_task_result(
+    task_id: str = PathParam(...),
+) -> dict[str, Any]:
+    return {"id": task_id, "status": "unknown", "message": "Not yet implemented"}
 
 
 @router.post("/api/v1/sessions/{session_id}/cancel")
@@ -145,7 +183,7 @@ async def cancel_session(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     session = await session_manager.cancel_session(session_id)
-    return {"data": session}
+    return session
 
 
 # --- Skill endpoints ---
@@ -158,7 +196,7 @@ async def list_skills() -> dict[str, Any]:
         parsed = _parse_skill_file(filepath)
         if parsed is not None:
             skills.append(parsed)
-    return {"data": skills}
+    return {"items": skills, "total": len(skills)}
 
 
 @router.get("/api/v1/skills/{skill_name}")
@@ -169,7 +207,7 @@ async def get_skill_detail(
         if filepath.stem == skill_name or filepath.stem.lower() == skill_name.lower():
             parsed = _parse_skill_file(filepath)
             if parsed is not None:
-                return {"data": parsed}
+                return parsed
 
     raise HTTPException(
         status_code=404,
@@ -186,20 +224,18 @@ async def get_skill_detail(
 @router.get("/api/v1/mcp/servers")
 async def list_mcp_servers(
     registry: MCPRegistry = Depends(_get_mcp_registry),
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     try:
         servers = await registry.list_servers()
-        return {
-            "data": [
-                {
-                    "name": s.name,
-                    "status": s.status,
-                    "tools_count": len(s.tools),
-                    "resources_count": len(s.resources),
-                }
-                for s in servers
-            ]
-        }
+        return [
+            {
+                "name": s.name,
+                "status": s.status,
+                "tools_count": len(s.tools),
+                "resources_count": len(s.resources),
+            }
+            for s in servers
+        ]
     except Exception as exc:
         from fastapi import HTTPException
 
@@ -214,28 +250,37 @@ async def list_mcp_servers(
 
 @router.post("/api/v1/mcp/servers", status_code=201)
 async def register_mcp_server(
-    server_name: str = Body(..., embed=True),
-    command: str = Body(..., embed=True),
-    args: dict[str, object] | None = Body(None, embed=True),
-    env: dict[str, object] | None = Body(None, embed=True),
+    body: dict[str, object] = Body(...),
     registry: MCPRegistry = Depends(_get_mcp_registry),
 ) -> dict[str, Any]:
+    server_name = str(body.get("name", body.get("server_name", "")))
+    command = str(body.get("command", ""))
+    raw_args = body.get("args")
+    raw_env = body.get("env")
+
+    if not server_name or not command:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_MCP_CONFIG",
+                "message": "Both 'name' and 'command' are required",
+            },
+        )
+
     try:
         from testagent.models.mcp_config import MCPConfig
 
         config = MCPConfig(
             server_name=server_name,
             command=command,
-            args=args,
-            env=env,
+            args=raw_args if isinstance(raw_args, dict) else {},
+            env=raw_env if isinstance(raw_env, dict) else {},
         )
         info = await registry.register(config)
         return {
-            "data": {
-                "name": info.name,
-                "status": info.status,
-                "tools_count": len(info.tools),
-            }
+            "name": info.name,
+            "status": info.status,
+            "tools_count": len(info.tools),
         }
     except TestAgentError:
         raise
@@ -259,11 +304,9 @@ async def check_mcp_health(
     try:
         info = await registry.lookup(server_name)
         return {
-            "data": {
-                "name": info.name,
-                "status": info.status,
-                "healthy": info.status == "healthy",
-            }
+            "name": info.name,
+            "status": info.status,
+            "healthy": info.status == "healthy",
         }
     except MCPServerUnavailableError as exc:
         from fastapi import HTTPException
@@ -282,41 +325,167 @@ async def check_mcp_health(
 
 @router.post("/api/v1/rag/index")
 async def trigger_rag_index(
-    source: str = Body(..., embed=True),
-    collection: str = Body(..., embed=True),
+    body: dict[str, object] = Body(...),
 ) -> dict[str, Any]:
+    source = str(body.get("source", ""))
+    collection = str(body.get("collection", ""))
     _logger.info(
         "RAG index triggered",
         extra={"extra_data": {"source": source, "collection": collection}},
     )
     return {
-        "data": {
-            "source": source,
-            "collection": collection,
-            "status": "queued",
-            "message": "RAG indexing task has been queued",
-        }
+        "source": source,
+        "collection": collection,
+        "status": "queued",
+        "message": "RAG indexing task has been queued",
     }
 
 
 @router.post("/api/v1/rag/query")
 async def rag_query(
-    query: str = Body(..., embed=True),
-    collection: str = Body("req_docs", embed=True),
-    top_k: int = Body(5, embed=True),
-) -> dict[str, Any]:
+    body: dict[str, object] = Body(...),
+) -> list[dict[str, Any]]:
+    query = str(body.get("query", ""))
+    collections = body.get("collections", [])
+    top_k = int(body.get("top_k", 5))
+    collection_str = str(body.get("collection", "req_docs"))
     _logger.info(
         "RAG query received",
-        extra={"extra_data": {"collection": collection, "top_k": top_k}},
+        extra={"extra_data": {"collection": collection_str, "top_k": top_k}},
+    )
+    return []
+
+
+@router.get("/api/v1/rag")
+async def list_rag_collections() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "req_docs",
+            "name": "需求文档",
+            "type": "vector+fulltext",
+            "document_count": 0,
+        },
+        {
+            "id": "api_docs",
+            "name": "API 文档",
+            "type": "vector+fulltext",
+            "document_count": 0,
+        },
+        {
+            "id": "defect_history",
+            "name": "历史缺陷",
+            "type": "vector+fulltext+structured",
+            "document_count": 0,
+        },
+        {
+            "id": "test_reports",
+            "name": "测试报告",
+            "type": "vector+fulltext",
+            "document_count": 0,
+        },
+        {
+            "id": "locator_library",
+            "name": "定位器库",
+            "type": "vector+fulltext",
+            "document_count": 0,
+        },
+        {
+            "id": "failure_patterns",
+            "name": "失败模式库",
+            "type": "vector+structured",
+            "document_count": 0,
+        },
+    ]
+
+
+@router.delete("/api/v1/rag/{collection_id}", status_code=204)
+async def delete_rag_collection(
+    collection_id: str = PathParam(...),
+) -> None:
+    _logger.info(
+        "RAG collection delete requested",
+        extra={"extra_data": {"collection_id": collection_id}},
+    )
+    return None
+
+
+# --- Defect endpoints ---
+
+
+@router.get("/api/v1/defects")
+async def list_defects(
+    page: int = 1,
+    page_size: int = 20,
+    category: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    return {"items": [], "total": 0, "page": page, "page_size": page_size}
+
+
+@router.get("/api/v1/defects/{defect_id}")
+async def get_defect(
+    defect_id: str = PathParam(...),
+) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "code": "DEFECT_NOT_FOUND",
+            "message": f"Defect '{defect_id}' not found",
+        },
+    )
+
+
+@router.patch("/api/v1/defects/{defect_id}")
+async def update_defect(
+    defect_id: str = PathParam(...),
+    body: dict[str, object] = Body(...),
+) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "code": "DEFECT_NOT_FOUND",
+            "message": f"Defect '{defect_id}' not found",
+        },
+    )
+
+
+# --- Dashboard endpoints ---
+
+
+@router.get("/api/v1/dashboard/stats")
+async def get_dashboard_stats(
+    session_manager: SessionManager = Depends(_get_session_manager),
+) -> dict[str, Any]:
+    all_sessions = await session_manager.list_sessions()
+    total_sessions = len(all_sessions)
+    active_sessions = len(
+        [s for s in all_sessions if s.get("status") not in ("completed", "failed", "cancelled")]
     )
     return {
-        "data": {
-            "query": query,
-            "collection": collection,
-            "results": [],
-            "total": 0,
-        }
+        "total_sessions": total_sessions,
+        "active_sessions": active_sessions,
+        "total_tasks": 0,
+        "pass_rate": 0.0,
+        "defects_open": 0,
+        "trends": [],
     }
+
+
+@router.get("/api/v1/resources")
+async def get_system_resources() -> dict[str, Any]:
+    cpu_percent = 0.0
+    memory = {"total": 0, "available": 0, "percent": 0.0}
+    disk = {"total": 0, "used": 0, "free": 0, "percent": 0.0}
+    try:
+        import psutil
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        memory = {"total": mem.total, "available": mem.available, "percent": mem.percent}
+        d = psutil.disk_usage("/")
+        disk = {"total": d.total, "used": d.used, "free": d.free, "percent": d.percent}
+    except ImportError:
+        pass
+    return {"cpu": cpu_percent, "memory": memory, "disk": disk}
 
 
 # --- Report endpoint ---
@@ -329,18 +498,16 @@ async def get_test_report(
 ) -> dict[str, Any]:
     session = await session_manager.get_session(session_id)
     return {
-        "data": {
-            "session": session,
-            "plans": [],
-            "summary": {
-                "total_plans": 0,
-                "total_tasks": 0,
-                "passed": 0,
-                "failed": 0,
-                "flaky": 0,
-                "skipped": 0,
-            },
-        }
+        "session": session,
+        "plans": [],
+        "summary": {
+            "total_plans": 0,
+            "total_tasks": 0,
+            "passed": 0,
+            "failed": 0,
+            "flaky": 0,
+            "skipped": 0,
+        },
     }
 
 
@@ -396,7 +563,7 @@ async def get_quality_trends(
         else:
             data = []
 
-        return {"data": {"metric": metric, "days": days, "trends": data}}
+        return {"metric": metric, "days": days, "trends": data}
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -427,7 +594,7 @@ async def get_quality_summary(
 
         await _broadcast_quality_update(session_manager, summary)
 
-        return {"data": summary}
+        return summary
     except Exception as exc:
         raise HTTPException(
             status_code=500,

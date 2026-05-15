@@ -47,7 +47,7 @@ class EventBus:
                 extra={
                     "extra_data": {
                         "channel": full_channel,
-                        "event_type": event.get("event", "unknown"),
+                        "event_type": event.get("event_type", "unknown"),
                     }
                 },
             )
@@ -57,7 +57,7 @@ class EventBus:
                 extra={
                     "extra_data": {
                         "channel": channel,
-                        "event_type": event.get("event", "unknown"),
+                        "event_type": event.get("event_type", "unknown"),
                     }
                 },
             )

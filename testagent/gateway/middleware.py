@@ -63,7 +63,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: Any, max_requests: int = 5, window_seconds: int = 60) -> None:
+    def __init__(self, app: Any, max_requests: int = 100, window_seconds: int = 60) -> None:
         super().__init__(app)
         self._max_requests = max_requests
         self._window_seconds = window_seconds
