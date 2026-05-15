@@ -1,5 +1,6 @@
-import httpx
 import sys
+
+import httpx
 
 base = 'http://localhost:8000/api/v1'
 c = httpx.Client(base_url=base)

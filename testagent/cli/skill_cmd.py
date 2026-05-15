@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
+
+from testagent.skills.scaffold import SkillScaffold
 
 skill_app = typer.Typer(name="skill", help="Manage test skills", no_args_is_help=True)
 
@@ -27,17 +27,36 @@ def skill_list() -> None:
 
 @skill_app.command("create")
 def skill_create(
-    template: str = typer.Option("api_test", "--template", "-t", help="Skill template name"),
-    output: Path = typer.Option(Path("."), "--output", "-o", help="Output directory"),  # noqa: B008
+    name: str = typer.Option(..., "--name", "-n", help="Skill name, also used as directory name"),
+    template: str = typer.Option(
+        "api_test",
+        "--template",
+        "-t",
+        help="Template type: api_test/web_test/app_test/empty",
+    ),
+    output_dir: str = typer.Option("skills", "--output", "-o", help="Output directory for the skill scaffold"),
 ) -> None:
-    """Create a new skill from a template."""
-    from testagent.skills.templates import TEMPLATES
+    """
+    Create a Skill project scaffold.
 
-    if template not in TEMPLATES:
-        typer.echo(f"Unknown template: {template}. Available: {', '.join(TEMPLATES)}")
-        raise typer.Exit(1)
+    Generates a skills/<name>/ directory with:
+    - SKILL.md: YAML Front Matter + Markdown Body template
+    - README.md: Skill usage instructions
 
-    content = TEMPLATES[template]
-    filepath = output / f"{template}.md"
-    filepath.write_text(content, encoding="utf-8")
-    typer.echo(f"Created skill at {filepath}")
+    Pre-fills required_mcp_servers and required_rag_collections based on the chosen template.
+    """
+    scaffold = SkillScaffold()
+
+    try:
+        result = scaffold.generate(name=name, template=template, output_dir=output_dir)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Created skill scaffold at: {result.skill_dir}")
+    typer.echo(f"  SKILL.md  : {result.skill_md_path}")
+    typer.echo(f"  README.md : {result.readme_path}")
+    typer.echo("")
+    typer.echo("To register and use this skill:")
+    typer.echo("  testagent skill list")
+    typer.echo(f"  testagent run --skill {name} --env staging")

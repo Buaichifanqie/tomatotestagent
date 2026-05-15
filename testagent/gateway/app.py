@@ -111,7 +111,7 @@ def create_app() -> FastAPI:
                         message = await asyncio.wait_for(q.get(), timeout=30.0)
                         message["timestamp"] = datetime.now(UTC).isoformat()
                         await websocket.send_json(message)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         try:
                             await websocket.send_json({"event_type": "ping"})
                         except Exception:

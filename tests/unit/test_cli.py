@@ -130,15 +130,18 @@ class TestCliCommands:
         assert "No skills registered" in result.stdout
 
     def test_skill_create_unknown_template(self, runner: CliRunner) -> None:
-        result = runner.invoke(app, ["skill", "create", "--template", "nonexistent"])
+        result = runner.invoke(app, ["skill", "create", "--name", "test_skill", "--template", "nonexistent"])
         assert result.exit_code == 1
         assert "Unknown template" in result.stdout
 
     def test_skill_create_from_template(self, runner: CliRunner, temp_project: Path) -> None:
-        result = runner.invoke(app, ["skill", "create", "--template", "api_test", "--output", str(temp_project)])
+        result = runner.invoke(
+            app, ["skill", "create", "--name", "my_skill", "--template", "api_test", "--output", str(temp_project)]
+        )
         assert result.exit_code == 0
         assert "Created skill" in result.stdout
-        assert (temp_project / "api_test.md").exists()
+        assert (temp_project / "my_skill" / "SKILL.md").exists()
+        assert (temp_project / "my_skill" / "README.md").exists()
 
     def test_mcp_help(self, runner: CliRunner) -> None:
         result = runner.invoke(app, ["mcp", "--help"])
