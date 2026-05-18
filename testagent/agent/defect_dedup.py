@@ -243,7 +243,7 @@ Is this new defect a duplicate of the existing defect?"""
                     except (json.JSONDecodeError, ValueError):
                         import re
 
-                        json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+                        json_match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
                         if json_match:
                             try:
                                 parsed = json.loads(json_match.group())

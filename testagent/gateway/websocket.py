@@ -40,7 +40,7 @@ class SessionWebSocketManager:
         except TestAgentError:
             await websocket.send_json(
                 {
-                    "event_type": "error",
+                    "event": "error",
                     "session_id": session_id,
                     "data": {"code": "SESSION_NOT_FOUND", "message": f"Session '{session_id}' not found"},
                 }
@@ -122,7 +122,7 @@ class SessionWebSocketManager:
                     try:
                         await websocket.send_json(
                             {
-                                "event_type": "heartbeat",
+                                "event": "heartbeat",
                                 "session_id": session_id,
                                 "data": {},
                                 "timestamp": datetime.now(UTC).isoformat(),
@@ -151,7 +151,7 @@ class SessionWebSocketManager:
                     except TestAgentError as exc:
                         await websocket.send_json(
                             {
-                                "event_type": "error",
+                                "event": "error",
                                 "session_id": session_id,
                                 "data": {"code": exc.code, "message": exc.message},
                             }

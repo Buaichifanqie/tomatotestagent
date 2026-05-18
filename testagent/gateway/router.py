@@ -102,19 +102,16 @@ async def create_session(
     body: dict[str, object] = Body(...),
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
-    skill_name = str(body.get("skill_name", body.get("name", "manual")))
-    test_type = str(body.get("test_type", "api"))
-    environment = str(body.get("environment", "dev"))
+    name = str(body.get("name", "manual"))
+    trigger_type = str(body.get("trigger_type", "manual"))
+    raw_input = body.get("input_context")
+    input_context = raw_input if isinstance(raw_input, dict) else {}
     session = await session_manager.create_session(
-        name=skill_name,
-        trigger_type="manual",
-        input_context={
-            "test_type": test_type,
-            "skill_name": skill_name,
-            "environment": environment,
-        },
+        name=name,
+        trigger_type=trigger_type,
+        input_context=input_context,
     )
-    return session
+    return {"data": session}
 
 
 @router.get("/api/v1/sessions")
@@ -130,7 +127,7 @@ async def list_sessions(
     total = len(all_sessions)
     start = (page - 1) * page_size
     items = all_sessions[start : start + page_size]
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    return {"data": {"items": items, "total": total, "page": page, "page_size": page_size}}
 
 
 @router.get("/api/v1/sessions/{session_id}")
@@ -139,7 +136,7 @@ async def get_session(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     session = await session_manager.get_session(session_id)
-    return session
+    return {"data": session}
 
 
 @router.get("/api/v1/sessions/{session_id}/plan")
@@ -148,16 +145,16 @@ async def get_session_plan(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     await session_manager.get_session(session_id)
-    return {"tasks": [], "strategy": "sequential", "session_id": session_id}
+    return {"data": {"tasks": [], "strategy": "sequential", "session_id": session_id}}
 
 
 @router.get("/api/v1/sessions/{session_id}/plans")
 async def get_session_plans(
     session_id: str = PathParam(...),
     session_manager: SessionManager = Depends(_get_session_manager),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     await session_manager.get_session(session_id)
-    return []
+    return {"data": []}
 
 
 @router.get("/api/v1/sessions/{session_id}/results")
@@ -166,7 +163,7 @@ async def get_session_results(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     await session_manager.get_session(session_id)
-    return {"items": [], "total": 0, "page": 1, "page_size": 20}
+    return {"data": []}
 
 
 @router.get("/api/v1/results/{task_id}")
@@ -182,7 +179,7 @@ async def cancel_session(
     session_manager: SessionManager = Depends(_get_session_manager),
 ) -> dict[str, Any]:
     session = await session_manager.cancel_session(session_id)
-    return session
+    return {"data": session}
 
 
 # --- Skill endpoints ---
@@ -195,7 +192,7 @@ async def list_skills() -> dict[str, Any]:
         parsed = _parse_skill_file(filepath)
         if parsed is not None:
             skills.append(parsed)
-    return {"items": skills, "total": len(skills)}
+    return {"data": skills}
 
 
 @router.get("/api/v1/skills/{skill_name}")
@@ -223,21 +220,21 @@ async def get_skill_detail(
 @router.get("/api/v1/mcp/servers")
 async def list_mcp_servers(
     registry: MCPRegistry = Depends(_get_mcp_registry),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     try:
         servers = await registry.list_servers()
-        return [
-            {
-                "name": s.name,
-                "status": s.status,
-                "tools_count": len(s.tools),
-                "resources_count": len(s.resources),
-            }
-            for s in servers
-        ]
+        return {
+            "data": [
+                {
+                    "name": s.name,
+                    "status": s.status,
+                    "tools_count": len(s.tools),
+                    "resources_count": len(s.resources),
+                }
+                for s in servers
+            ]
+        }
     except Exception as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(
             status_code=500,
             detail={
@@ -277,15 +274,15 @@ async def register_mcp_server(
         )
         info = await registry.register(config)
         return {
-            "name": info.name,
-            "status": info.status,
-            "tools_count": len(info.tools),
+            "data": {
+                "name": info.name,
+                "status": info.status,
+                "tools_count": len(info.tools),
+            }
         }
     except TestAgentError:
         raise
     except Exception as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(
             status_code=500,
             detail={
@@ -303,13 +300,13 @@ async def check_mcp_health(
     try:
         info = await registry.lookup(server_name)
         return {
-            "name": info.name,
-            "status": info.status,
-            "healthy": info.status == "healthy",
+            "data": {
+                "name": info.name,
+                "status": info.status,
+                "healthy": info.status == "healthy",
+            }
         }
     except MCPServerUnavailableError as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(
             status_code=404,
             detail={
@@ -333,26 +330,27 @@ async def trigger_rag_index(
         extra={"extra_data": {"source": source, "collection": collection}},
     )
     return {
-        "source": source,
-        "collection": collection,
-        "status": "queued",
-        "message": "RAG indexing task has been queued",
+        "data": {
+            "source": source,
+            "collection": collection,
+            "status": "queued",
+            "message": "RAG indexing task has been queued",
+        }
     }
 
 
 @router.post("/api/v1/rag/query")
 async def rag_query(
     body: dict[str, object] = Body(...),
-) -> list[dict[str, Any]]:
-    query = str(body.get("query", ""))
-    collections = body.get("collections", [])
-    top_k = int(body.get("top_k", 5))
+) -> dict[str, Any]:
+    query_text = str(body.get("query", ""))
+    top_k = int(str(body.get("top_k", "5")))
     collection_str = str(body.get("collection", "req_docs"))
     _logger.info(
         "RAG query received",
         extra={"extra_data": {"collection": collection_str, "top_k": top_k}},
     )
-    return []
+    return {"data": {"query": query_text, "collection": collection_str, "top_k": top_k, "total": 0, "results": []}}
 
 
 @router.get("/api/v1/rag")
@@ -457,9 +455,7 @@ async def get_dashboard_stats(
 ) -> dict[str, Any]:
     all_sessions = await session_manager.list_sessions()
     total_sessions = len(all_sessions)
-    active_sessions = len(
-        [s for s in all_sessions if s.get("status") not in ("completed", "failed", "cancelled")]
-    )
+    active_sessions = len([s for s in all_sessions if s.get("status") not in ("completed", "failed", "cancelled")])
     return {
         "total_sessions": total_sessions,
         "active_sessions": active_sessions,
@@ -477,6 +473,7 @@ async def get_system_resources() -> dict[str, Any]:
     disk = {"total": 0, "used": 0, "free": 0, "percent": 0.0}
     try:
         import psutil
+
         cpu_percent = psutil.cpu_percent(interval=0.1)
         mem = psutil.virtual_memory()
         memory = {"total": mem.total, "available": mem.available, "percent": mem.percent}
@@ -497,16 +494,18 @@ async def get_test_report(
 ) -> dict[str, Any]:
     session = await session_manager.get_session(session_id)
     return {
-        "session": session,
-        "plans": [],
-        "summary": {
-            "total_plans": 0,
-            "total_tasks": 0,
-            "passed": 0,
-            "failed": 0,
-            "flaky": 0,
-            "skipped": 0,
-        },
+        "data": {
+            "session": session,
+            "plans": [],
+            "summary": {
+                "total_plans": 0,
+                "total_tasks": 0,
+                "passed": 0,
+                "failed": 0,
+                "flaky": 0,
+                "skipped": 0,
+            },
+        }
     }
 
 
@@ -562,7 +561,7 @@ async def get_quality_trends(
         else:
             data = []
 
-        return {"metric": metric, "days": days, "trends": data}
+        return {"data": {"metric": metric, "days": days, "trends": data}}
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -593,7 +592,7 @@ async def get_quality_summary(
 
         await _broadcast_quality_update(session_manager, summary)
 
-        return summary
+        return {"data": summary}
     except Exception as exc:
         raise HTTPException(
             status_code=500,

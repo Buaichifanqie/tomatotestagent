@@ -114,27 +114,33 @@ Traceback (most recent call last):
 
     async def _mock_call_tool(tool_name: str, arguments: dict[str, Any]) -> str:
         if tool_name == "git_blame":
-            return json.dumps({
-                "output": "abc123def (John Doe 2026-05-14 10:00:00 +0800 142) db_query_timeout_fix",
-            })
+            return json.dumps(
+                {
+                    "output": "abc123def (John Doe 2026-05-14 10:00:00 +0800 142) db_query_timeout_fix",
+                }
+            )
         if tool_name == "git_log":
-            return json.dumps({
-                "output": (
-                    "commit abc123def\nAuthor: John Doe\nDate: 2026-05-14\n\n"
-                    "    fix: increase db connection pool timeout\n\n"
-                    "commit def456789\nAuthor: John Doe\nDate: 2026-05-13\n\n"
-                    "    feat: add user list endpoint"
-                ),
-            })
+            return json.dumps(
+                {
+                    "output": (
+                        "commit abc123def\nAuthor: John Doe\nDate: 2026-05-14\n\n"
+                        "    fix: increase db connection pool timeout\n\n"
+                        "commit def456789\nAuthor: John Doe\nDate: 2026-05-13\n\n"
+                        "    feat: add user list endpoint"
+                    ),
+                }
+            )
         if tool_name == "git_diff":
-            return json.dumps({
-                "output": (
-                    "diff --git a/src/services/user_service.py "
-                    "b/src/services/user_service.py\n"
-                    "@@ -140,5 +140,6 @@\n-            timeout=5\n"
-                    "+            timeout=30"
-                ),
-            })
+            return json.dumps(
+                {
+                    "output": (
+                        "diff --git a/src/services/user_service.py "
+                        "b/src/services/user_service.py\n"
+                        "@@ -140,5 +140,6 @@\n-            timeout=5\n"
+                        "+            timeout=30"
+                    ),
+                }
+            )
         return json.dumps({"output": ""})
 
     mock_git_server.call_tool = AsyncMock(side_effect=_mock_call_tool)
@@ -144,20 +150,22 @@ Traceback (most recent call last):
         content=[
             {
                 "type": "text",
-                "text": json.dumps({
-                    "root_cause_type": "code_change",
-                    "confidence": 0.92,
-                    "reasoning": (
-                        "Recent commit abc123def changed the DB connection pool timeout "
-                        "from 5s to 30s, but also introduced a regression where the "
-                        "connection pool is exhausted under load."
-                    ),
-                    "suggestion": (
-                        "Revert the timeout change in user_service.py:142 and investigate "
-                        "the connection pool exhaustion issue separately. Consider adding "
-                        "a retry mechanism with exponential backoff."
-                    ),
-                }),
+                "text": json.dumps(
+                    {
+                        "root_cause_type": "code_change",
+                        "confidence": 0.92,
+                        "reasoning": (
+                            "Recent commit abc123def changed the DB connection pool timeout "
+                            "from 5s to 30s, but also introduced a regression where the "
+                            "connection pool is exhausted under load."
+                        ),
+                        "suggestion": (
+                            "Revert the timeout change in user_service.py:142 and investigate "
+                            "the connection pool exhaustion issue separately. Consider adding "
+                            "a retry mechanism with exponential backoff."
+                        ),
+                    }
+                ),
             }
         ],
         stop_reason="end_turn",
@@ -247,41 +255,49 @@ def _build_mock_trend_data(metric: str, days: int) -> list[dict[str, Any]]:
             passed = int(total * pass_rate / 100)
             failed = max(0, total - passed - max(0, day_num % 4))
             flaky = max(0, total - passed - failed)
-            trends.append({
-                "date": current_date.isoformat(),
-                "total": total,
-                "passed": passed,
-                "failed": failed,
-                "flaky": flaky,
-                "pass_rate": round(pass_rate, 1),
-            })
+            trends.append(
+                {
+                    "date": current_date.isoformat(),
+                    "total": total,
+                    "passed": passed,
+                    "failed": failed,
+                    "flaky": flaky,
+                    "pass_rate": round(pass_rate, 1),
+                }
+            )
         elif metric == "defect_density":
-            trends.append({
-                "week": f"{current_date.isoformat()}",
-                "critical": max(0, day_num % 5),
-                "major": max(0, day_num % 3),
-                "minor": max(0, day_num % 7),
-                "trivial": max(0, day_num % 4),
-                "total": day_num % 15,
-            })
+            trends.append(
+                {
+                    "week": f"{current_date.isoformat()}",
+                    "critical": max(0, day_num % 5),
+                    "major": max(0, day_num % 3),
+                    "minor": max(0, day_num % 7),
+                    "trivial": max(0, day_num % 4),
+                    "total": day_num % 15,
+                }
+            )
         elif metric == "coverage":
-            trends.append({
-                "date": current_date.isoformat(),
-                "api": min(100.0, 80.0 + day_num * 0.5),
-                "web": min(100.0, 60.0 + day_num * 1.0),
-                "app": min(100.0, 30.0 + day_num * 0.8),
-                "overall": min(100.0, 60.0 + day_num * 0.7),
-            })
+            trends.append(
+                {
+                    "date": current_date.isoformat(),
+                    "api": min(100.0, 80.0 + day_num * 0.5),
+                    "web": min(100.0, 60.0 + day_num * 1.0),
+                    "app": min(100.0, 30.0 + day_num * 0.8),
+                    "overall": min(100.0, 60.0 + day_num * 0.7),
+                }
+            )
         elif metric == "flaky_rate":
             flaky_rate = max(0.0, 15.0 - day_num * 0.4)
             total = 50 + (day_num % 20)
             flaky = int(total * flaky_rate / 100)
-            trends.append({
-                "date": current_date.isoformat(),
-                "total": total,
-                "flaky": flaky,
-                "flaky_rate": round(flaky_rate, 1),
-            })
+            trends.append(
+                {
+                    "date": current_date.isoformat(),
+                    "total": total,
+                    "flaky": flaky,
+                    "flaky_rate": round(flaky_rate, 1),
+                }
+            )
 
     return trends
 
@@ -307,15 +323,9 @@ async def test_quality_trends_api(
     # Create mock QualityTrendsAnalyzer
     mock_analyzer = MagicMock()
     mock_analyzer.get_pass_rate_trend = AsyncMock(return_value=expected_trends)
-    mock_analyzer.get_defect_density_trend = AsyncMock(
-        return_value=_build_mock_trend_data("defect_density", 30)
-    )
-    mock_analyzer.get_coverage_trend = AsyncMock(
-        return_value=_build_mock_trend_data("coverage", 30)
-    )
-    mock_analyzer.get_flaky_rate_trend = AsyncMock(
-        return_value=_build_mock_trend_data("flaky_rate", 30)
-    )
+    mock_analyzer.get_defect_density_trend = AsyncMock(return_value=_build_mock_trend_data("defect_density", 30))
+    mock_analyzer.get_coverage_trend = AsyncMock(return_value=_build_mock_trend_data("coverage", 30))
+    mock_analyzer.get_flaky_rate_trend = AsyncMock(return_value=_build_mock_trend_data("flaky_rate", 30))
 
     transport = ASGITransport(app=api_app)
 
@@ -451,9 +461,7 @@ async def test_defect_deduplication(
     """
     # Create mock DefectRepository
     mock_defect_repo = MagicMock(spec=DefectRepository)
-    mock_defect_repo.get_by_id = AsyncMock(
-        return_value=MagicMock(occurrence_count=2)
-    )
+    mock_defect_repo.get_by_id = AsyncMock(return_value=MagicMock(occurrence_count=2))
     mock_defect_repo.update = AsyncMock()
 
     defect_1: dict[str, Any] = {
@@ -513,14 +521,16 @@ async def test_defect_deduplication(
         content=[
             {
                 "type": "text",
-                "text": json.dumps({
-                    "similarity_score": 0.95,
-                    "reasoning": (
-                        "Both defects describe the same underlying issue: "
-                        "database connection pool exhaustion causing "
-                        "500 error on /api/users endpoint"
-                    ),
-                }),
+                "text": json.dumps(
+                    {
+                        "similarity_score": 0.95,
+                        "reasoning": (
+                            "Both defects describe the same underlying issue: "
+                            "database connection pool exhaustion causing "
+                            "500 error on /api/users endpoint"
+                        ),
+                    }
+                ),
             }
         ],
         stop_reason="end_turn",
@@ -671,9 +681,7 @@ async def test_defect_priority_evaluation(
 
     # Verify the severity makes sense for a critical bug category
     severity_scores = {"critical": 4, "major": 3, "minor": 2, "trivial": 1}
-    assert severity_scores.get(result.suggested_severity, 0) >= 2, (
-        "Critical bug should be at least minor severity"
-    )
+    assert severity_scores.get(result.suggested_severity, 0) >= 2, "Critical bug should be at least minor severity"
 
     # Verify impact score is weighted correctly
     assert result.impact_score > 0, "Impact score should be positive"
@@ -833,12 +841,8 @@ async def test_data_generation(
     assert sanitized["phone"] == "***masked***"
     assert sanitized["name"] == "***masked***"
     # Inline PII in notes should be sanitized by regex replacement
-    assert "u***@example.com" in sanitized["notes"], (
-        "Inline email in notes should be sanitized"
-    )
-    assert "138****0000" in sanitized["notes"], (
-        "Inline phone in notes should be sanitized"
-    )
+    assert "u***@example.com" in sanitized["notes"], "Inline email in notes should be sanitized"
+    assert "138****0000" in sanitized["notes"], "Inline phone in notes should be sanitized"
 
     # Verify id and age are preserved (not PII)
     assert sanitized["id"] == 4

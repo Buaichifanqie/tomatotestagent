@@ -167,6 +167,7 @@ class TestRootCauseAnalyzer:
         test_result_dict = _make_test_result_dict()
 
         from testagent.models.result import TestResult
+
         test_result = TestResult(**test_result_dict)
         result = await analyzer.analyze(defect_dict, test_result)
 
@@ -205,6 +206,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -241,6 +243,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -277,6 +280,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -302,6 +306,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -326,6 +331,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -346,6 +352,7 @@ class TestRootCauseAnalyzer:
         )
 
         from testagent.models.result import TestResult
+
         test_result = TestResult(
             task_id="task-001",
             status="failed",
@@ -373,6 +380,7 @@ class TestRootCauseAnalyzer:
         )
 
         from testagent.models.result import TestResult
+
         test_result = TestResult(
             task_id="task-001",
             status="failed",
@@ -397,6 +405,7 @@ class TestRootCauseAnalyzer:
         )
 
         from testagent.models.result import TestResult
+
         test_result = TestResult(
             task_id="task-001",
             status="failed",
@@ -421,6 +430,7 @@ class TestRootCauseAnalyzer:
         defect_dict = _make_defect_dict()
         result = RootCauseResult(defect_id="def-001", root_cause_type="code_change", confidence=0.85)
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         await analyzer._write_back_to_rag(defect_dict, test_result, result)
@@ -449,6 +459,7 @@ class TestRootCauseAnalyzer:
         defect_dict = _make_defect_dict()
         result = RootCauseResult(defect_id="def-001", root_cause_type="code_change", confidence=0.85)
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         await analyzer._write_back_to_rag(defect_dict, test_result, result)
@@ -469,6 +480,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(task_id="task-001", status="failed")
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -492,6 +504,7 @@ class TestRootCauseAnalyzer:
 
         defect_dict = _make_defect_dict()
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
 
         result = await analyzer.analyze(defect_dict, test_result)
@@ -528,6 +541,7 @@ class TestRootCauseAnalyzerNoRepoPath:
         assert analyzer._repo_path == ""
 
         from testagent.models.result import TestResult
+
         test_result = TestResult(**_make_test_result_dict())
         analyzer._extract_file_location("test error", test_result)
 

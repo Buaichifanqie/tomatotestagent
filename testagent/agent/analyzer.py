@@ -105,8 +105,7 @@ class AnalyzerAgent:
 
         defects = analysis.get("defects", [])
         test_results_map: dict[str, dict[str, Any]] = {
-            tr.get("result_id", tr.get("id", "")): tr
-            for tr in task.get("test_results", [])
+            tr.get("result_id", tr.get("id", "")): tr for tr in task.get("test_results", [])
         }
 
         enriched_defects: list[dict[str, Any]] = []
@@ -117,6 +116,7 @@ class AnalyzerAgent:
             if test_result_data:
                 try:
                     from testagent.models.result import TestResult
+
                     test_result = TestResult(**test_result_data)
                     result = await root_cause_analyzer.analyze(defect_data, test_result)
                     defect_data["root_cause"] = result.to_dict()

@@ -163,7 +163,7 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session is not None and session["status"] in ("completed", "failed"):
                 yield {
-                    "event_type": f"session.{session['status']}",
+                    "event": f"session.{session['status']}",
                     "session_id": session_id,
                     "data": session,
                     "timestamp": datetime.now(UTC).isoformat(),
@@ -179,7 +179,7 @@ class SessionManager:
             while True:
                 event = await queue.get()
                 yield event
-                if event.get("event_type") in ("session.completed", "session.failed"):
+                if event.get("event") in ("session.completed", "session.failed"):
                     break
         finally:
             async with self._lock:
@@ -218,7 +218,7 @@ class SessionManager:
             subs = list(self._subscribers.get(session_id, []))
             global_subs = list(self._global_subscribers)
         message: dict[str, Any] = {
-            "event_type": event,
+            "event": event,
             "session_id": session_id,
             "data": data,
             "timestamp": datetime.now(UTC).isoformat(),

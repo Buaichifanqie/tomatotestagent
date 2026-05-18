@@ -210,7 +210,7 @@ class TestCheckDuplicate:
                     "type": "text",
                     "text": (
                         '{"similarity_score": 0.94, "reasoning": "Both defects '
-                        'describe the same issue: login endpoint returns 500 '
+                        "describe the same issue: login endpoint returns 500 "
                         'on empty payload."}'
                     ),
                 }
@@ -264,7 +264,7 @@ class TestCheckDuplicate:
                     "type": "text",
                     "text": (
                         '{"similarity_score": 0.32, "reasoning": "These are '
-                        'different issues: one is a login API error, the '
+                        "different issues: one is a login API error, the "
                         'other is a UI layout problem."}'
                     ),
                 }
@@ -383,10 +383,7 @@ class TestCheckDuplicate:
             temperature: float = 0.7,
         ) -> MagicMock:
             user_msg = messages[0]["content"] if messages else ""
-            score = (
-                0.96 if "Login empty form" in user_msg or "Login form empty" in user_msg
-                else 0.12
-            )
+            score = 0.96 if "Login empty form" in user_msg or "Login form empty" in user_msg else 0.12
             return MagicMock(
                 content=[
                     {

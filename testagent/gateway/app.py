@@ -77,7 +77,7 @@ def create_app() -> FastAPI:
             await websocket.accept()
             await websocket.send_json(
                 {
-                    "event_type": "error",
+                    "event": "error",
                     "session_id": session_id,
                     "data": {"code": "WS_UNAVAILABLE", "message": "WebSocket manager not available"},
                 }
@@ -93,7 +93,7 @@ def create_app() -> FastAPI:
             await websocket.accept()
             await websocket.send_json(
                 {
-                    "event_type": "error",
+                    "event": "error",
                     "data": {"code": "SESSION_MANAGER_UNAVAILABLE", "message": "Session manager not available"},
                 }
             )
@@ -113,7 +113,7 @@ def create_app() -> FastAPI:
                         await websocket.send_json(message)
                     except TimeoutError:
                         try:
-                            await websocket.send_json({"event_type": "ping"})
+                            await websocket.send_json({"event": "ping"})
                         except Exception:
                             break
             finally:

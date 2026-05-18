@@ -127,7 +127,7 @@ class RootCauseAnalyzer:
 
         if test_result.logs:
             log_lines = test_result.logs.strip().split("\n")
-            tail_lines = log_lines[-min(len(log_lines), 200):]
+            tail_lines = log_lines[-min(len(log_lines), 200) :]
             parts.append("=== Test Logs (tail) ===")
             parts.extend(tail_lines)
 
@@ -138,9 +138,7 @@ class RootCauseAnalyzer:
         if test_result.artifacts:
             error_keywords = ("error", "exception", "traceback", "fail")
             error_fields = {
-                k: v
-                for k, v in test_result.artifacts.items()
-                if any(kw in k.lower() for kw in error_keywords)
+                k: v for k, v in test_result.artifacts.items() if any(kw in k.lower() for kw in error_keywords)
             }
             if error_fields:
                 parts.append("=== Error Artifacts ===")
@@ -167,13 +165,14 @@ class RootCauseAnalyzer:
             return file_path, line_number
 
         import re
+
         file_patterns = re.findall(
             r'(?:File|file)["\s]*:?["\s]*([a-zA-Z0-9_/\\\-]+\.(?:py|js|ts|java|go|rs|kt|swift))',
             error_info,
         )
         if file_patterns:
             file_path = file_patterns[0]
-            line_match = re.search(r'line\s+(\d+)', error_info)
+            line_match = re.search(r"line\s+(\d+)", error_info)
             if line_match:
                 line_number = int(line_match.group(1))
 
@@ -186,12 +185,15 @@ class RootCauseAnalyzer:
         commits: list[dict[str, Any]] = []
 
         if line_number is not None:
-            blame_result = await self._git_server.call_tool("git_blame", {
-                "repo_path": self._repo_path,
-                "file_path": file_path,
-                "start_line": line_number,
-                "end_line": line_number + 5,
-            })
+            blame_result = await self._git_server.call_tool(
+                "git_blame",
+                {
+                    "repo_path": self._repo_path,
+                    "file_path": file_path,
+                    "start_line": line_number,
+                    "end_line": line_number + 5,
+                },
+            )
             if isinstance(blame_result, str):
                 try:
                     blame_data = json.loads(blame_result)
@@ -199,17 +201,22 @@ class RootCauseAnalyzer:
                     blame_data = {"output": blame_result}
 
             if isinstance(blame_data, dict) and blame_data.get("output"):
-                commits.append({
-                    "file": file_path,
-                    "line": line_number,
-                    "blame_info": str(blame_data["output"]),
-                })
+                commits.append(
+                    {
+                        "file": file_path,
+                        "line": line_number,
+                        "blame_info": str(blame_data["output"]),
+                    }
+                )
 
-        log_result = await self._git_server.call_tool("git_log", {
-            "repo_path": self._repo_path,
-            "file_path": file_path,
-            "max_count": 5,
-        })
+        log_result = await self._git_server.call_tool(
+            "git_log",
+            {
+                "repo_path": self._repo_path,
+                "file_path": file_path,
+                "max_count": 5,
+            },
+        )
         if isinstance(log_result, str):
             try:
                 log_data = json.loads(log_result)
@@ -217,10 +224,12 @@ class RootCauseAnalyzer:
                 log_data = {"output": log_result}
 
         if isinstance(log_data, dict) and log_data.get("output"):
-            commits.append({
-                "file": file_path,
-                "recent_commits": str(log_data["output"]),
-            })
+            commits.append(
+                {
+                    "file": file_path,
+                    "recent_commits": str(log_data["output"]),
+                }
+            )
 
         return commits
 
@@ -228,11 +237,14 @@ class RootCauseAnalyzer:
         if not self._repo_path:
             return []
 
-        diff_result = await self._git_server.call_tool("git_diff", {
-            "repo_path": self._repo_path,
-            "path": file_path,
-            "commit_a": "HEAD~1",
-        })
+        diff_result = await self._git_server.call_tool(
+            "git_diff",
+            {
+                "repo_path": self._repo_path,
+                "path": file_path,
+                "commit_a": "HEAD~1",
+            },
+        )
         if isinstance(diff_result, str):
             try:
                 diff_data = json.loads(diff_result)
@@ -330,7 +342,8 @@ Respond with a JSON object containing:
                             return parsed
                     except (json.JSONDecodeError, ValueError):
                         import re
-                        json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+
+                        json_match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
                         if json_match:
                             try:
                                 parsed = json.loads(json_match.group())
