@@ -561,69 +561,69 @@ def _build_tasks_from_results(
 async def _run_appium_tests(appium_srv: Any) -> list[dict[str, Any]]:
     """直接执行 Appium 真实测试, 返回任务结果列表。"""
     import base64
-    import json
 
     import httpx
 
     appium_url = "http://localhost:4723"
     tasks: list[dict[str, Any]] = []
 
-    # 1. 健康检查
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        # 1. 健康检查
+        try:
             resp = await client.get(f"{appium_url}/status")
             healthy = resp.status_code == 200
-    except Exception:
-        healthy = False
+        except Exception:
+            healthy = False
 
-    tasks.append({
-        "name": "appium-server-health",
-        "status": "passed" if healthy else "failed",
-        "summary": "Appium server is running" if healthy else "Appium server unreachable",
-        "duration": "-",
-        "agent": "appium_direct",
-    })
+        tasks.append({
+            "name": "appium-server-health",
+            "status": "passed" if healthy else "failed",
+            "summary": "Appium server is running" if healthy else "Appium server unreachable",
+            "duration": "-",
+            "agent": "appium_direct",
+        })
 
-    if not healthy:
-        return tasks
+        if not healthy:
+            return tasks
 
-    # 2. 创建 Appium Session
-    session_caps = {
-        "capabilities": {
-            "alwaysMatch": {
-                "platformName": "Android",
-                "appium:automationName": "UiAutomator2",
-                "appium:deviceName": "emulator-5554",
-                "appium:udid": "emulator-5554",
-                "appium:noReset": True,
-                "appium:autoGrantPermissions": True,
-                "appium:newCommandTimeout": 60,
-            },
-            "firstMatch": [{}],
+        # 2. 创建 Appium Session
+        session_caps = {
+            "capabilities": {
+                "alwaysMatch": {
+                    "platformName": "Android",
+                    "appium:automationName": "UiAutomator2",
+                    "appium:deviceName": "emulator-5554",
+                    "appium:udid": "emulator-5554",
+                    "appium:noReset": True,
+                    "appium:autoGrantPermissions": True,
+                    "appium:newCommandTimeout": 60,
+                },
+                "firstMatch": [{}],
+            }
         }
-    }
 
-    session_id = None
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        session_id = None
         resp = await client.post(f"{appium_url}/session", json=session_caps)
         if resp.status_code == 200:
             data = resp.json()
             session_id = data.get("value", {}).get("sessionId") or data.get("sessionId")
 
-    tasks.append({
-        "name": "create-appium-session",
-        "status": "passed" if session_id else "failed",
-        "summary": f"Session created: {session_id[:8]}..." if session_id else "Session creation failed",
-        "duration": "-",
-        "agent": "appium_direct",
-    })
+        tasks.append({
+            "name": "create-appium-session",
+            "status": "passed" if session_id else "failed",
+            "summary": f"Session created: {session_id[:8]}..." if session_id else f"Session creation failed: {resp.text[:100]}",
+            "duration": "-",
+            "agent": "appium_direct",
+        })
 
-    if not session_id:
-        return tasks
+        if not session_id:
+            return tasks
 
-    # 3. 截取屏幕
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+        # 等 session 就绪
+        await asyncio.sleep(2)
+
+        # 3. 截取屏幕
+        try:
             resp = await client.get(f"{appium_url}/session/{session_id}/screenshot")
             if resp.status_code == 200:
                 data = resp.json()
@@ -644,7 +644,7 @@ async def _run_appium_tests(appium_srv: Any) -> list[dict[str, Any]]:
                     tasks.append({
                         "name": "capture-screenshot",
                         "status": "failed",
-                        "summary": "No screenshot data returned",
+                        "summary": f"No screenshot data: {data}",
                         "duration": "-",
                         "agent": "appium_direct",
                     })
@@ -652,22 +652,21 @@ async def _run_appium_tests(appium_srv: Any) -> list[dict[str, Any]]:
                 tasks.append({
                     "name": "capture-screenshot",
                     "status": "failed",
-                    "summary": f"HTTP {resp.status_code}",
+                    "summary": f"HTTP {resp.status_code}: {resp.text[:100]}",
                     "duration": "-",
                     "agent": "appium_direct",
                 })
-    except Exception as exc:
-        tasks.append({
-            "name": "capture-screenshot",
-            "status": "failed",
-            "summary": str(exc)[:100],
-            "duration": "-",
-            "agent": "appium_direct",
-        })
+        except Exception as exc:
+            tasks.append({
+                "name": "capture-screenshot",
+                "status": "failed",
+                "summary": str(exc)[:100],
+                "duration": "-",
+                "agent": "appium_direct",
+            })
 
-    # 4. 获取页面源码
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+        # 4. 获取页面源码
+        try:
             resp = await client.get(f"{appium_url}/session/{session_id}/source")
             if resp.status_code == 200:
                 data = resp.json()
@@ -686,37 +685,36 @@ async def _run_appium_tests(appium_srv: Any) -> list[dict[str, Any]]:
                 tasks.append({
                     "name": "get-page-source",
                     "status": "failed",
-                    "summary": f"HTTP {resp.status_code}",
+                    "summary": f"HTTP {resp.status_code}: {resp.text[:100]}",
                     "duration": "-",
                     "agent": "appium_direct",
                 })
-    except Exception as exc:
-        tasks.append({
-            "name": "get-page-source",
-            "status": "failed",
-            "summary": str(exc)[:100],
-            "duration": "-",
-            "agent": "appium_direct",
-        })
+        except Exception as exc:
+            tasks.append({
+                "name": "get-page-source",
+                "status": "failed",
+                "summary": str(exc)[:100],
+                "duration": "-",
+                "agent": "appium_direct",
+            })
 
-    # 5. 关闭 Session
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+        # 5. 关闭 Session
+        try:
             await client.delete(f"{appium_url}/session/{session_id}")
-        tasks.append({
-            "name": "close-appium-session",
-            "status": "passed",
-            "summary": "Session closed",
-            "duration": "-",
-            "agent": "appium_direct",
-        })
-    except Exception:
-        tasks.append({
-            "name": "close-appium-session",
-            "status": "passed",
-            "summary": "Session closed (with warnings)",
-            "duration": "-",
-            "agent": "appium_direct",
-        })
+            tasks.append({
+                "name": "close-appium-session",
+                "status": "passed",
+                "summary": "Session closed",
+                "duration": "-",
+                "agent": "appium_direct",
+            })
+        except Exception:
+            tasks.append({
+                "name": "close-appium-session",
+                "status": "passed",
+                "summary": "Session closed (with warnings)",
+                "duration": "-",
+                "agent": "appium_direct",
+            })
 
     return tasks
