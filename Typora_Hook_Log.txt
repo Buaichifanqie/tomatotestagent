@@ -414,3 +414,7 @@
 ------------------
 [2026/5/19 22:25:49] [Log] [&#128737;&#65039; fsHook] 程序试图 fs.stat C:\Users\kongwenshuo\AppData\Roaming\Typora\draftsRecover
 ------------------
+[2026/5/20 02:35:09] [Log] [&#128737;&#65039; fsHook] 程序试图 fs.statSync C:\Users\kongwenshuo\AppData\Roaming\Typora\backups
+------------------
+[2026/5/20 02:35:09] [Log] [&#128737;&#65039; fsHook] 程序试图 fs.statSync C:\Users\kongwenshuo\AppData\Roaming\Typora/typora.log
+------------------
