@@ -189,7 +189,12 @@ class OpenAIProvider:
             "total_tokens": usage.get("total_tokens", 0),
         }
 
-        return LLMResponse(content=content, stop_reason=stop_reason, usage=usage_dict)
+        return LLMResponse(
+            content=content,
+            stop_reason=stop_reason,
+            usage=usage_dict,
+            raw_message=dict(message),
+        )
 
     @staticmethod
     def _map_stop_reason(finish_reason: str, has_tool_calls: bool) -> str:

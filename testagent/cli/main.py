@@ -104,43 +104,48 @@ def run(
 
 
 @app.command()
+def ask(
+    query: str = typer.Argument(..., help="自然语言测试描述，如 '测试android搜索框'"),
+) -> None:
+    """用自然语言描述，让 Agent 自动探索并执行测试。"""
+    import asyncio
+
+    from testagent.cli.ask import execute_natural_language
+
+    typer.echo("  TestAgent 自然语言测试")
+    typer.echo("  " + "-" * 50)
+
+    try:
+        result = asyncio.run(execute_natural_language(query))
+    except Exception as exc:
+        typer.echo(f"  ! 执行失败: {exc}")
+        raise typer.Exit(1) from exc
+
+    status = result.get("status", "unknown")
+    if status == "failed":
+        typer.echo(f"\n  ! 失败: {result.get('error', 'unknown error')}")
+        raise typer.Exit(1)
+
+    typer.echo("  " + "-" * 50)
+    typer.echo(f"  状态:    {status}")
+    typer.echo(f"  耗时:    {result.get('duration', '-')}")
+    typer.echo(f"  轮次:    {result.get('message_count', 0)}")
+
+    summary = result.get("summary", "")
+    if summary:
+        typer.echo(f"\n  测试报告:\n  {summary}")
+
+    typer.echo("")
+
+
+@app.command()
 def chat() -> None:
-    """Start an interactive testing chat session."""
-    from testagent.agent.loop import agent_loop
+    """交互式自然语言测试模式 — 像聊天一样测试 App。"""
+    import asyncio
 
-    typer.echo("TestAgent Chat — type 'exit' to quit, 'help' for commands.")
-    typer.echo("-" * 40)
+    from testagent.cli.ask import interactive_chat
 
-    messages: list[dict[str, object]] = []
-
-    while True:
-        user_input = typer.prompt("You").strip()
-
-        if user_input.lower() in ("exit", "quit"):
-            typer.echo("Goodbye!")
-            break
-
-        if user_input.lower() == "help":
-            typer.echo("Commands: exit/quit, help, clear")
-            typer.echo("Or ask me anything about testing!")
-            continue
-
-        if user_input.lower() == "clear":
-            messages.clear()
-            typer.echo("Chat history cleared.")
-            continue
-
-        import asyncio
-
-        from testagent.config.settings import get_settings
-        from testagent.llm.openai_provider import OpenAIProvider
-
-        system = "You are TestAgent, an AI testing assistant."
-        llm = OpenAIProvider(get_settings())
-        result = asyncio.run(agent_loop(messages, tools=[], system=system, llm_provider=llm))
-
-        typer.echo(f"\nAgent: {result}")
-        print()
+    asyncio.run(interactive_chat())
 
 
 @app.command()

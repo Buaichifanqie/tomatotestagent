@@ -62,7 +62,35 @@ async def agent_loop(
             tools=tools,
         )
 
-        messages.append({"role": "assistant", "content": response.content})
+        # ── 转换为 OpenAI 兼容的 assistant 消息格式 ──
+        text_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        for block in response.content:
+            if block.get("type") == "text":
+                text_parts.append(str(block.get("text", "")))
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": str(block.get("id", "")),
+                    "type": "function",
+                    "function": {
+                        "name": str(block.get("name", "")),
+                        "arguments": _JSON_DUMPS(block.get("input", {}), ensure_ascii=False),
+                    },
+                })
+
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": "\n".join(text_parts) or None,
+        }
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        # Preserve any provider-specific fields (e.g. DeepSeek reasoning_content)
+        if response.raw_message:
+            for key in ("reasoning_content",):
+                val = response.raw_message.get(key)
+                if val is not None:
+                    assistant_msg[key] = val
+        messages.append(assistant_msg)
 
         logger.debug(
             "Agent loop round completed",
@@ -75,35 +103,36 @@ async def agent_loop(
             },
         )
 
-        if response.stop_reason != "tool_use":
+        if not tool_calls:
             return messages
 
-        tool_results: list[dict[str, Any]] = []
-        for block in response.content:
-            if block.get("type") == "tool_use":
-                try:
-                    raw_input = block.get("input", {})
-                    if isinstance(raw_input, str):
-                        import json as _json
+        # ── 调用工具并追加 tool 结果消息 ──
+        for tc in tool_calls:
+            tool_name = str(tc["function"]["name"])
+            raw_args = tc["function"]["arguments"]
+            try:
+                if isinstance(raw_args, str):
+                    import json as _json
 
-                        parsed_input = _json.loads(raw_input)
-                    elif isinstance(raw_input, dict):
-                        parsed_input = raw_input
-                    else:
-                        parsed_input = {}
-                    result = await _dispatch(
-                        str(block.get("name", "")),
-                        parsed_input,
-                    )
-                except Exception as exc:
-                    result = {"error": str(exc), "tool_name": block.get("name")}
-                    logger.error(
-                        "Tool dispatch failed",
-                        extra={"extra_data": {"tool": block.get("name"), "error": str(exc)}},
-                    )
-                tool_results.append(result)
-
-        messages.append({"role": "user", "content": tool_results})
+                    parsed_input: dict[str, Any] = _json.loads(raw_args)
+                else:
+                    parsed_input = dict(raw_args)
+                result = await _dispatch(tool_name, parsed_input)
+            except Exception as exc:
+                result = {"error": str(exc), "tool_name": tool_name}
+                logger.error(
+                    "Tool dispatch failed",
+                    extra={"extra_data": {"tool": tool_name, "error": str(exc)}},
+                )
+            # Truncate large tool results to avoid exceeding context window
+            result_str = _JSON_DUMPS(result, ensure_ascii=False)
+            if len(result_str) > 8000:
+                result_str = result_str[:7997] + "..."
+            messages.append({
+                "role": "tool",
+                "tool_call_id": str(tc["id"]),
+                "content": result_str,
+            })
 
     return messages
 

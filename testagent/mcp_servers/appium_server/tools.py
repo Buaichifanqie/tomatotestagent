@@ -23,9 +23,29 @@ async def _appium_post(
     path: str,
     payload: dict[str, object] | None = None,
     timeout: int = 30,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
+    if session_id:
+        path = path.replace(":sessionId", session_id)
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
         response = await client.post(f"{appium_url}{path}", json=payload or {})
+    try:
+        body: dict[str, Any] = response.json()
+    except Exception:
+        body = {"raw": response.text}
+    return {"status_code": response.status_code, "body": body}
+
+
+async def _appium_get(
+    appium_url: str,
+    path: str,
+    timeout: int = 30,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    if session_id:
+        path = path.replace(":sessionId", session_id)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+        response = await client.get(f"{appium_url}{path}")
     try:
         body: dict[str, Any] = response.json()
     except Exception:
@@ -38,31 +58,40 @@ async def _find_element(
     strategy: str,
     selector: str,
     timeout: int = 10,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, object] = {
-        "strategy": strategy,
-        "selector": selector,
-        "timeout": timeout,
+    # Map strategy names to Appium/W3C format
+    strategy_map = {
+        "accessibility_id": "accessibility id",
+        "uiautomator": "-android uiautomator",
+        "xpath": "xpath",
     }
-    return await _appium_post(appium_url, "/session/:sessionId/element", payload)
+    appium_strategy = strategy_map.get(strategy, strategy)
+    payload: dict[str, object] = {
+        "using": appium_strategy,
+        "value": selector,
+    }
+    return await _appium_post(appium_url, "/session/:sessionId/element", payload, session_id=session_id)
 
 
 async def app_install(
     app_path: str,
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, object] = {"appPath": app_path}
-    return await _appium_post(appium_url, "/session/:sessionId/app/install", payload)
+    return await _appium_post(appium_url, "/session/:sessionId/app/install", payload, session_id=session_id)
 
 
 async def app_tap(
     selector: str,
     strategy: str = "accessibility_id",
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     if strategy not in _VALID_STRATEGIES:
         return {"error": f"Invalid strategy '{strategy}'. Must be one of {sorted(_VALID_STRATEGIES)}"}
-    find_result = await _find_element(appium_url, strategy, selector)
+    find_result = await _find_element(appium_url, strategy, selector, session_id=session_id)
     if find_result["status_code"] != 200:
         return {"error": f"Element not found: {find_result['body']}", "status_code": find_result["status_code"]}
     element_id = find_result["body"].get("ELEMENT") or find_result["body"].get("elementId")
@@ -73,7 +102,7 @@ async def app_tap(
     if not element_id:
         return {"error": "Element found but no element ID returned", "find_result": find_result["body"]}
     payload: dict[str, object] = {"element": element_id}
-    return await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/click", payload)
+    return await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/click", payload, session_id=session_id)
 
 
 async def app_swipe(
@@ -83,6 +112,7 @@ async def app_swipe(
     end_y: int,
     duration: int = 500,
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, object] = {
         "actions": [
@@ -93,7 +123,7 @@ async def app_swipe(
             {"type": "pointerUp", "button": 0},
         ],
     }
-    return await _appium_post(appium_url, "/session/:sessionId/actions", payload)
+    return await _appium_post(appium_url, "/session/:sessionId/actions", payload, session_id=session_id)
 
 
 async def app_type(
@@ -101,10 +131,11 @@ async def app_type(
     text: str,
     strategy: str = "accessibility_id",
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     if strategy not in _VALID_STRATEGIES:
         return {"error": f"Invalid strategy '{strategy}'. Must be one of {sorted(_VALID_STRATEGIES)}"}
-    find_result = await _find_element(appium_url, strategy, selector)
+    find_result = await _find_element(appium_url, strategy, selector, session_id=session_id)
     if find_result["status_code"] != 200:
         return {"error": f"Element not found: {find_result['body']}", "status_code": find_result["status_code"]}
     element_id = find_result["body"].get("ELEMENT") or find_result["body"].get("elementId")
@@ -115,7 +146,7 @@ async def app_type(
     if not element_id:
         return {"error": "Element found but no element ID returned", "find_result": find_result["body"]}
     payload: dict[str, object] = {"element": element_id, "text": text}
-    return await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/value", payload)
+    return await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/value", payload, session_id=session_id)
 
 
 async def app_assert_element(
@@ -124,12 +155,13 @@ async def app_assert_element(
     expected: str | None = None,
     strategy: str = "accessibility_id",
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     if strategy not in _VALID_STRATEGIES:
         return {"error": f"Invalid strategy '{strategy}'. Must be one of {sorted(_VALID_STRATEGIES)}"}
     if assertion not in _VALID_ASSERTIONS:
         return {"error": f"Invalid assertion '{assertion}'. Must be one of {sorted(_VALID_ASSERTIONS)}"}
-    find_result = await _find_element(appium_url, strategy, selector)
+    find_result = await _find_element(appium_url, strategy, selector, session_id=session_id)
     if find_result["status_code"] != 200:
         if assertion == "visible":
             return {"passed": False, "reason": f"Element not found: {find_result['body']}"}
@@ -144,7 +176,10 @@ async def app_assert_element(
     if assertion == "visible":
         return {"passed": True, "reason": "Element is visible"}
     if assertion == "text":
-        attr_result = await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/attribute/text")
+        attr_result = await _appium_get(
+            appium_url, "/session/:sessionId/element/" + element_id + "/attribute/text",
+            session_id=session_id,
+        )
         actual_text = ""
         if attr_result["status_code"] == 200:
             actual_text = attr_result["body"].get("value", "")
@@ -155,8 +190,9 @@ async def app_assert_element(
     if assertion == "attribute":
         if expected is None:
             return {"error": "Attribute name is required for 'attribute' assertion. Pass it in 'expected'."}
-        attr_result = await _appium_post(
-            appium_url, "/session/:sessionId/element/" + element_id + "/attribute/" + expected
+        attr_result = await _appium_get(
+            appium_url, "/session/:sessionId/element/" + element_id + "/attribute/" + expected,
+            session_id=session_id,
         )
         attr_value = None
         if attr_result["status_code"] == 200:
@@ -167,8 +203,9 @@ async def app_assert_element(
 
 async def app_screenshot(
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    result = await _appium_post(appium_url, "/session/:sessionId/screenshot")
+    result = await _appium_get(appium_url, "/session/:sessionId/screenshot", session_id=session_id)
     if result["status_code"] != 200:
         return {"error": f"Screenshot failed: {result['body']}", "status_code": result["status_code"]}
     screenshot_data = result["body"].get("value", "")
@@ -179,8 +216,9 @@ async def app_screenshot(
 
 async def app_get_source(
     appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    result = await _appium_post(appium_url, "/session/:sessionId/source")
+    result = await _appium_get(appium_url, "/session/:sessionId/source", session_id=session_id)
     if result["status_code"] != 200:
         return {"error": f"Get source failed: {result['body']}", "status_code": result["status_code"]}
     source = result["body"].get("value", "")

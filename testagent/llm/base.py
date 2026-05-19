@@ -22,6 +22,7 @@ class LLMResponse(BaseModel):
     content: list[dict[str, Any]]
     stop_reason: str
     usage: dict[str, Any]
+    raw_message: dict[str, Any] | None = None  # full assistant message dict from the API (includes DeepSeek reasoning_content etc.)
 
 
 @runtime_checkable
