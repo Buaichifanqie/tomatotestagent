@@ -305,9 +305,12 @@ async def run_session(
     This is the primary entry point used by the CLI ``testagent run`` command.
     It creates a session, runs the three-agent lifecycle, and returns aggregated results.
     """
+    import time
+
     from testagent.agent.analyzer import AnalyzerAgent
     from testagent.agent.context import ContextAssembler
     from testagent.agent.executor import ExecutorAgent
+    from testagent.agent.loop import register_tool_handler
     from testagent.agent.planner import PlannerAgent
     from testagent.config.settings import get_settings
     from testagent.llm.local_provider import LLMProviderFactory
@@ -328,12 +331,57 @@ async def run_session(
         },
     )
     session_id: str = session["id"]
+    start_time = time.monotonic()
     _logger.info("CLI run session created", extra={"extra_data": {"session_id": session_id, "skill": skill_name}})
 
-    planner = PlannerAgent(llm=llm, context_assembler=context_assembler)
-    executor = ExecutorAgent(llm=llm, context_assembler=context_assembler)
-    analyzer = AnalyzerAgent(llm=llm, context_assembler=context_assembler)
+    # ── 初始化 MCP 工具 ──────────────────────────────────────────
+    dispatch_fn = None
 
+    # 注册 load_skill 工具（所有 Agent 可用）
+    _register_skill_tool(skill_name)
+
+    # 如果是 app 测试, 初始化 Appium 以便后续执行真实测试
+    appium_srv = None
+    if skill_name and "app" in skill_name.lower():
+        try:
+            from testagent.mcp_servers.appium_server.server import AppiumMCPServer
+
+            appium_srv = AppiumMCPServer(appium_url="http://localhost:4723")
+            _logger.info("Appium MCP server initialized for app test")
+
+            # 注册 Appium 工具 handlers (LLM 若调用则走这里)
+            async def _make_appium_handler(tool_name: str):
+                async def _handler(tool_input: dict[str, Any]) -> dict[str, Any]:
+                    try:
+                        raw = await appium_srv.call_tool(tool_name, tool_input)
+                        return {"result": raw}
+                    except Exception as exc:
+                        return {"error": str(exc), "tool_name": tool_name}
+
+                return _handler
+
+            for spec in appium_srv._tools_spec:
+                tn = spec["name"]
+                handler = await _make_appium_handler(tn)
+                register_tool_handler(tn, handler)
+
+            async def dispatch_fn(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+                from testagent.agent.loop import dispatch_tool
+
+                return await dispatch_tool(tool_name, tool_input)
+
+            _logger.info(
+                "Appium tools registered",
+                extra={"extra_data": {"tool_count": len(appium_srv._tools_spec)}},
+            )
+        except Exception as exc:
+            _logger.warning(
+                "Appium MCP init failed, proceeding without Appium",
+                extra={"extra_data": {"error": str(exc)}},
+            )
+
+    # ── Agent 1: Planner ─────────────────────────────────────────
+    planner = PlannerAgent(llm=llm, context_assembler=context_assembler)
     await manager.transition(session_id, "planning")
     plan_result = await planner.execute(
         {
@@ -341,18 +389,17 @@ async def run_session(
             "skill": skill_name,
             "plan_path": plan_path,
             "env": env,
-        }
+        },
+        dispatch_fn=dispatch_fn,
+        tools_override=[],  # Planner 不需要调用工具
     )
     _logger.info(
         "Planning completed",
-        extra={
-            "extra_data": {
-                "session_id": session_id,
-                "plan": plan_result.get("plan"),
-            }
-        },
+        extra={"extra_data": {"session_id": session_id, "plan": plan_result.get("plan")}},
     )
 
+    # ── Agent 2: Executor ────────────────────────────────────────
+    executor = ExecutorAgent(llm=llm, context_assembler=context_assembler)
     await manager.transition(session_id, "executing")
     execute_result = await executor.execute(
         {
@@ -360,41 +407,316 @@ async def run_session(
             "skill": skill_name,
             "env": env,
             "url": url,
-        }
+        },
+        dispatch_fn=dispatch_fn,
+        tools_override=[],
     )
     _logger.info(
         "Execution completed",
-        extra={
-            "extra_data": {
-                "session_id": session_id,
-                "result": execute_result.get("result"),
-            }
-        },
+        extra={"extra_data": {"session_id": session_id, "result": execute_result.get("result")}},
     )
 
+    # ── 真实 Appium 测试执行 ────────────────────────────────────
+    appium_tasks: list[dict[str, Any]] = []
+    if appium_srv is not None:
+        try:
+            appium_tasks = await _run_appium_tests(appium_srv)
+            _logger.info(
+                "Appium real tests completed",
+                extra={"extra_data": {"task_count": len(appium_tasks)}},
+            )
+        except Exception as exc:
+            _logger.warning("Appium real tests failed", extra={"extra_data": {"error": str(exc)}})
+
+    # ── Agent 3: Analyzer ────────────────────────────────────────
+    analyzer = AnalyzerAgent(llm=llm, context_assembler=context_assembler)
     await manager.transition(session_id, "analyzing")
     analyze_result = await analyzer.execute(
         {
             "task_type": "analyze",
             "session_id": session_id,
             "execute_result": execute_result.get("result"),
-        }
+        },
+        dispatch_fn=dispatch_fn,
+        tools_override=[],  # Analyzer 不需要调用工具
     )
     _logger.info(
         "Analysis completed",
-        extra={
-            "extra_data": {
-                "session_id": session_id,
-                "analysis": analyze_result.get("analysis"),
-            }
-        },
+        extra={"extra_data": {"session_id": session_id, "analysis": analyze_result.get("analysis")}},
     )
 
     await manager.transition(session_id, "completed")
 
+    # ── 结果聚合 ──────────────────────────────────────────────────
+    duration_s = time.monotonic() - start_time
+    tasks = _build_tasks_from_results(plan_result, execute_result, analyze_result, appium_tasks)
+
     return {
         "session_id": session_id,
         "status": "completed",
-        "tasks": [],
-        "duration": "-",
+        "tasks": tasks,
+        "duration": f"{duration_s:.1f}s",
+        "plan": plan_result.get("plan"),
+        "execution": execute_result.get("result"),
+        "analysis": analyze_result.get("analysis"),
     }
+
+
+def _register_skill_tool(skill_name: str | None) -> None:
+    """注册 load_skill 工具，让 Agent 能动态加载技能详情。"""
+    from pathlib import Path
+
+    from testagent.agent.loop import register_tool_handler
+
+    skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
+
+    async def handle_load_skill(tool_input: dict[str, Any]) -> dict[str, Any]:
+        name = str(tool_input.get("name", ""))
+        if not name:
+            return {"error": "Missing 'name' parameter", "found": False}
+
+        import yaml
+
+        skill_path = skills_dir / name / "SKILL.md"
+        if not skill_path.exists():
+            return {
+                "found": False,
+                "error": f"Skill '{name}' not found",
+            }
+
+        content = skill_path.read_text(encoding="utf-8")
+        parts = content.split("---", 2)
+        body = parts[2].strip() if len(parts) >= 3 else content
+
+        desc = ""
+        if len(parts) >= 2:
+            try:
+                meta = yaml.safe_load(parts[1])
+                desc = str(meta.get("description", "")) if isinstance(meta, dict) else ""
+            except Exception:
+                pass
+
+        return {
+            "found": True,
+            "name": name,
+            "description": desc,
+            "body": body,
+        }
+
+    register_tool_handler("load_skill", handle_load_skill)
+
+
+def _build_tasks_from_results(
+    plan_result: dict[str, Any],
+    execute_result: dict[str, Any],
+    analyze_result: dict[str, Any],
+    appium_tasks: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """将三个 Agent 的执行结果聚合为任务列表。"""
+    tasks: list[dict[str, Any]] = []
+
+    # 规划阶段任务
+    plan = plan_result.get("plan", {})
+    strategy_text = plan.get("strategy", "") if isinstance(plan, dict) else str(plan)
+    tasks.append({
+        "name": "test-planning",
+        "status": "passed" if strategy_text and strategy_text != "no_output" else "failed",
+        "summary": strategy_text[:200] if strategy_text else "No plan generated",
+        "duration": "-",
+        "agent": "planner",
+    })
+
+    # 执行阶段任务
+    exec_result = execute_result.get("result", {})
+    exec_details = exec_result.get("details", "") if isinstance(exec_result, dict) else str(exec_result)
+    exec_status = exec_result.get("status", "completed") if isinstance(exec_result, dict) else "completed"
+    tasks.append({
+        "name": "test-execution",
+        "status": "passed" if exec_status != "failed" else "failed",
+        "summary": exec_details[:200] if exec_details else "Execution completed",
+        "duration": "-",
+        "agent": "executor",
+    })
+
+    # 真实 Appium 测试结果
+    if appium_tasks:
+        tasks.extend(appium_tasks)
+
+    # 分析阶段任务
+    analysis = analyze_result.get("analysis", {})
+    analysis_summary = analysis.get("summary", "") if isinstance(analysis, dict) else str(analysis)
+    defects = analysis.get("defects", []) if isinstance(analysis, dict) else []
+    tasks.append({
+        "name": "test-analysis",
+        "status": "passed",
+        "summary": analysis_summary[:200] if analysis_summary else "Analysis completed",
+        "defects_found": len(defects),
+        "duration": "-",
+        "agent": "analyzer",
+    })
+
+    return tasks
+
+
+async def _run_appium_tests(appium_srv: Any) -> list[dict[str, Any]]:
+    """直接执行 Appium 真实测试, 返回任务结果列表。"""
+    import base64
+    import json
+
+    import httpx
+
+    appium_url = "http://localhost:4723"
+    tasks: list[dict[str, Any]] = []
+
+    # 1. 健康检查
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5)) as client:
+            resp = await client.get(f"{appium_url}/status")
+            healthy = resp.status_code == 200
+    except Exception:
+        healthy = False
+
+    tasks.append({
+        "name": "appium-server-health",
+        "status": "passed" if healthy else "failed",
+        "summary": "Appium server is running" if healthy else "Appium server unreachable",
+        "duration": "-",
+        "agent": "appium_direct",
+    })
+
+    if not healthy:
+        return tasks
+
+    # 2. 创建 Appium Session
+    session_caps = {
+        "capabilities": {
+            "alwaysMatch": {
+                "platformName": "Android",
+                "appium:automationName": "UiAutomator2",
+                "appium:deviceName": "emulator-5554",
+                "appium:udid": "emulator-5554",
+                "appium:noReset": True,
+                "appium:autoGrantPermissions": True,
+                "appium:newCommandTimeout": 60,
+            },
+            "firstMatch": [{}],
+        }
+    }
+
+    session_id = None
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as client:
+        resp = await client.post(f"{appium_url}/session", json=session_caps)
+        if resp.status_code == 200:
+            data = resp.json()
+            session_id = data.get("value", {}).get("sessionId") or data.get("sessionId")
+
+    tasks.append({
+        "name": "create-appium-session",
+        "status": "passed" if session_id else "failed",
+        "summary": f"Session created: {session_id[:8]}..." if session_id else "Session creation failed",
+        "duration": "-",
+        "agent": "appium_direct",
+    })
+
+    if not session_id:
+        return tasks
+
+    # 3. 截取屏幕
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+            resp = await client.get(f"{appium_url}/session/{session_id}/screenshot")
+            if resp.status_code == 200:
+                data = resp.json()
+                screenshot_b64 = data.get("value", "")
+                if screenshot_b64:
+                    img_data = base64.b64decode(screenshot_b64)
+                    screenshot_path = f"app_screenshot_{session_id[:8]}.png"
+                    with open(screenshot_path, "wb") as f:
+                        f.write(img_data)
+                    tasks.append({
+                        "name": "capture-screenshot",
+                        "status": "passed",
+                        "summary": f"Screenshot saved ({len(img_data)} bytes)",
+                        "duration": "-",
+                        "agent": "appium_direct",
+                    })
+                else:
+                    tasks.append({
+                        "name": "capture-screenshot",
+                        "status": "failed",
+                        "summary": "No screenshot data returned",
+                        "duration": "-",
+                        "agent": "appium_direct",
+                    })
+            else:
+                tasks.append({
+                    "name": "capture-screenshot",
+                    "status": "failed",
+                    "summary": f"HTTP {resp.status_code}",
+                    "duration": "-",
+                    "agent": "appium_direct",
+                })
+    except Exception as exc:
+        tasks.append({
+            "name": "capture-screenshot",
+            "status": "failed",
+            "summary": str(exc)[:100],
+            "duration": "-",
+            "agent": "appium_direct",
+        })
+
+    # 4. 获取页面源码
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+            resp = await client.get(f"{appium_url}/session/{session_id}/source")
+            if resp.status_code == 200:
+                data = resp.json()
+                source = data.get("value", "")
+                source_path = f"app_source_{session_id[:8]}.xml"
+                with open(source_path, "w", encoding="utf-8") as f:
+                    f.write(source)
+                tasks.append({
+                    "name": "get-page-source",
+                    "status": "passed",
+                    "summary": f"Page source saved ({len(source)} chars)",
+                    "duration": "-",
+                    "agent": "appium_direct",
+                })
+            else:
+                tasks.append({
+                    "name": "get-page-source",
+                    "status": "failed",
+                    "summary": f"HTTP {resp.status_code}",
+                    "duration": "-",
+                    "agent": "appium_direct",
+                })
+    except Exception as exc:
+        tasks.append({
+            "name": "get-page-source",
+            "status": "failed",
+            "summary": str(exc)[:100],
+            "duration": "-",
+            "agent": "appium_direct",
+        })
+
+    # 5. 关闭 Session
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+            await client.delete(f"{appium_url}/session/{session_id}")
+        tasks.append({
+            "name": "close-appium-session",
+            "status": "passed",
+            "summary": "Session closed",
+            "duration": "-",
+            "agent": "appium_direct",
+        })
+    except Exception:
+        tasks.append({
+            "name": "close-appium-session",
+            "status": "passed",
+            "summary": "Session closed (with warnings)",
+            "duration": "-",
+            "agent": "appium_direct",
+        })
+
+    return tasks

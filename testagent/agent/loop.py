@@ -82,9 +82,18 @@ async def agent_loop(
         for block in response.content:
             if block.get("type") == "tool_use":
                 try:
+                    raw_input = block.get("input", {})
+                    if isinstance(raw_input, str):
+                        import json as _json
+
+                        parsed_input = _json.loads(raw_input)
+                    elif isinstance(raw_input, dict):
+                        parsed_input = raw_input
+                    else:
+                        parsed_input = {}
                     result = await _dispatch(
                         str(block.get("name", "")),
-                        dict(block.get("input", {})),
+                        parsed_input,
                     )
                 except Exception as exc:
                     result = {"error": str(exc), "tool_name": block.get("name")}

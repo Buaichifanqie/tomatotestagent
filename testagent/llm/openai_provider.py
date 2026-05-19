@@ -32,7 +32,7 @@ class OpenAIProvider:
         self._settings = settings
         self._api_key = self._resolve_api_key(settings)
         self._model = settings.openai_model
-        self._base_url = "https://api.openai.com/v1"
+        self._base_url = settings.openai_base_url
         self._client: httpx.AsyncClient | None = None
         self._rate_limiter = RateLimiter()
         self._budget_manager = BudgetManager()
@@ -160,12 +160,22 @@ class OpenAIProvider:
 
         if message.get("tool_calls"):
             for tc in message["tool_calls"]:
+                raw_args = tc["function"]["arguments"]
+                if isinstance(raw_args, str):
+                    import json as _json
+
+                    try:
+                        parsed_args: dict[str, object] = _json.loads(raw_args)
+                    except Exception:
+                        parsed_args = {"raw": raw_args}
+                else:
+                    parsed_args = raw_args
                 content.append(
                     {
                         "type": "tool_use",
                         "id": tc["id"],
                         "name": tc["function"]["name"],
-                        "input": tc["function"]["arguments"],
+                        "input": parsed_args,
                     }
                 )
 

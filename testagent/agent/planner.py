@@ -30,7 +30,12 @@ class PlannerAgent:
     def todo(self) -> TodoManager:
         return self._todo
 
-    async def execute(self, task: dict[str, Any]) -> dict[str, Any]:
+    async def execute(
+        self,
+        task: dict[str, Any],
+        dispatch_fn: Any = None,
+        tools_override: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """
         执行规划任务:
         1. assemble context for Planner
@@ -52,16 +57,19 @@ class PlannerAgent:
             rag_text = "\n".join(context.rag_context)
             messages.append({"role": "user", "content": f"[RAG Context]\n{rag_text}\n[End RAG Context]"})
 
+        agent_tools = tools_override if tools_override is not None else context.tools
+
         logger.info(
             "PlannerAgent starting execution",
-            extra={"extra_data": {"task_keys": list(task.keys()), "tools_count": len(context.tools)}},
+            extra={"extra_data": {"task_keys": list(task.keys()), "tools_count": len(agent_tools)}},
         )
 
         result_messages = await agent_loop(
             messages=messages,
-            tools=context.tools,
+            tools=agent_tools,
             system=context.system_prompt,
             llm_provider=self._llm,
+            dispatch_fn=dispatch_fn,
         )
 
         plan = self._extract_plan(result_messages)

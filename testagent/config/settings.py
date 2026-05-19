@@ -40,6 +40,7 @@ class TestAgentSettings(BaseSettings):
     llm_provider: str = "openai"
     openai_api_key: SecretStr = SecretStr("")
     openai_model: str = "gpt-4o"
+    openai_base_url: str = "https://api.openai.com/v1"
     local_model_url: str = "http://localhost:11434"
 
     chroma_persist_dir: str = "./chroma_data"
