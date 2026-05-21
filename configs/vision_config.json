@@ -1,0 +1,7 @@
+{
+  "api_key": "",
+  "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  "model": "glm-4.6v-flash",
+  "timeout": 30,
+  "max_retries": 3
+}
