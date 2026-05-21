@@ -8,6 +8,7 @@ _SECRET_FIELDS = frozenset(
         "openai_api_key",
         "meilisearch_api_key",
         "postgres_password",
+        "vision_api_key",
     }
 )
 
@@ -63,6 +64,12 @@ class TestAgentSettings(BaseSettings):
     default_isolation_level: str = "docker"
     docker_timeout_api: int = 60
     docker_timeout_web: int = 120
+
+    vision_api_key: SecretStr = SecretStr("")
+    vision_api_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    vision_model: str = "glm-4.6v-flash"
+    vision_timeout: int = 30
+    vision_max_retries: int = 3
 
     repo_path: str = ""
     data_retention_days: int = 90
