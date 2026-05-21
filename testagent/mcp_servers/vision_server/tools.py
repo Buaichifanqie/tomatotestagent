@@ -73,10 +73,10 @@ def _parse_suggestion(text: str) -> str | None:
     """Parse navigation suggestion from response."""
     lower = text.lower()
     swipe_patterns = [
-        (r"swipe_left|向左滑|左滑|向右划", "swipe_left"),
-        (r"swipe_right|向右滑|右滑|向左划", "swipe_right"),
-        (r"swipe_up|向上滑|上滑|向下划", "swipe_up"),
-        (r"swipe_down|向下滑|下滑|向上划", "swipe_down"),
+        (r"swipe_left|向左滑|左滑|向左划", "swipe_left"),
+        (r"swipe_right|向右滑|右滑|向右划", "swipe_right"),
+        (r"swipe_up|向上滑|上滑|向上划", "swipe_up"),
+        (r"swipe_down|向下滑|下滑|向下划", "swipe_down"),
         (r"scroll_down|向下滚动", "scroll_down"),
         (r"scroll_up|向上滚动", "scroll_up"),
     ]

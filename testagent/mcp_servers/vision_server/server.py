@@ -109,7 +109,7 @@ class VisionMCPServer(BaseMCPServer):
         ]
 
     async def health_check(self) -> bool:
-        return bool(self._glm_client._api_key)
+        return self._glm_client.is_configured
 
     @classmethod
     def from_settings(

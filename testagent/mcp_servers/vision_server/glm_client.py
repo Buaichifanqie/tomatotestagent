@@ -49,6 +49,11 @@ class GLMClient:
         self._timeout = timeout
         self._max_retries = max_retries
 
+    @property
+    def is_configured(self) -> bool:
+        """Check if the client has a non-empty API key configured."""
+        return bool(self._api_key)
+
     async def analyze(self, image_base64: str, prompt: str) -> dict[str, Any]:
         """Send screenshot to GLM API for analysis.
 
@@ -59,6 +64,9 @@ class GLMClient:
         Returns:
             Parsed response with content text
         """
+        if not self._api_key:
+            return {"error": "API key not configured"}
+
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -88,9 +96,9 @@ class GLMClient:
         }
 
         last_exception: Exception | None = None
-        for attempt in range(self._max_retries):
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout)) as client:
+            for attempt in range(self._max_retries):
+                try:
                     response = await client.post(self._api_url, headers=headers, json=payload)
                     response.raise_for_status()
                     result = response.json()
@@ -99,32 +107,35 @@ class GLMClient:
                         "content": content,
                         "finish_reason": result["choices"][0].get("finish_reason", ""),
                     }
-            except httpx.HTTPStatusError as e:
-                last_exception = e
-                if attempt < self._max_retries - 1:
-                    wait = 2**attempt
-                    logger.warning(
-                        "GLM API error, retrying",
-                        extra={
-                            "extra_data": {
-                                "attempt": attempt + 1,
-                                "wait": wait,
-                                "error": str(e),
-                            }
-                        },
-                    )
-                    await asyncio.sleep(wait)
-                else:
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    # Only retry on server errors (5xx) and rate limits (429)
+                    if status >= 500 or status == 429:
+                        if attempt < self._max_retries - 1:
+                            wait = 2**attempt
+                            logger.warning(
+                                "GLM API error, retrying",
+                                extra={
+                                    "extra_data": {
+                                        "attempt": attempt + 1,
+                                        "wait": wait,
+                                        "error": str(e),
+                                    }
+                                },
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                    last_exception = e
                     logger.error(
-                        "GLM API failed after max retries",
+                        "GLM API request failed",
+                        extra={"extra_data": {"status": status, "error": str(e)}},
+                    )
+                except Exception as e:
+                    last_exception = e
+                    logger.error(
+                        "GLM API unexpected error",
                         extra={"extra_data": {"error": str(e)}},
                     )
-            except Exception as e:
-                last_exception = e
-                logger.error(
-                    "GLM API unexpected error",
-                    extra={"extra_data": {"error": str(e)}},
-                )
-                break
+                    break
 
         return {"error": str(last_exception) if last_exception else "Unknown error"}
