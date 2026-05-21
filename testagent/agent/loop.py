@@ -15,6 +15,38 @@ logger = get_logger(__name__)
 _JSON_DUMPS = json.dumps
 _IDENTITY_RE_INJECTION_THRESHOLD = 5
 
+
+def _normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Normalize tool call arguments from various LLM output formats.
+
+    Some LLMs wrap arguments in a "raw" JSON string field or use other
+    non-standard formats. This function detects and unwraps them.
+    """
+    if not isinstance(args, dict):
+        return args
+
+    # Case 1: {"raw": "{\"key\": \"val\", ...}"} — raw JSON string wrapper
+    if "raw" in args and len(args) == 1:
+        raw_val = args["raw"]
+        if isinstance(raw_val, str):
+            try:
+                parsed = json.loads(raw_val)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # Case 2: {"arguments": "{\"key\": \"val\"}", "name": "..."} — structured wrapper
+    if "arguments" in args and isinstance(args["arguments"], str):
+        try:
+            parsed = json.loads(args["arguments"])
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return args
+
 TOOL_HANDLERS: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {}
 
 
@@ -35,6 +67,7 @@ async def agent_loop(
     dispatch_fn: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     max_rounds: int = 50,
     token_threshold: int = 100000,
+    progress_callback: Callable[[dict[str, Any], list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     核心 ReAct Loop 实现。
@@ -104,9 +137,13 @@ async def agent_loop(
         )
 
         if not tool_calls:
+            # No more tool calls — final round
+            if progress_callback:
+                progress_callback({"assistant": assistant_msg, "final": True}, [])
             return messages
 
         # ── 调用工具并追加 tool 结果消息 ──
+        tool_results: list[dict[str, Any]] = []
         for tc in tool_calls:
             tool_name = str(tc["function"]["name"])
             raw_args = tc["function"]["arguments"]
@@ -117,6 +154,8 @@ async def agent_loop(
                     parsed_input: dict[str, Any] = _json.loads(raw_args)
                 else:
                     parsed_input = dict(raw_args)
+                # Some LLMs wrap arguments in a "raw" JSON string field
+                parsed_input = _normalize_tool_args(parsed_input)
                 result = await _dispatch(tool_name, parsed_input)
             except Exception as exc:
                 result = {"error": str(exc), "tool_name": tool_name}
@@ -128,11 +167,15 @@ async def agent_loop(
             result_str = _JSON_DUMPS(result, ensure_ascii=False)
             if len(result_str) > 8000:
                 result_str = result_str[:7997] + "..."
+            tool_results.append(result)
             messages.append({
                 "role": "tool",
                 "tool_call_id": str(tc["id"]),
                 "content": result_str,
             })
+
+        if progress_callback:
+            progress_callback({"assistant": assistant_msg, "tool_calls": tool_calls}, tool_results)
 
     return messages
 

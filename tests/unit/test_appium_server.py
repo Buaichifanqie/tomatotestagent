@@ -11,6 +11,8 @@ from testagent.mcp_servers.appium_server.tools import (
     app_get_source,
     app_install,
     app_screenshot,
+    app_start_recording,
+    app_stop_recording,
     app_swipe,
     app_tap,
     app_type,
@@ -34,13 +36,14 @@ def _mock_client_for_post(response_body: dict, status_code: int = 200) -> AsyncM
     mock_client.__aenter__.return_value = mock_client
     mock_client.__aexit__.return_value = AsyncMock()
     mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.get = AsyncMock(return_value=mock_response)
     return mock_client
 
 
 class TestAppiumMCPServerListTools:
-    async def test_list_tools_returns_seven_tools(self, server: AppiumMCPServer) -> None:
+    async def test_list_tools_returns_nine_tools(self, server: AppiumMCPServer) -> None:
         tools = await server.list_tools()
-        assert len(tools) == 7
+        assert len(tools) == 9
 
     async def test_list_tools_contains_all_tool_names(self, server: AppiumMCPServer) -> None:
         tools = await server.list_tools()
@@ -53,6 +56,8 @@ class TestAppiumMCPServerListTools:
             "app_assert_element",
             "app_screenshot",
             "app_get_source",
+            "app_start_recording",
+            "app_stop_recording",
         }
         assert tool_names == expected
 
@@ -216,6 +221,11 @@ class TestAppAssertElementParamValidation:
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = AsyncMock()
         mock_client.post = AsyncMock(side_effect=_side_effect)
+        mock_get_resp = MagicMock()
+        mock_get_resp.status_code = 200
+        mock_get_resp.json.return_value = {"value": "Hello"}
+        mock_get_resp.text = '{"value": "Hello"}'
+        mock_client.get = AsyncMock(return_value=mock_get_resp)
 
         with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
             result = await app_assert_element(
@@ -317,3 +327,57 @@ class TestAppInstall:
         with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
             result = await app_install("/path/to/app.apk", appium_url=APPIUM_URL)
         assert result["status_code"] == 200
+
+
+class TestAppStartRecording:
+    async def test_start_recording_sends_correct_payload(self) -> None:
+        mock_client = _mock_client_for_post({"value": ""})
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            result = await app_start_recording(appium_url=APPIUM_URL)
+        assert result["status_code"] == 200
+
+    async def test_start_recording_sends_default_options(self) -> None:
+        mock_client = _mock_client_for_post({"value": ""})
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            await app_start_recording(appium_url=APPIUM_URL)
+        call_payload = mock_client.post.call_args[1]["json"]
+        options = call_payload["options"]
+        assert options["timeLimit"] == 180
+        assert options["videoType"] == "h264"
+        assert options["videoQuality"] == "medium"
+        assert options["bitRate"] == 4000000
+
+    async def test_start_recording_uses_correct_endpoint(self) -> None:
+        mock_client = _mock_client_for_post({"value": ""})
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            await app_start_recording(appium_url=APPIUM_URL)
+        call_path = mock_client.post.call_args[0][0]
+        assert "start_recording_screen" in call_path
+
+
+class TestAppStopRecording:
+    async def test_stop_recording_returns_video_data(self) -> None:
+        mock_client = _mock_client_for_post({"value": "GkqKp2VhZGVyAAAA=="})
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            result = await app_stop_recording(appium_url=APPIUM_URL)
+        assert result["video_base64"] == "GkqKp2VhZGVyAAAA=="
+        assert result["format"] == "mp4"
+
+    async def test_stop_recording_failure_returns_error(self) -> None:
+        mock_client = _mock_client_for_post({"value": "error"}, status_code=500)
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            result = await app_stop_recording(appium_url=APPIUM_URL)
+        assert "error" in result
+
+    async def test_stop_recording_no_data_returns_error(self) -> None:
+        mock_client = _mock_client_for_post({"value": ""}, status_code=200)
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            result = await app_stop_recording(appium_url=APPIUM_URL)
+        assert "error" in result
+
+    async def test_stop_recording_uses_correct_endpoint(self) -> None:
+        mock_client = _mock_client_for_post({"value": "dGVzdA=="})
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+            await app_stop_recording(appium_url=APPIUM_URL)
+        call_path = mock_client.post.call_args[0][0]
+        assert "stop_recording_screen" in call_path

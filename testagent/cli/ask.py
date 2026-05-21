@@ -36,18 +36,19 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "app_tap",
-        "description": "点击指定选择器的元素",
+        "description": "点击指定选择器的元素，或点击屏幕上的坐标点 (x, y)。用 vision_find_element 找到目标后传入返回的 center 坐标进行点击。",
         "parameters": {
             "type": "object",
             "properties": {
-                "selector": {"type": "string", "description": "元素选择器（resource-id / content-desc / xpath）"},
+                "selector": {"type": "string", "description": "元素选择器（resource-id / content-desc / xpath），与坐标二选一"},
                 "strategy": {
                     "type": "string",
                     "description": "定位策略：accessibility_id / uiautomator / xpath",
                     "enum": ["accessibility_id", "uiautomator", "xpath"],
                 },
+                "x": {"type": "integer", "description": "点击的 X 坐标（与 selector 二选一，vision_find_element 返回的 center.x）"},
+                "y": {"type": "integer", "description": "点击的 Y 坐标（与 selector 二选一，vision_find_element 返回的 center.y）"},
             },
-            "required": ["selector"],
         },
     },
     {
@@ -235,7 +236,15 @@ async def _create_session() -> str | None:
             )
             return None
     except Exception as exc:
-        logger.error("Session creation error", extra={"extra_data": {"error": str(exc)}})
+        logger.error(
+            "Session creation error",
+            extra={
+                "extra_data": {
+                    "error": str(exc) or type(exc).__name__,
+                    "error_type": type(exc).__name__,
+                }
+            },
+        )
         return None
 
 
@@ -271,17 +280,21 @@ def _register_tool_handlers(
         from testagent.mcp_servers.appium_server.tools import app_screenshot
 
         result = await app_screenshot(appium_url=_APPIUM_URL, session_id=session_id)
-        b64 = result.get("screenshot_base64", "")
-        if len(b64) > 500:
-            result["screenshot_base64"] = b64[:200] + f"... [truncated {len(b64) - 200} chars]"
         return {"result": result}
 
     async def _handler_tap(input_data: dict[str, Any]) -> dict[str, Any]:
         from testagent.mcp_servers.appium_server.tools import app_tap
 
+        x_raw = input_data.get("x")
+        y_raw = input_data.get("y")
+        x = int(x_raw) if x_raw is not None else None
+        y = int(y_raw) if y_raw is not None else None
+
         result = await app_tap(
             selector=str(input_data.get("selector", "")),
             strategy=str(input_data.get("strategy", "accessibility_id")),
+            x=x,
+            y=y,
             appium_url=_APPIUM_URL,
             session_id=session_id,
         )
@@ -565,27 +578,49 @@ async def interactive_chat() -> None:
 
         messages.append({"role": "user", "content": user_input})
 
+        def _on_progress(round_info: dict[str, Any], tool_results: list[dict[str, Any]]) -> None:
+            """Print intermediate agent progress in real-time."""
+            assistant_msg = round_info.get("assistant", {})
+            content = assistant_msg.get("content") or ""
+            tool_calls = round_info.get("tool_calls", [])
+            is_final = round_info.get("final", False)
+
+            # Print LLM text output
+            if content:
+                text = str(content)
+                if isinstance(content, list):
+                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                    text = "\n".join(texts)
+                if text.strip():
+                    print(f"  Agent: {text.strip()}")
+
+            # Print tool calls
+            for tc in (tool_calls or []):
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                args_str = fn.get("arguments", "{}")
+                print(f"  -> 调用工具: {name}({args_str[:200]})")
+
+            # Print tool results (first 300 chars each)
+            for tr in (tool_results or []):
+                tr_str = json.dumps(tr, ensure_ascii=False)
+                if len(tr_str) > 300:
+                    tr_str = tr_str[:297] + "..."
+                print(f"  <- 结果: {tr_str}")
+
+            if is_final:
+                print()
+
         try:
-            result = await agent_loop(
+            await agent_loop(
                 messages=messages,
                 tools=tools,
                 system=_SYSTEM_PROMPT,
                 llm_provider=llm,
                 dispatch_fn=dispatch_fn,
                 max_rounds=30,
+                progress_callback=_on_progress,
             )
-
-            # 提取最终回复
-            assistant_msgs = [m for m in result if m.get("role") == "assistant"]
-            if assistant_msgs:
-                last = assistant_msgs[-1]
-                content = last.get("content", "")
-                if isinstance(content, list):
-                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                    reply = "\n".join(texts)
-                else:
-                    reply = str(content)
-                print(f"\n  Agent: {reply}\n")
         except Exception as exc:
             print(f"\n  [错误: {exc}]\n")
 

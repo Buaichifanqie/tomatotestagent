@@ -84,11 +84,30 @@ async def app_install(
 
 
 async def app_tap(
-    selector: str,
+    selector: str = "",
     strategy: str = "accessibility_id",
+    x: int | None = None,
+    y: int | None = None,
     appium_url: str = "http://localhost:4723",
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    """Tap an element by selector/strategy, or tap at coordinates (x, y).
+
+    When x and y are provided, uses W3C pointer actions to tap at those
+    coordinates (useful for tapping elements found via vision_find_element).
+    """
+    if x is not None and y is not None:
+        payload: dict[str, object] = {
+            "actions": [
+                {"type": "pointerMove", "duration": 0, "x": x, "y": y},
+                {"type": "pointerDown", "button": 0},
+                {"type": "pointerUp", "button": 0},
+            ],
+        }
+        return await _appium_post(appium_url, "/session/:sessionId/actions", payload, session_id=session_id)
+
+    if not selector:
+        return {"error": "Either x/y coordinates or a selector must be provided"}
     if strategy not in _VALID_STRATEGIES:
         return {"error": f"Invalid strategy '{strategy}'. Must be one of {sorted(_VALID_STRATEGIES)}"}
     find_result = await _find_element(appium_url, strategy, selector, session_id=session_id)
@@ -101,7 +120,7 @@ async def app_tap(
             element_id = value.get("ELEMENT") or value.get("elementId")
     if not element_id:
         return {"error": "Element found but no element ID returned", "find_result": find_result["body"]}
-    payload: dict[str, object] = {"element": element_id}
+    payload = {"element": element_id}
     return await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/click", payload, session_id=session_id)
 
 

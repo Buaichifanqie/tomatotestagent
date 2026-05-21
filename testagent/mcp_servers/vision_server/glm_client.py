@@ -58,7 +58,7 @@ class GLMClient:
         """Send screenshot to GLM API for analysis.
 
         Args:
-            image_base64: Base64-encoded PNG screenshot (without data:image prefix)
+            image_base64: Base64-encoded PNG screenshot (data URL prefix added automatically)
             prompt: User prompt describing what to find/analyze
 
         Returns:
@@ -109,10 +109,12 @@ class GLMClient:
                     }
                 except httpx.HTTPStatusError as e:
                     status = e.response.status_code
+                    body_preview = e.response.text[:300] if e.response.text else ""
                     # Only retry on server errors (5xx) and rate limits (429)
                     if status >= 500 or status == 429:
                         if attempt < self._max_retries - 1:
-                            wait = 2**attempt
+                            # Rate limits need longer backoff; 5xx use shorter
+                            wait = 4**attempt if status == 429 else 2**attempt
                             logger.warning(
                                 "GLM API error, retrying",
                                 extra={
@@ -120,6 +122,7 @@ class GLMClient:
                                         "attempt": attempt + 1,
                                         "wait": wait,
                                         "error": str(e),
+                                        "body": body_preview,
                                     }
                                 },
                             )
@@ -128,8 +131,15 @@ class GLMClient:
                     last_exception = e
                     logger.error(
                         "GLM API request failed",
-                        extra={"extra_data": {"status": status, "error": str(e)}},
+                        extra={
+                            "extra_data": {
+                                "status": status,
+                                "error": str(e),
+                                "body": body_preview,
+                            }
+                        },
                     )
+                    break
                 except Exception as e:
                     last_exception = e
                     logger.error(
