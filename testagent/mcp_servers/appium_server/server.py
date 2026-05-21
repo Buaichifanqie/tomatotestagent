@@ -10,6 +10,8 @@ from testagent.mcp_servers.appium_server.tools import (
     app_get_source,
     app_install,
     app_screenshot,
+    app_start_recording,
+    app_stop_recording,
     app_swipe,
     app_tap,
     app_type,
@@ -124,6 +126,22 @@ class AppiumMCPServer(BaseMCPServer):
                 "properties": {},
             },
         },
+        {
+            "name": "app_start_recording",
+            "description": "开始录制设备屏幕，录制为 MP4 视频",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "app_stop_recording",
+            "description": "停止屏幕录制并返回录制的视频（base64 编码的 MP4）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
     ]
 
     _tool_registry: ClassVar[dict[str, Any]] = {
@@ -134,6 +152,8 @@ class AppiumMCPServer(BaseMCPServer):
         "app_assert_element": app_assert_element,
         "app_screenshot": app_screenshot,
         "app_get_source": app_get_source,
+        "app_start_recording": app_start_recording,
+        "app_stop_recording": app_stop_recording,
     }
 
     async def list_tools(self) -> list[dict[str, object]]:

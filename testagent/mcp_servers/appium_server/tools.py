@@ -223,3 +223,44 @@ async def app_get_source(
         return {"error": f"Get source failed: {result['body']}", "status_code": result["status_code"]}
     source = result["body"].get("value", "")
     return {"source": source, "format": "xml"}
+
+
+async def app_start_recording(
+    appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Start screen recording on the device."""
+    payload: dict[str, object] = {
+        "options": {
+            "timeLimit": 180,
+            "videoType": "h264",
+            "videoQuality": "medium",
+            "bitRate": 4000000,
+        }
+    }
+    return await _appium_post(
+        appium_url,
+        "/session/:sessionId/appium/start_recording_screen",
+        payload,
+        session_id=session_id,
+    )
+
+
+async def app_stop_recording(
+    appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Stop screen recording and return the recorded video."""
+    result = await _appium_post(
+        appium_url,
+        "/session/:sessionId/appium/stop_recording_screen",
+        {},
+        timeout=60,
+        session_id=session_id,
+    )
+    if result["status_code"] != 200:
+        return {"error": f"Stop recording failed: {result['body']}", "status_code": result["status_code"]}
+    video_data = result["body"].get("value", "")
+    if isinstance(video_data, str) and video_data:
+        return {"video_base64": video_data, "format": "mp4"}
+    return {"error": "No video data returned", "body": result["body"]}
