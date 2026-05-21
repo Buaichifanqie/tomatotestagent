@@ -115,35 +115,74 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
             "required": ["app_path"],
         },
     },
+    {
+        "name": "vision_find_element",
+        "description": "通过视觉分析在截图中查找目标 UI 元素。传入 base64 截图和目标描述，返回元素坐标。如果目标不在当前屏幕，会建议滑动方向。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "image": {"type": "string", "description": "base64 编码的 PNG 截图"},
+                "target": {"type": "string", "description": "要查找的目标的自然语言描述，如'美团 app 图标'"},
+                "context": {"type": "string", "description": "可选的上下文信息"},
+            },
+            "required": ["image", "target"],
+        },
+    },
+    {
+        "name": "vision_describe_screen",
+        "description": "通过视觉分析描述当前屏幕的所有内容和布局，返回可交互元素列表",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "image": {"type": "string", "description": "base64 编码的 PNG 截图"},
+            },
+            "required": ["image"],
+        },
+    },
 ]
 
 _SYSTEM_PROMPT = """\
 You are TestAgent, an AI-powered mobile testing assistant connected to an Android emulator via Appium.
 
 ## Your Capabilities
-You can explore and test mobile apps using the following tools:
-- **app_get_source** — Get the current screen XML page source. Use this FIRST to understand the UI layout.
+You have TWO ways to understand the mobile screen:
+1. **XML Analysis** (app_get_source) — Get the current screen's XML page source for precise element selectors
+2. **Visual Analysis** (vision_find_element / vision_describe_screen) — Use screenshot + multimodal AI to understand the screen visually
+
+Available tools:
+- **vision_find_element** — Find a UI element on screen by visual analysis. Pass a screenshot and describe what you're looking for.
+- **vision_describe_screen** — Get a visual description of the current screen content and layout.
+- **app_get_source** — Get the current screen XML page source.
 - **app_screenshot** — Take a screenshot of the current screen.
-- **app_tap** — Tap/click a UI element using its selector.
+- **app_tap** — Tap/click a UI element using its selector or coordinates.
 - **app_type** — Type text into an input field.
 - **app_swipe** — Swipe across the screen.
 - **app_assert_element** — Check whether an element is visible, has certain text, or has an attribute.
+- **app_start_recording** — Start recording the device screen.
+- **app_stop_recording** — Stop recording and get the video.
 
 ## Testing Workflow
 When given a testing task:
-1. **Explore**: Call app_get_source to get the current screen's XML page source. Look for elements with resource-id, content-desc (content-desc maps to accessibility_id), and text attributes.
-2. **Plan**: Identify the elements you need to interact with based on the XML source.
-3. **Execute**: Use the tools to interact with the app — tap buttons, type text, swipe, etc.
-4. **Verify**: Use app_assert_element to check expected element states.
-5. **Report**: Summarize what you tested, what passed, and what failed.
+1. **Visually Explore**: Take a screenshot and call vision_describe_screen to understand the current screen layout.
+2. **Find Elements**: When you need to interact with a specific element, take a screenshot and call vision_find_element with a description of what you're looking for.
+3. **Smart Navigation**: If the target isn't found on the current screen, vision_find_element will suggest a swipe direction. Follow the suggestion, then retry.
+4. **Interact**: Use app_tap (with coordinates from vision analysis) or app_type to interact with elements.
+5. **Verify**: Use app_assert_element to check expected element states.
+6. **Record**: Use app_start_recording at the start and app_stop_recording at the end to capture video evidence.
+
+## Smart Navigation Rules
+- If an element isn't found on the current screen, try swiping to find it
+- Follow the AI's suggested swipe direction first
+- If the AI is unsure, try: swipe left → swipe right → swipe up → swipe down
+- Take a screenshot after each swipe and re-analyze
+- Report clearly if the target can't be found after trying all directions
 
 ## Key Tips
-- `resource-id` attributes are the most reliable selectors — use them with `uiautomator` strategy (e.g., `resource-id` value as selector).
-- `content-desc` attributes map to `accessibility_id` strategy.
-- For complex elements, use `xpath` strategy.
-- Always get the page source after each interaction to see how the UI changed.
-- Take screenshots at key points to document the test.
-- Keep interactions simple and sequential — one step at a time.
+- Prefer visual analysis (vision_find_element) for finding elements by appearance
+- Use coordinates (x, y) from vision analysis with app_tap
+- Use XML source (app_get_source) as a fallback when you need exact selectors
+- Take screenshots at key points to document the test
+- Keep interactions simple and sequential — one step at a time
 """
 
 
@@ -209,7 +248,10 @@ async def _close_session(session_id: str) -> None:
         pass
 
 
-def _register_tool_handlers(session_id: str) -> Callable[[str, dict[str, Any]], Any]:
+def _register_tool_handlers(
+    session_id: str,
+    glm_client: Any = None,
+) -> Callable[[str, dict[str, Any]], Any]:
     """注册感知真实 session_id 的 Appium 工具处理器。
 
     返回 dispatch_fn 函数，可直接传给 agent_loop。
@@ -303,6 +345,32 @@ def _register_tool_handlers(session_id: str) -> Callable[[str, dict[str, Any]], 
     register_tool_handler("app_assert_element", _handler_assert)
     register_tool_handler("app_install", _handler_install)
 
+    # ── Vision tool handlers ────────────────────────────────────
+    if glm_client is not None:
+
+        async def _handler_vision_find(input_data: dict[str, Any]) -> dict[str, Any]:
+            from testagent.mcp_servers.vision_server.tools import vision_find_element
+
+            result = await vision_find_element(
+                image=str(input_data.get("image", "")),
+                target=str(input_data.get("target", "")),
+                context=input_data.get("context"),
+                glm_client=glm_client,
+            )
+            return {"result": result}
+
+        async def _handler_vision_describe(input_data: dict[str, Any]) -> dict[str, Any]:
+            from testagent.mcp_servers.vision_server.tools import vision_describe_screen
+
+            result = await vision_describe_screen(
+                image=str(input_data.get("image", "")),
+                glm_client=glm_client,
+            )
+            return {"result": result}
+
+        register_tool_handler("vision_find_element", _handler_vision_find)
+        register_tool_handler("vision_describe_screen", _handler_vision_describe)
+
     # 返回 dispatch_fn
     async def dispatch_fn(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
         handler = TOOL_HANDLERS.get(tool_name)
@@ -348,12 +416,25 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
     print(f"  会话已创建: {session_id[:8]}...")
     await asyncio.sleep(2)  # 等 session 就绪
 
-    # 初始化 LLM
+    # 初始化 LLM 和 Vision
     settings = get_settings()
     llm = LLMProviderFactory.create(settings)
 
+    from testagent.mcp_servers.vision_server.glm_client import GLMClient
+
+    glm_client: Any = None
+    vision_key = settings.vision_api_key.get_secret_value()
+    if vision_key:
+        glm_client = GLMClient(
+            api_key=vision_key,
+            api_url=settings.vision_api_url,
+            model=settings.vision_model,
+            timeout=settings.vision_timeout,
+            max_retries=settings.vision_max_retries,
+        )
+
     # 注册工具处理器
-    dispatch_fn = _register_tool_handlers(session_id)
+    dispatch_fn = _register_tool_handlers(session_id, glm_client=glm_client)
 
     # 构建消息
     messages: list[dict[str, Any]] = [
@@ -426,6 +507,19 @@ async def interactive_chat() -> None:
     settings = get_settings()
     llm = LLMProviderFactory.create(settings)
 
+    from testagent.mcp_servers.vision_server.glm_client import GLMClient
+
+    glm_client: Any = None
+    vision_key = settings.vision_api_key.get_secret_value()
+    if vision_key:
+        glm_client = GLMClient(
+            api_key=vision_key,
+            api_url=settings.vision_api_url,
+            model=settings.vision_model,
+            timeout=settings.vision_timeout,
+            max_retries=settings.vision_max_retries,
+        )
+
     messages: list[dict[str, Any]] = []
     dispatch_fn = None
 
@@ -461,7 +555,7 @@ async def interactive_chat() -> None:
             session_id = await _create_session()
             if session_id:
                 await asyncio.sleep(2)
-                dispatch_fn = _register_tool_handlers(session_id)
+                dispatch_fn = _register_tool_handlers(session_id, glm_client=glm_client)
                 print(f"  [Appium 会话已创建: {session_id[:8]}...]")
             else:
                 print("  [无法创建 Appium 会话，将以对话模式运行]")
