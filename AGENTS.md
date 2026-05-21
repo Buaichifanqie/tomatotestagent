@@ -71,7 +71,7 @@ docker build -f docker/Dockerfile.web_runner -t testagent/web-runner:latest .
 testagent/
 ├── testagent/gateway/          # TestGateway 调度层：FastAPI 路由、WebSocket 会话、MCP 注册发现与路由
 ├── testagent/agent/            # Agent Runtime：ReAct Loop、上下文组装、Planner/Executor/Analyzer 实现
-├── testagent/mcp_servers/      # MCP Server 实现：Playwright/API/Jira/Git/Database Server
+├── testagent/mcp_servers/      # MCP Server 实现：Playwright/API/Jira/Git/Database/Appium/Vision Server
 ├── testagent/rag/              # RAG Pipeline：摄入、分块、Embedding、向量/全文检索、RRF 融合、重排
 ├── testagent/harness/          # Harness 执行引擎：沙箱编排、Docker/MicroVM/本地三级隔离、Runner 插件
 ├── testagent/skills/           # Skill Engine：加载、解析、校验、注册、匹配、两层注入执行
@@ -301,7 +301,7 @@ async def agent_loop(messages, tools, system, max_rounds=50):
 | `api_smoke_test` | API 冒烟测试 | API | MVP | api_server, database_server | api_docs, defect_history |
 | `api_regression_test` | API 回归测试（含边界值/异常值） | API | MVP | api_server, database_server | api_docs, defect_history |
 | `web_smoke_test` | Web 页面冒烟测试 | Web | MVP | playwright_server | req_docs, locator_library |
-| `app_smoke_test` | App 核心流程冒烟测试 | App | MVP | appium_server | req_docs, locator_library |
+| `app_smoke_test` | App 核心流程冒烟测试 | App | MVP | appium_server, vision_server, database_server | req_docs, locator_library |
 | `web_visual_test` | Web 视觉回归测试 | Web | V1.0 | playwright_server | test_reports |
 | `full_regression_test` | 全量回归测试编排 | All | V1.0 | api_server, playwright_server | api_docs, defect_history |
 
@@ -424,6 +424,20 @@ API_KEY = "sk-xxxxx"  # 必须用环境变量
 ✅ Commit 格式：`type(scope): description`，type 限于 `feat/fix/refactor/test/docs/chore`
 ✅ PR 必须关联功能编号（如 F-G01），必须通过 CI（lint + typecheck + unit test）
 🚫 禁止直接 push 到 `main` 分支
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues in this repo. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles use default label names (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (CONTEXT.md + docs/adr/ at repo root). See `docs/agents/domain.md`.
 
 ### 性能约束
 
