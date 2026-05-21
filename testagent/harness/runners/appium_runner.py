@@ -184,6 +184,7 @@ class AppiumRunner(BaseRunner):
                 action_result = await self._execute_action(action, i)
                 if action.get("assertion"):
                     assertion_results.update(action_result)
+                await self._capture_screenshot()
 
             duration_ms = self._now_ms() - start_ms
             all_passed = (
