@@ -55,3 +55,6 @@ chroma_data/
 
 # Database files (local dev)
 testagent.db
+
+# User workspace
+workspace/
