@@ -53,9 +53,10 @@ class TestExecutionVerdict:
         assert ExecutionVerdict.BLOCKED.value == "BLOCKED"
         assert ExecutionVerdict.NEED_REVIEW.value == "NEED_REVIEW"
         assert ExecutionVerdict.INCONCLUSIVE.value == "INCONCLUSIVE"
+        assert ExecutionVerdict.PARTIAL.value == "PARTIAL"
 
     def test_all_members_covered(self) -> None:
-        expected = {"PASS", "FAIL", "BLOCKED", "NEED_REVIEW", "INCONCLUSIVE"}
+        expected = {"PASS", "FAIL", "BLOCKED", "NEED_REVIEW", "INCONCLUSIVE", "PARTIAL"}
         assert {m.name for m in ExecutionVerdict} == expected
 
 
