@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from testagent.config.settings import TestAgentSettings
 
 from testagent.mcp_servers.base import BaseMCPServer
-from testagent.mcp_servers.vision_server.glm_client import GLMClient
+from testagent.mcp_servers.vision_server.volcano_client import VolcanoVisionClient
 from testagent.mcp_servers.vision_server.tools import (
     vision_describe_screen,
     vision_find_element,
@@ -20,12 +20,12 @@ class VisionMCPServer(BaseMCPServer):
     def __init__(
         self,
         api_key: str = "",
-        api_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        model: str = "glm-4.6v-flash",
-        timeout: int = 30,
+        api_url: str = "https://ark.cn-beijing.volces.com/api/v3",
+        model: str = "doubao-seed-2-0-lite-260428",
+        timeout: int = 60,
         max_retries: int = 3,
     ) -> None:
-        self._glm_client = GLMClient(
+        self._vision_client = VolcanoVisionClient(
             api_key=api_key,
             api_url=api_url,
             model=model,
@@ -36,13 +36,17 @@ class VisionMCPServer(BaseMCPServer):
     _tools_spec: ClassVar[list[dict[str, object]]] = [
         {
             "name": "vision_find_element",
-            "description": "通过视觉分析在截图中查找目标 UI 元素，返回坐标和导航建议。先截取屏幕截图，再调用此工具进行分析。",
+            "description": "通过视觉分析在截图中查找目标 UI 元素，返回坐标和导航建议。使用方式：1) 先调用 app_screenshot 获取截图；2) 将返回的 screenshot_id 传入此工具进行分析。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "screenshot_id": {
+                        "type": "string",
+                        "description": "app_screenshot 返回的截图引用 ID（推荐使用）",
+                    },
                     "image": {
                         "type": "string",
-                        "description": "base64 编码的 PNG 截图数据",
+                        "description": "base64 编码的 PNG 截图数据（向后兼容，数据量太大时不推荐）",
                     },
                     "target": {
                         "type": "string",
@@ -53,21 +57,25 @@ class VisionMCPServer(BaseMCPServer):
                         "description": "可选，之前的屏幕分析上下文，用于辅助导航决策",
                     },
                 },
-                "required": ["image", "target"],
+                "required": ["target"],
             },
         },
         {
             "name": "vision_describe_screen",
-            "description": "通过视觉分析描述当前屏幕的内容和布局，返回可交互元素列表和布局信息",
+            "description": "通过视觉分析描述当前屏幕的内容和布局，返回可交互元素列表和布局信息。先调用 app_screenshot，再将返回的 screenshot_id 传入此工具。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "screenshot_id": {
+                        "type": "string",
+                        "description": "app_screenshot 返回的截图引用 ID（推荐使用）",
+                    },
                     "image": {
                         "type": "string",
-                        "description": "base64 编码的 PNG 截图数据",
+                        "description": "base64 编码的 PNG 截图数据（向后兼容）",
                     },
                 },
-                "required": ["image"],
+                "required": [],
             },
         },
     ]
@@ -87,7 +95,7 @@ class VisionMCPServer(BaseMCPServer):
         try:
             from inspect import iscoroutinefunction
 
-            injected = {**arguments, "glm_client": self._glm_client}
+            injected = {**arguments, "vision_client": self._vision_client}
             if iscoroutinefunction(tool):
                 result = await tool(**injected)
             else:
@@ -109,7 +117,7 @@ class VisionMCPServer(BaseMCPServer):
         ]
 
     async def health_check(self) -> bool:
-        return self._glm_client.is_configured
+        return self._vision_client.is_configured
 
     @classmethod
     def from_settings(

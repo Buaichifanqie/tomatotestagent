@@ -1,7 +1,7 @@
 {
-  "api_key": "be0fc053a4fa4e10b65115c0e597dee6.ZMhSKKw5UPf3iIsb",
-  "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-  "model": "glm-4.6v-flash",
+  "api_key": "ark-68796fbb-8822-498e-ba62-dd0b816d3800-c4d4e",
+  "api_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "model": "doubao-seed-2-0-lite-260428",
   "timeout": 30,
   "max_retries": 3
 }

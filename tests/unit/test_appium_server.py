@@ -41,9 +41,9 @@ def _mock_client_for_post(response_body: dict, status_code: int = 200) -> AsyncM
 
 
 class TestAppiumMCPServerListTools:
-    async def test_list_tools_returns_nine_tools(self, server: AppiumMCPServer) -> None:
+    async def test_list_tools_returns_eleven_tools(self, server: AppiumMCPServer) -> None:
         tools = await server.list_tools()
-        assert len(tools) == 9
+        assert len(tools) == 11
 
     async def test_list_tools_contains_all_tool_names(self, server: AppiumMCPServer) -> None:
         tools = await server.list_tools()
@@ -58,6 +58,8 @@ class TestAppiumMCPServerListTools:
             "app_get_source",
             "app_start_recording",
             "app_stop_recording",
+            "app_launch",
+            "app_exec",
         }
         assert tool_names == expected
 
@@ -281,9 +283,10 @@ class TestAppiumMCPServerCallTool:
 class TestAppScreenshot:
     async def test_screenshot_returns_base64_data(self) -> None:
         mock_client = _mock_client_for_post({"value": "iVBORw0KGgo="})
-        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client):
+        with patch("testagent.mcp_servers.appium_server.tools.httpx.AsyncClient", return_value=mock_client), \
+             patch("testagent.mcp_servers.shared_cache.store_screenshot", return_value="screenshot_0_test"):
             result = await app_screenshot(appium_url=APPIUM_URL)
-        assert result["screenshot_base64"] == "iVBORw0KGgo="
+        assert result["screenshot_id"] == "screenshot_0_test"
         assert result["format"] == "png"
 
     async def test_screenshot_failure_returns_error(self) -> None:

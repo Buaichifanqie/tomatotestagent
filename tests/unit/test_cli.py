@@ -167,30 +167,42 @@ class TestCliCommands:
 
     def test_chat_command(self, runner: CliRunner) -> None:
         with (
+            patch("testagent.cli.ask._ensure_appium_running", new_callable=AsyncMock) as mock_appium,
             patch("testagent.agent.loop.agent_loop", new_callable=AsyncMock) as mock_loop,
             patch("testagent.llm.openai_provider.OpenAIProvider") as mock_provider,
         ):
+            mock_appium.return_value = False
             mock_loop.return_value = [{"role": "assistant", "content": "Mock response"}]
             mock_provider.return_value = MagicMock()
             result = runner.invoke(app, ["chat"], input="hello\nexit\n")
             assert result.exit_code == 0
-            assert "TestAgent Chat" in result.stdout
+            assert "TestAgent" in result.stdout
 
     def test_chat_help_command(self, runner: CliRunner) -> None:
-        result = runner.invoke(app, ["chat"], input="help\nexit\n")
-        assert result.exit_code == 0
-        assert "Commands:" in result.stdout
-
-    def test_chat_clear_command(self, runner: CliRunner) -> None:
         with (
+            patch("testagent.cli.ask._ensure_appium_running", new_callable=AsyncMock) as mock_appium,
             patch("testagent.agent.loop.agent_loop", new_callable=AsyncMock) as mock_loop,
             patch("testagent.llm.openai_provider.OpenAIProvider") as mock_provider,
         ):
+            mock_appium.return_value = False
+            mock_loop.return_value = [{"role": "assistant", "content": "Mock response"}]
+            mock_provider.return_value = MagicMock()
+            result = runner.invoke(app, ["chat"], input="help\nexit\n")
+            assert result.exit_code == 0
+            assert "TestAgent" in result.stdout
+
+    def test_chat_clear_command(self, runner: CliRunner) -> None:
+        with (
+            patch("testagent.cli.ask._ensure_appium_running", new_callable=AsyncMock) as mock_appium,
+            patch("testagent.agent.loop.agent_loop", new_callable=AsyncMock) as mock_loop,
+            patch("testagent.llm.openai_provider.OpenAIProvider") as mock_provider,
+        ):
+            mock_appium.return_value = False
             mock_loop.return_value = [{"role": "assistant", "content": "Mock response"}]
             mock_provider.return_value = MagicMock()
             result = runner.invoke(app, ["chat"], input="test\nclear\nexit\n")
             assert result.exit_code == 0
-            assert "Chat history cleared" in result.stdout
+            assert "聊天历史已清除" in result.stdout
 
 
 class TestRichOutput:

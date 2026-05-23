@@ -15,6 +15,14 @@ logger = get_logger(__name__)
 _JSON_DUMPS = json.dumps
 _IDENTITY_RE_INJECTION_THRESHOLD = 5
 
+# ── 上下文管理常量 ─────────────────────────────────────────
+_TOKEN_THRESHOLD = 60000         # chars, ~15K tokens — 触发 auto-compact 的阈值
+_TOOL_RESULT_TRUNCATE = 3000     # chars, 单条 tool result 最大长度
+_PAGE_SOURCE_TRUNCATE = 2500     # chars, XML 页面源码截断长度
+_MICROCOMPACT_TOOL_CUT = 800     # chars, microcompact 时 tool result 保留长度
+_KEEP_HEAD = 1                   # auto-compact 保留的前几条消息
+_KEEP_TAIL = 3                   # auto-compact 保留的后几条消息
+
 
 def _normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
     """Normalize tool call arguments from various LLM output formats.
@@ -66,7 +74,7 @@ async def agent_loop(
     llm_provider: ILLMProvider,
     dispatch_fn: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     max_rounds: int = 50,
-    token_threshold: int = 100000,
+    token_threshold: int = _TOKEN_THRESHOLD,
     progress_callback: Callable[[dict[str, Any], list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -79,21 +87,65 @@ async def agent_loop(
     4. if stop_reason != "tool_use" -> return -- 单退出条件
     5. dispatch_fn() -- 工具调用
     6. 追加 tool_results -> 继续循环
+
+    预算耗尽恢复:
+    若 LLM 调用抛出 LLMTokenLimitError(BUDGET_EXHAUSTED):
+    - 立即压缩消息（保留最近 2 轮）
+    - 重置预算管理器
+    - 重试 LLM 调用
     """
+    from testagent.common.errors import LLMTokenLimitError
+
     _dispatch = dispatch_fn or _default_dispatch_fn
 
     for _round in range(max_rounds):
         microcompact(messages)
 
         if estimate_tokens(messages) > token_threshold:
-            messages[:] = auto_compact(messages, llm_provider, system)
+            messages[:] = auto_compact(messages)
             identity_re_injection(system, messages)
 
-        response: LLMResponse = await llm_provider.chat(
-            system=system,
-            messages=messages,
-            tools=tools,
-        )
+        try:
+            response: LLMResponse = await llm_provider.chat(
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
+        except LLMTokenLimitError as exc:
+            if exc.code == "BUDGET_EXHAUSTED":
+                logger.warning(
+                    "Token budget exhausted, performing emergency compact...",
+                    extra={"extra_data": {"detail": str(exc)}},
+                )
+                # 紧急压缩：保留最近 2 轮的消息
+                if len(messages) > 6:
+                    tail_count = 6
+                elif len(messages) > 3:
+                    tail_count = 3
+                else:
+                    tail_count = 0
+
+                if tail_count:
+                    head = messages[:1]
+                    tail = messages[-tail_count:]
+                    summary = _build_summary_text(messages[1:-tail_count])
+                    messages[:] = head
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Compressed Summary of previous turns]\n{summary}\n[End Summary]",
+                    })
+                    messages.extend(tail)
+                # 重置预算
+                llm_provider.reset_budget()
+                logger.info("Budget reset after emergency compact, retrying...")
+                # 重试 LLM 调用
+                response = await llm_provider.chat(
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                )
+            else:
+                raise
 
         # ── 转换为 OpenAI 兼容的 assistant 消息格式 ──
         text_parts: list[str] = []
@@ -165,8 +217,8 @@ async def agent_loop(
                 )
             # Truncate large tool results to avoid exceeding context window
             result_str = _JSON_DUMPS(result, ensure_ascii=False)
-            if len(result_str) > 8000:
-                result_str = result_str[:7997] + "..."
+            if len(result_str) > _TOOL_RESULT_TRUNCATE:
+                result_str = result_str[:_TOOL_RESULT_TRUNCATE - 3] + "..."
             tool_results.append(result)
             messages.append({
                 "role": "tool",
@@ -181,11 +233,28 @@ async def agent_loop(
 
 
 def microcompact(messages: list[dict[str, Any]]) -> None:
-    """每轮循环后自动移除冗余空白和工具调用的冗余输出(原地修改)"""
+    """每轮的去冗余压缩（原地修改，无 API 调用）
+
+    - 移除空白 content
+    - 截断过长的 tool result
+    - 压缩 XML/JSON 页面源码
+    """
     for msg in messages:
         content = msg.get("content")
+
+        # Tool result 消息: content 是字符串，截断过长的
+        if msg.get("role") == "tool" and isinstance(content, str):
+            if len(content) > _MICROCOMPACT_TOOL_CUT:
+                half = _MICROCOMPACT_TOOL_CUT // 2
+                msg["content"] = content[:half] + f"\n... (truncated {len(content) - 2 * half} chars) ...\n" + content[-half:]
+            continue
+
         if isinstance(content, str):
-            msg["content"] = content.strip()
+            content = content.strip()
+            if not content:
+                msg["content"] = None
+            else:
+                msg["content"] = content
         elif isinstance(content, list):
             compacted: list[dict[str, Any]] = []
             for block in content:
@@ -198,29 +267,28 @@ def microcompact(messages: list[dict[str, Any]]) -> None:
 
 def auto_compact(
     messages: list[dict[str, Any]],
-    llm_provider: ILLMProvider,
-    system: str,
 ) -> list[dict[str, Any]]:
-    """token 超过阈值时, 用 LLM 对历史消息生成摘要替换原文"""
-    if len(messages) <= 4:
+    """消息列表压缩：将历史消息（除首尾）替换为结构化摘要（无 API 调用）
+
+    保留:
+    - 第一条消息（原始用户 query）
+    - 最后 KEEP_TAIL 条消息（最近的交互上下文）
+    中间部分 → 结构化摘要
+    """
+    if len(messages) <= _KEEP_HEAD + _KEEP_TAIL + 1:
         return list(messages)
 
-    keep_head = 1
-    keep_tail = 2
-
-    head = messages[:keep_head]
-    middle = messages[keep_head:-keep_tail]
-    tail = messages[-keep_tail:]
+    head = messages[:_KEEP_HEAD]
+    middle = messages[_KEEP_HEAD:-_KEEP_TAIL]
+    tail = messages[-_KEEP_TAIL:]
 
     summary_text = _build_summary_text(middle)
 
     compressed: list[dict[str, Any]] = list(head)
-    compressed.append(
-        {
-            "role": "user",
-            "content": f"[Conversation Summary]\n{summary_text}\n[End Summary]",
-        }
-    )
+    compressed.append({
+        "role": "user",
+        "content": f"[Conversation Summary]\n{summary_text}\n[End Summary]",
+    })
     compressed.extend(tail)
 
     logger.info(
@@ -229,6 +297,7 @@ def auto_compact(
             "extra_data": {
                 "original_count": len(messages),
                 "compressed_count": len(compressed),
+                "summary_len": len(summary_text),
             }
         },
     )
@@ -261,11 +330,14 @@ def identity_re_injection(system: str, messages: list[dict[str, Any]]) -> None:
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
-    """估算 messages 的 token 数(简单实现: len(json.dumps(messages)) // 4)"""
+    """估算 messages 的 token 数（简单实现: len(json.dumps) // 4）"""
     try:
         raw = _JSON_DUMPS(messages, ensure_ascii=False, default=str)
     except (TypeError, ValueError) as exc:
-        logger.warning("Token estimation JSON serialization failed", extra={"extra_data": {"error": str(exc)}})
+        logger.warning(
+            "Token estimation failed",
+            extra={"extra_data": {"error": str(exc)}},
+        )
         return 0
     return len(raw) // 4
 
@@ -317,7 +389,13 @@ def _compact_tool_block(block: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _build_summary_text(messages: list[dict[str, Any]]) -> str:
-    """从消息列表生成简单摘要文本"""
+    """从消息列表生成结构化摘要（无 API 调用）
+
+    聚焦于：
+    - 用户的意图和目标
+    - Assistant 的推理和决策
+    - 调用了哪些工具及其关键结果（不含冗余输出）
+    """
     if not messages:
         return "No messages."
 
@@ -325,22 +403,57 @@ def _build_summary_text(messages: list[dict[str, Any]]) -> str:
     for msg in messages:
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls")
 
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = str(block.get("text", ""))
-                    if text:
-                        text_parts.append(text[:200])
-                elif isinstance(block, dict) and block.get("type") == "tool_use":
-                    text_parts.append(f"[tool:{block.get('name', '')}]")
-            content_str = " ".join(text_parts)
-        elif isinstance(content, str):
-            content_str = content[:200]
-        else:
-            content_str = str(content)[:200]
+        if role == "user" and isinstance(content, str):
+            # 保留用户意图
+            text = content.strip()
+            # 跳过系统注入的大段文本
+            if text.startswith("[Conversation Summary]") or text.startswith("[Agent Identity]"):
+                parts.append(f"User: [system context]")
+            elif text.startswith("[Compressed Summary"):
+                parts.append(f"User: [previous summary]")
+            else:
+                parts.append(f"User: {text[:300]}")
 
-        parts.append(f"{role}: {content_str}")
+        elif role == "assistant":
+            texts: list[str] = []
+            tools_used: list[str] = []
+
+            if isinstance(content, str) and content:
+                texts.append(content[:300])
+            elif isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "text":
+                            t = str(b.get("text", ""))[:200]
+                            if t:
+                                texts.append(t)
+                        elif b.get("type") == "tool_use":
+                            tools_used.append(str(b.get("name", "")))
+
+            if tool_calls:
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    args = fn.get("arguments", "")
+                    if name:
+                        # Compact args — just show key params
+                        if isinstance(args, str) and len(args) > 80:
+                            args = args[:77] + "..."
+                        tools_used.append(f"{name}({args})")
+
+            line_parts_list: list[str] = []
+            if texts:
+                line_parts_list.append(texts[0])
+            if tools_used:
+                line_parts_list.append(f"[{', '.join(tools_used[:5])}]")
+            parts.append(f"Assistant: {' | '.join(line_parts_list)}")
+
+        elif role == "tool":
+            # 只保留 tool result 的关键信息，不保留完整输出
+            content_str = str(content)[:120] if isinstance(content, str) else str(content)[:120]
+            # 只保留前 120 字符作为摘要
+            parts.append(f"Tool: {content_str[:120]}")
 
     return "\n".join(parts)

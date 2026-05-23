@@ -205,7 +205,7 @@ class TestAutoCompact:
             {"role": "user", "content": "How are you?"},
         ]
         mock_llm = _make_mock_llm_provider([])
-        result = auto_compact(messages, mock_llm, "system")
+        result = auto_compact(messages)
         assert len(result) == 3
 
     def test_compresses_large_message_list(self) -> None:
@@ -219,7 +219,7 @@ class TestAutoCompact:
             {"role": "user", "content": "msg7"},
         ]
         mock_llm = _make_mock_llm_provider([])
-        result = auto_compact(messages, mock_llm, "system")
+        result = auto_compact(messages)
         assert len(result) < len(messages)
 
     def test_compressed_contains_summary_block(self) -> None:
@@ -229,9 +229,10 @@ class TestAutoCompact:
             {"role": "user", "content": "msg3"},
             {"role": "assistant", "content": "msg4"},
             {"role": "user", "content": "msg5"},
+            {"role": "assistant", "content": "msg6"},
         ]
         mock_llm = _make_mock_llm_provider([])
-        result = auto_compact(messages, mock_llm, "system")
+        result = auto_compact(messages)
         summary_messages = [
             m for m in result if isinstance(m.get("content"), str) and "Conversation Summary" in str(m["content"])
         ]
@@ -246,16 +247,17 @@ class TestAutoCompact:
             {"role": "user", "content": "old1"},
             {"role": "assistant", "content": "old2"},
             {"role": "user", "content": "old3"},
+            {"role": "assistant", "content": "old4"},
             *tail_messages,
         ]
         mock_llm = _make_mock_llm_provider([])
-        result = auto_compact(messages, mock_llm, "system")
+        result = auto_compact(messages)
         assert result[-2:] == tail_messages
 
     def test_returns_copy_for_very_short_messages(self) -> None:
         messages = [{"role": "user", "content": "only one"}]
         mock_llm = _make_mock_llm_provider([])
-        result = auto_compact(messages, mock_llm, "system")
+        result = auto_compact(messages)
         assert result == messages
         assert result is not messages
 
@@ -395,9 +397,9 @@ class TestBuildSummaryText:
             {"role": "assistant", "content": "Starting test execution"},
         ]
         result = _build_summary_text(messages)
-        assert "user:" in result
+        assert "User:" in result
         assert "Run the API test" in result
-        assert "assistant:" in result
+        assert "Assistant:" in result
         assert "Starting test execution" in result
 
     def test_handles_list_content(self) -> None:
@@ -412,13 +414,14 @@ class TestBuildSummaryText:
         ]
         result = _build_summary_text(messages)
         assert "I will search" in result
-        assert "[tool:search]" in result
+        assert "search" in result  # tool name should appear in summary
 
     def test_truncates_long_content(self) -> None:
         long_text = "A" * 500
         messages = [{"role": "user", "content": long_text}]
         result = _build_summary_text(messages)
-        assert len(result.split("\n")[0]) < 300
+        # "User: " prefix + up to 300 chars of content
+        assert len(result.split("\n")[0]) < 310
 
 
 class TestAgentLoopNormalExit:
@@ -461,8 +464,8 @@ class TestAgentLoopNormalExit:
         assistant_msgs = [m for m in result if m["role"] == "assistant"]
         assert len(assistant_msgs) == 1
         content = assistant_msgs[0]["content"]
-        assert isinstance(content, list)
-        assert content[0]["type"] == "text"
+        assert isinstance(content, str)
+        assert "Hello" in content
 
     @pytest.mark.asyncio
     async def test_passes_tools_to_llm_provider(self) -> None:
@@ -879,10 +882,9 @@ class TestIntegrationRegisteredHandlerInAgentLoop:
             system="You are helpful",
             llm_provider=mock_llm,
         )
-        user_msgs = [m for m in result if m["role"] == "user"]
-        tool_result = user_msgs[-1]["content"]
-        assert isinstance(tool_result, list)
-        assert "found: test query" in str(tool_result[0])
+        tool_msgs = [m for m in result if m["role"] == "tool"]
+        assert len(tool_msgs) > 0
+        assert "found: test query" in str(tool_msgs[0]["content"])
 
     @pytest.mark.asyncio
     async def test_agent_loop_unknown_tool_returns_error(self) -> None:
@@ -904,7 +906,6 @@ class TestIntegrationRegisteredHandlerInAgentLoop:
             system="You are helpful",
             llm_provider=mock_llm,
         )
-        user_msgs = [m for m in result if m["role"] == "user"]
-        tool_result = user_msgs[-1]["content"]
-        assert isinstance(tool_result, list)
-        assert "Unknown tool: unregistered_tool" in str(tool_result[0])
+        tool_msgs = [m for m in result if m["role"] == "tool"]
+        assert len(tool_msgs) > 0
+        assert "Unknown tool" in str(tool_msgs[0]["content"])

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import platform
+import shutil
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from testagent.common.errors import LLMTokenLimitError
 from testagent.common.logging import get_logger
 
 if TYPE_CHECKING:
@@ -14,6 +19,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _APPIUM_URL = "http://localhost:4723"
+
+# 禁用 Windows 系统代理对 localhost 的影响（httpx 在 Windows 上会自动走系统代理）
+os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,0.0.0.0")
 
 # ── 工具定义 (OpenAI-compatible format, 传给 LLM) ──────────────────────────
 
@@ -117,27 +125,61 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "vision_find_element",
-        "description": "通过视觉分析在截图中查找目标 UI 元素。传入 base64 截图和目标描述，返回元素坐标。如果目标不在当前屏幕，会建议滑动方向。",
+        "name": "app_launch",
+        "description": "通过包名直接启动应用，比截图找图标点击更快更稳定。例如启动哔哩哔哩: app_launch(package='tv.danmaku.bili')",
         "parameters": {
             "type": "object",
             "properties": {
-                "image": {"type": "string", "description": "base64 编码的 PNG 截图"},
+                "package": {"type": "string", "description": "应用包名，如 tv.danmaku.bili"},
+                "activity": {"type": "string", "description": "可选，Activity 名称，如 .MainActivity"},
+            },
+            "required": ["package"],
+        },
+    },
+    {
+        "name": "app_exec",
+        "description": "在设备上执行 shell 命令（通过 Appium mobile:shell）。适用于快速操作如开关WiFi、检查设备状态等。示例: svc wifi enable / svc wifi disable / input keyevent KEYCODE_HOME / dumpsys battery",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的 shell 命令"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "vision_find_element",
+        "description": "通过视觉分析在截图中查找目标 UI 元素。先用 app_screenshot 获取截图得到 screenshot_id，再传入此工具进行分析。返回元素坐标和导航建议。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "screenshot_id": {"type": "string", "description": "app_screenshot 返回的截图引用 ID（推荐方式）"},
                 "target": {"type": "string", "description": "要查找的目标的自然语言描述，如'美团 app 图标'"},
                 "context": {"type": "string", "description": "可选的上下文信息"},
             },
-            "required": ["image", "target"],
+            "required": ["screenshot_id", "target"],
         },
     },
     {
         "name": "vision_describe_screen",
-        "description": "通过视觉分析描述当前屏幕的所有内容和布局，返回可交互元素列表",
+        "description": "通过视觉分析描述当前屏幕的所有内容和布局。先用 app_screenshot 获取截图得到 screenshot_id，再传入此工具进行分析。",
         "parameters": {
             "type": "object",
             "properties": {
-                "image": {"type": "string", "description": "base64 编码的 PNG 截图"},
+                "screenshot_id": {"type": "string", "description": "app_screenshot 返回的截图引用 ID（推荐方式）"},
             },
-            "required": ["image"],
+            "required": ["screenshot_id"],
+        },
+    },
+    {
+        "name": "app_wait",
+        "description": "等待指定秒数让界面加载或动画完成。启动应用后、点击后、滑动后，等待界面稳定后再进行下一步。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "integer", "description": "等待秒数，默认 2 秒"},
+            },
+            "required": [],
         },
     },
 ]
@@ -145,45 +187,23 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
 _SYSTEM_PROMPT = """\
 You are TestAgent, an AI-powered mobile testing assistant connected to an Android emulator via Appium.
 
-## Your Capabilities
-You have TWO ways to understand the mobile screen:
-1. **XML Analysis** (app_get_source) — Get the current screen's XML page source for precise element selectors
-2. **Visual Analysis** (vision_find_element / vision_describe_screen) — Use screenshot + multimodal AI to understand the screen visually
+## Available Tools
+- **app_launch(package, activity?)** — 通过包名启动应用
+- **app_exec(command)** — 在设备上执行 shell 命令
+- **app_get_source()** — 获取当前屏幕 XML 页面源码
+- **app_screenshot()** — 截取当前屏幕截图，返回 screenshot_id
+- **app_tap(selector?, x?, y?, strategy?)** — 点击元素或坐标。如有 text/content-desc，用 strategy="uiautomator" 传 selector 更精准
+- **app_type(selector, text, strategy?)** — 向输入框输入文本
+- **app_swipe(start_x, start_y, end_x, end_y, duration?)** — 滑动手势
+- **app_assert_element(selector, assertion, expected?, strategy?)** — 断言元素状态
+- **app_wait(seconds?)** — 等待指定秒数让界面加载稳定
+- **vision_find_element(screenshot_id, target, context?)** — 在截图中视觉查找目标 UI 元素，返回坐标
+- **vision_describe_screen(screenshot_id)** — 视觉描述当前屏幕内容
 
-Available tools:
-- **vision_find_element** — Find a UI element on screen by visual analysis. Pass a screenshot and describe what you're looking for.
-- **vision_describe_screen** — Get a visual description of the current screen content and layout.
-- **app_get_source** — Get the current screen XML page source.
-- **app_screenshot** — Take a screenshot of the current screen.
-- **app_tap** — Tap/click a UI element using its selector or coordinates.
-- **app_type** — Type text into an input field.
-- **app_swipe** — Swipe across the screen.
-- **app_assert_element** — Check whether an element is visible, has certain text, or has an attribute.
-- **app_start_recording** — Start recording the device screen.
-- **app_stop_recording** — Stop recording and get the video.
-
-## Testing Workflow
-When given a testing task:
-1. **Visually Explore**: Take a screenshot and call vision_describe_screen to understand the current screen layout.
-2. **Find Elements**: When you need to interact with a specific element, take a screenshot and call vision_find_element with a description of what you're looking for.
-3. **Smart Navigation**: If the target isn't found on the current screen, vision_find_element will suggest a swipe direction. Follow the suggestion, then retry.
-4. **Interact**: Use app_tap (with coordinates from vision analysis) or app_type to interact with elements.
-5. **Verify**: Use app_assert_element to check expected element states.
-6. **Record**: Use app_start_recording at the start and app_stop_recording at the end to capture video evidence.
-
-## Smart Navigation Rules
-- If an element isn't found on the current screen, try swiping to find it
-- Follow the AI's suggested swipe direction first
-- If the AI is unsure, try: swipe left → swipe right → swipe up → swipe down
-- Take a screenshot after each swipe and re-analyze
-- Report clearly if the target can't be found after trying all directions
-
-## Key Tips
-- Prefer visual analysis (vision_find_element) for finding elements by appearance
-- Use coordinates (x, y) from vision analysis with app_tap
-- Use XML source (app_get_source) as a fallback when you need exact selectors
-- Take screenshots at key points to document the test
-- Keep interactions simple and sequential — one step at a time
+## Notes
+- app_launch 成功后会自动等待 3 秒让应用加载
+- app_tap / app_swipe 成功后会自动等待 2 秒让界面稳定
+- Session 过期会自动恢复，无需人工干预
 """
 
 
@@ -206,46 +226,285 @@ async def _check_appium_health() -> bool:
         return False
 
 
-async def _create_session() -> str | None:
-    """在 Android 模拟器上创建 Appium 会话。"""
-    capabilities = {
-        "capabilities": {
-            "alwaysMatch": {
-                "platformName": "Android",
-                "appium:automationName": "UiAutomator2",
-                "appium:deviceName": "emulator-5554",
-                "appium:udid": "emulator-5554",
-                "appium:noReset": True,
-                "appium:autoGrantPermissions": True,
-                "appium:newCommandTimeout": 120,
-            },
-            "firstMatch": [{}],
-        }
-    }
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{_APPIUM_URL}/session", json=capabilities)
-            if resp.status_code == 200:
-                data = resp.json()
-                sid = data.get("value", {}).get("sessionId") or data.get("sessionId")
-                if sid:
-                    return sid
-            logger.warning(
-                "Session creation failed",
-                extra={"extra_data": {"status": resp.status_code, "body": resp.text[:200]}},
+def _ensure_android_home() -> str | None:
+    """Auto-detect Android SDK path and set ANDROID_HOME / ANDROID_SDK_ROOT if not already set."""
+    if os.environ.get("ANDROID_HOME") and os.environ.get("ANDROID_SDK_ROOT"):
+        return os.environ["ANDROID_HOME"]
+
+    candidates = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Android", "Sdk"),
+        os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Local", "Android", "Sdk"),
+        "C:\\Android\\Sdk",
+        os.path.expanduser("~/Android/Sdk"),
+    ]
+
+    for path in candidates:
+        if not path:
+            continue
+        if os.path.isdir(os.path.join(path, "platform-tools")):
+            os.environ["ANDROID_HOME"] = path
+            os.environ["ANDROID_SDK_ROOT"] = path
+            logger.debug(
+                "Auto-detected Android SDK",
+                extra={"extra_data": {"path": path}},
             )
-            return None
-    except Exception as exc:
-        logger.error(
-            "Session creation error",
-            extra={
-                "extra_data": {
-                    "error": str(exc) or type(exc).__name__,
-                    "error_type": type(exc).__name__,
-                }
-            },
+            return path
+    return None
+
+
+_appium_process: asyncio.subprocess.Process | None = None
+
+# Device screen dimensions — fetched once at session init, cached globally
+_device_width: int = 1080
+_device_height: int = 2400
+
+
+def _find_appium() -> str:
+    """查找 Appium 可执行文件路径。
+
+    在 Windows 上 npm 安装的是 appium.cmd（批处理文件），
+    create_subprocess_exec 需要完整路径才能正确执行。
+    """
+    # 先尝试 shutil.which() — 跨平台
+    resolved = shutil.which("appium")
+    if resolved:
+        return resolved
+    # Windows 下 npm 全局安装目录
+    if platform.system() == "Windows":
+        npm_dir = os.path.join(os.environ.get("APPDATA", ""), "npm")
+        for name in ("appium.cmd", "appium"):
+            full = os.path.join(npm_dir, name)
+            if os.path.isfile(full):
+                return full
+        # 也检查 LOCALAPPDATA\npm
+        npm_dir2 = os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm")
+        for name in ("appium.cmd", "appium"):
+            full = os.path.join(npm_dir2, name)
+            if os.path.isfile(full):
+                return full
+    return "appium"  # fallback, maybe Unix PATH works
+
+
+async def _kill_process_on_port(port: int) -> None:
+    """Kill any process listening on the given port.
+
+    策略：
+    1. Windows: netstat → taskkill（最通用，无语言问题）
+    2. Unix: pkill / lsof + kill
+    """
+    pids: set[str] = set()
+
+    if platform.system() == "Windows":
+        # 方法 A: netstat（最通用，所有 Windows 版本可用）
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "netstat", "-ano",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            output = stdout.decode("utf-8", errors="replace")
+            for line in output.splitlines():
+                if f":{port}" in line and ("LISTENING" in line or "ESTABLISHED" in line):
+                    parts = line.strip().split()
+                    if parts:
+                        pid = parts[-1]
+                        if pid.isdigit():
+                            pids.add(pid)
+        except Exception:
+            pass
+
+        # 方法 B: PowerShell（备用）
+        if not pids:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue "
+                    f"| Select-Object -ExpandProperty OwningProcess",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
+                for pid in stdout.decode().strip().splitlines():
+                    pid = pid.strip()
+                    if pid and pid.isdigit():
+                        pids.add(pid)
+            except Exception:
+                pass
+
+        # 杀进程
+        for pid in pids:
+            try:
+                await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/PID", pid,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+    else:
+        try:
+            await asyncio.create_subprocess_exec(
+                "pkill", "-f", "appium",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    if pids:
+        await asyncio.sleep(1)
+
+
+async def _ensure_appium_running() -> bool:
+    """Ensure Appium server is running with ANDROID_HOME set.
+
+    策略：
+    1. 先检查已有 Appium 是否可用（仅 /status 检查，不创建 session）
+    2. 如果不可用，杀掉旧进程、启动新实例
+    3. 等待新实例就绪
+    """
+    global _appium_process
+
+    # ── 步骤 1: 检查已有 Appium ──
+    for _ in range(5):
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                resp = await client.get(f"{_APPIUM_URL}/status")
+            if resp.status_code == 200:
+                logger.info("Existing Appium is healthy")
+                return True
+        except (httpx.RequestError, httpx.TimeoutException):
+            pass
+        await asyncio.sleep(1)
+
+    # ── 步骤 2: 已有 Appium 不可用，杀旧进程 ──
+    logger.info("Existing Appium not available, restarting...")
+
+    if _appium_process and _appium_process.returncode is None:
+        _appium_process.kill()
+        try:
+            await asyncio.wait_for(_appium_process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+        _appium_process = None
+
+    await _kill_process_on_port(4723)
+    await asyncio.sleep(2)
+
+    # ── 步骤 3: 启动新 Appium ──
+    android_home = _ensure_android_home()
+    extra_env = {}
+    if android_home:
+        extra_env["ANDROID_HOME"] = android_home
+        extra_env["ANDROID_SDK_ROOT"] = android_home
+
+    appium_path = _find_appium()
+    env = {**os.environ, **extra_env}
+
+    if platform.system() == "Windows" and android_home:
+        import tempfile
+
+        wrapper = os.path.join(tempfile.gettempdir(), "_appium_testagent_wrapper.bat")
+        with open(wrapper, "w", encoding="ascii") as f:
+            f.write(
+                f'@echo off\r\n'
+                f'set "ANDROID_HOME={android_home}"\r\n'
+                f'set "ANDROID_SDK_ROOT={android_home}"\r\n'
+                f'"{appium_path}" --allow-insecure "*:adb_shell" %*\r\n'
+            )
+        _appium_process = await asyncio.create_subprocess_exec(
+            wrapper,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
         )
-        return None
+    elif appium_path.endswith(".cmd"):
+        _appium_process = await asyncio.create_subprocess_shell(
+            appium_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+    else:
+        _appium_process = await asyncio.create_subprocess_exec(
+            appium_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+
+    # ── 步骤 4: 等待就绪 ──
+    for _ in range(30):
+        await asyncio.sleep(1)
+        try:
+            async with httpx.AsyncClient(timeout=2) as client:
+                resp = await client.get(f"{_APPIUM_URL}/status")
+            if resp.status_code == 200:
+                test_sid = await _create_session()
+                if test_sid:
+                    await _close_session(test_sid)
+                    logger.info("Appium started with ANDROID_HOME, session verified OK")
+                    return True
+                logger.warning("Appium server is up but session creation failed, waiting...")
+        except httpx.RequestError:
+            continue
+
+    logger.error("Failed to start Appium or create test session")
+    return False
+
+
+async def _create_session() -> str | None:
+    """在 Android 模拟器上创建 Appium 会话。
+
+    尝试多种 capability 格式以兼容不同 Appium 版本：
+    1. 先试 appium:androidHome（Appium 2.x 标准格式）
+    2. 再试 androidHome（部分旧版兼容）
+    """
+    android_home = _ensure_android_home()
+    always_match: dict[str, object] = {
+        "platformName": "Android",
+        "appium:automationName": "UiAutomator2",
+        "appium:deviceName": "emulator-5554",
+        "appium:udid": "emulator-5554",
+        "appium:noReset": True,
+        "appium:autoGrantPermissions": True,
+        "appium:newCommandTimeout": 120,
+        # 启用 adb_shell 功能（Appium 3.x 格式：*:adb_shell）
+        "appium:allowInsecure": "*:adb_shell",
+    }
+
+    # Build capability variants for ANDROID_HOME
+    cap_variants: list[dict[str, object]] = [dict(always_match)]
+    if android_home:
+        cap_variants[0]["appium:androidHome"] = android_home
+        # Also try without appium: prefix (some Appium versions)
+        alt = dict(always_match)
+        alt["androidHome"] = android_home
+        cap_variants.append(alt)
+
+    for caps in cap_variants:
+        capabilities = {"capabilities": {"alwaysMatch": caps, "firstMatch": [{}]}}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(f"{_APPIUM_URL}/session", json=capabilities)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    sid = data.get("value", {}).get("sessionId") or data.get("sessionId")
+                    if sid:
+                        return sid
+                body = resp.text[:200]
+                logger.warning(
+                    "Session creation failed",
+                    extra={"extra_data": {"status": resp.status_code, "body": body}},
+                )
+        except Exception as exc:
+            logger.error(
+                "Session creation error",
+                extra={"extra_data": {"error": str(exc) or type(exc).__name__}},
+            )
+
+    return None
 
 
 async def _close_session(session_id: str) -> None:
@@ -257,14 +516,55 @@ async def _close_session(session_id: str) -> None:
         pass
 
 
+async def _get_device_screen_size(session_id: str) -> tuple[int, int]:
+    """通过 ADB 获取设备真实屏幕分辨率（物理像素）。
+
+    返回 (width, height)，失败时返回默认 (1080, 2400)。
+    """
+    from testagent.mcp_servers.appium_server.tools import app_exec
+
+    try:
+        result = await app_exec(
+            command="wm size",
+            appium_url=_APPIUM_URL,
+            session_id=session_id,
+        )
+        body = result.get("body", {})
+        value = str(body.get("value", ""))
+        # "Physical size: 1080x2400" or "1080x2400"
+        m = re.search(r"(\d+)x(\d+)", value)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            logger.debug(
+                "Device screen size",
+                extra={"extra_data": {"width": w, "height": h}},
+            )
+            return w, h
+    except Exception as exc:
+        logger.warning(
+            "Failed to get device screen size",
+            extra={"extra_data": {"error": str(exc)}},
+        )
+    return 1080, 2400
+
+
 def _register_tool_handlers(
     session_id: str,
     glm_client: Any = None,
+    device_width: int | None = None,
+    device_height: int | None = None,
 ) -> Callable[[str, dict[str, Any]], Any]:
     """注册感知真实 session_id 的 Appium 工具处理器。
 
     返回 dispatch_fn 函数，可直接传给 agent_loop。
     """
+    global _device_width, _device_height
+    if device_width is not None:
+        _device_width = device_width
+    if device_height is not None:
+        _device_height = device_height
+    dw = _device_width
+    dh = _device_height
     from testagent.agent.loop import TOOL_HANDLERS, register_tool_handler
 
     async def _handler_source(input_data: dict[str, Any]) -> dict[str, Any]:
@@ -272,8 +572,8 @@ def _register_tool_handlers(
 
         result = await app_get_source(appium_url=_APPIUM_URL, session_id=session_id)
         src = result.get("source", "")
-        if len(src) > 5000:
-            result["source"] = src[:5000] + f"\n... [truncated {len(src) - 5000} more chars]"
+        if len(src) > 2500:
+            result["source"] = src[:2500] + f"\n... [truncated {len(src) - 2500} more chars]"
         return {"result": result}
 
     async def _handler_screenshot(input_data: dict[str, Any]) -> dict[str, Any]:
@@ -283,21 +583,42 @@ def _register_tool_handlers(
         return {"result": result}
 
     async def _handler_tap(input_data: dict[str, Any]) -> dict[str, Any]:
-        from testagent.mcp_servers.appium_server.tools import app_tap
+        from testagent.mcp_servers.appium_server.tools import app_exec, app_tap
 
         x_raw = input_data.get("x")
         y_raw = input_data.get("y")
         x = int(x_raw) if x_raw is not None else None
         y = int(y_raw) if y_raw is not None else None
 
+        # 坐标点击：精确点击，不做任何偏移或 XML 元素查找
+        if x is not None and y is not None:
+            result = await app_exec(
+                command=f"input tap {x} {y}",
+                appium_url=_APPIUM_URL, session_id=session_id,
+            )
+            await asyncio.sleep(2)
+            return {"result": result, "method": "adb"}
+
         result = await app_tap(
             selector=str(input_data.get("selector", "")),
             strategy=str(input_data.get("strategy", "accessibility_id")),
-            x=x,
-            y=y,
             appium_url=_APPIUM_URL,
             session_id=session_id,
         )
+        # 点击后等待界面稳定再返回
+        if result.get("status_code") == 200 or "status_code" not in result:
+            await asyncio.sleep(2)
+        return {"result": result}
+
+        result = await app_tap(
+            selector=str(input_data.get("selector", "")),
+            strategy=str(input_data.get("strategy", "accessibility_id")),
+            appium_url=_APPIUM_URL,
+            session_id=session_id,
+        )
+        # 点击后等待界面稳定再返回
+        if result.get("status_code") == 200 or "status_code" not in result:
+            await asyncio.sleep(2)
         return {"result": result}
 
     async def _handler_type(input_data: dict[str, Any]) -> dict[str, Any]:
@@ -324,6 +645,8 @@ def _register_tool_handlers(
             appium_url=_APPIUM_URL,
             session_id=session_id,
         )
+        if result.get("status_code") == 200 or "status_code" not in result:
+            await asyncio.sleep(2)
         return {"result": result}
 
     async def _handler_assert(input_data: dict[str, Any]) -> dict[str, Any]:
@@ -349,6 +672,35 @@ def _register_tool_handlers(
         )
         return {"result": result}
 
+    async def _handler_launch(input_data: dict[str, Any]) -> dict[str, Any]:
+        from testagent.mcp_servers.appium_server.tools import app_launch
+
+        result = await app_launch(
+            package=str(input_data.get("package", "")),
+            activity=str(input_data.get("activity", "")),
+            appium_url=_APPIUM_URL,
+            session_id=session_id,
+        )
+        # 启动应用后等待 5 秒让界面加载完成（冷启动可能需要较长时间）
+        if result.get("result", "").startswith("App"):
+            await asyncio.sleep(5)
+        return {"result": result}
+
+    async def _handler_exec(input_data: dict[str, Any]) -> dict[str, Any]:
+        from testagent.mcp_servers.appium_server.tools import app_exec
+
+        result = await app_exec(
+            command=str(input_data.get("command", "")),
+            appium_url=_APPIUM_URL,
+            session_id=session_id,
+        )
+        return {"result": result}
+
+    async def _handler_wait(input_data: dict[str, Any]) -> dict[str, Any]:
+        seconds = int(input_data.get("seconds", 2))
+        await asyncio.sleep(seconds)
+        return {"result": {"waited": seconds, "message": f"已等待 {seconds} 秒"}}
+
     # 注册所有 handler
     register_tool_handler("app_get_source", _handler_source)
     register_tool_handler("app_screenshot", _handler_screenshot)
@@ -357,6 +709,9 @@ def _register_tool_handlers(
     register_tool_handler("app_swipe", _handler_swipe)
     register_tool_handler("app_assert_element", _handler_assert)
     register_tool_handler("app_install", _handler_install)
+    register_tool_handler("app_launch", _handler_launch)
+    register_tool_handler("app_exec", _handler_exec)
+    register_tool_handler("app_wait", _handler_wait)
 
     # ── Vision tool handlers ────────────────────────────────────
     if glm_client is not None:
@@ -365,10 +720,13 @@ def _register_tool_handlers(
             from testagent.mcp_servers.vision_server.tools import vision_find_element
 
             result = await vision_find_element(
-                image=str(input_data.get("image", "")),
+                screenshot_id=input_data.get("screenshot_id"),
+                image=input_data.get("image"),
                 target=str(input_data.get("target", "")),
                 context=input_data.get("context"),
-                glm_client=glm_client,
+                vision_client=glm_client,
+                device_width=dw,
+                device_height=dh,
             )
             return {"result": result}
 
@@ -376,8 +734,11 @@ def _register_tool_handlers(
             from testagent.mcp_servers.vision_server.tools import vision_describe_screen
 
             result = await vision_describe_screen(
-                image=str(input_data.get("image", "")),
-                glm_client=glm_client,
+                screenshot_id=input_data.get("screenshot_id"),
+                image=input_data.get("image"),
+                vision_client=glm_client,
+                device_width=dw,
+                device_height=dh,
             )
             return {"result": result}
 
@@ -392,6 +753,68 @@ def _register_tool_handlers(
         return await handler(tool_input)
 
     return dispatch_fn
+
+
+async def _recover_and_retry(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    glm_client: Any,
+) -> tuple[dict[str, Any], str | None, object]:
+    """Close dead session, create new one, re-register handlers, retry tool call."""
+    logger.info("Session dead, attempting auto-recovery...")
+    new_sid = await _create_session()
+    if not new_sid:
+        return {"error": "Session recovery failed: could not create new session"}, None, None
+    await asyncio.sleep(2)
+    global _device_width, _device_height
+    _device_width, _device_height = await _get_device_screen_size(new_sid)
+    new_dispatch_fn = _register_tool_handlers(new_sid, glm_client=glm_client)
+
+    # Retry the failed call with fresh session
+    handler = None
+    from testagent.agent.loop import TOOL_HANDLERS
+
+    handler = TOOL_HANDLERS.get(tool_name)
+    if handler is None:
+        return {"error": f"Unknown tool: {tool_name}"}, new_sid, new_dispatch_fn
+    retry_result = await handler(tool_input)
+    logger.info(
+        "Session auto-recovery successful",
+        extra={"extra_data": {"new_session": new_sid[:8]}},
+    )
+    return retry_result, new_sid, new_dispatch_fn
+
+
+def _wrap_with_session_recovery(
+    dispatch_fn: object,
+    session_id: str | None,
+    glm_client: Any,
+) -> object:
+    """Wrap dispatch function with automatic session recovery.
+
+    When a tool call returns "invalid session id", automatically creates a
+    new Appium session, re-registers handlers, and retries the failed call.
+    """
+    import json as _json
+
+    async def _wrapped(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+        nonlocal dispatch_fn, session_id
+
+        result = await dispatch_fn(tool_name, tool_input)
+        result_str = _json.dumps(result, ensure_ascii=False)
+
+        if "invalid session id" in result_str or "session is either terminated" in result_str:
+            retry_result, new_sid, new_dispatch = await _recover_and_retry(
+                tool_name, tool_input, glm_client
+            )
+            if new_sid:
+                session_id = new_sid
+                dispatch_fn = new_dispatch
+                return retry_result
+
+        return result
+
+    return _wrapped
 
 
 async def execute_natural_language(query: str) -> dict[str, Any]:
@@ -410,11 +833,11 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
     from testagent.llm.local_provider import LLMProviderFactory
 
     print("  Appium 服务器健康检查...")
-    healthy = await _check_appium_health()
-    if not healthy:
+    appium_ok = await _ensure_appium_running()
+    if not appium_ok:
         return {
             "status": "failed",
-            "error": "Appium 服务器不可用，请先启动 Appium (appium)",
+            "error": "无法启动 Appium 服务器或创建 Android 会话，请检查模拟器是否运行",
             "session_id": None,
         }
 
@@ -433,12 +856,12 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
     settings = get_settings()
     llm = LLMProviderFactory.create(settings)
 
-    from testagent.mcp_servers.vision_server.glm_client import GLMClient
+    from testagent.mcp_servers.vision_server.volcano_client import VolcanoVisionClient
 
-    glm_client: Any = None
+    vision_client: Any = None
     vision_key = settings.vision_api_key.get_secret_value()
     if vision_key:
-        glm_client = GLMClient(
+        vision_client = VolcanoVisionClient(
             api_key=vision_key,
             api_url=settings.vision_api_url,
             model=settings.vision_model,
@@ -446,13 +869,19 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
             max_retries=settings.vision_max_retries,
         )
 
-    # 注册工具处理器
-    dispatch_fn = _register_tool_handlers(session_id, glm_client=glm_client)
+    # 获取设备分辨率并注册工具处理器
+    global _device_width, _device_height
+    _device_width, _device_height = await _get_device_screen_size(session_id)
+    dispatch_fn = _register_tool_handlers(session_id, glm_client=vision_client,
+                                          device_width=_device_width, device_height=_device_height)
 
     # 构建消息
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": query},
     ]
+
+    # Wrap dispatch with auto session recovery
+    safe_dispatch = _wrap_with_session_recovery(dispatch_fn, session_id, vision_client)
 
     start_time = time.monotonic()
     print(f"  Agent 开始执行: \"{query}\"\n")
@@ -463,8 +892,8 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
             tools=APPIUM_TOOLS,
             system=_SYSTEM_PROMPT,
             llm_provider=llm,
-            dispatch_fn=dispatch_fn,
-            max_rounds=30,
+            dispatch_fn=safe_dispatch,
+            max_rounds=1000,
         )
     except Exception as exc:
         logger.error("Agent loop failed", extra={"extra_data": {"error": str(exc)}})
@@ -476,6 +905,10 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
         }
 
     duration = time.monotonic() - start_time
+
+    # 检查是否被 max_rounds 截断
+    if result_messages and result_messages[-1].get("tool_calls"):
+        print(f"  [已执行完 {len(result_messages)} 轮但任务可能未完成，考虑分步执行]")
 
     # 关闭会话
     await _close_session(session_id)
@@ -501,18 +934,52 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
     }
 
 
+async def _check_session_alive(session_id: str) -> bool:
+    """Check if UiAutomator2 instrumentation is still responsive."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{_APPIUM_URL}/session/{session_id}/source")
+            if resp.status_code == 200:
+                return True
+            body = resp.text[:300]
+            if "instrumentation process is not running" in body:
+                return False
+            return True
+    except Exception:
+        return False
+
+
+async def _recover_session(
+    session_id: str | None,
+    glm_client: Any = None,
+) -> tuple[str | None, Callable | None, Any]:
+    """Close dead session and create a new one."""
+    if session_id:
+        await _close_session(session_id)
+
+    new_sid = await _create_session()
+    if new_sid:
+        await asyncio.sleep(2)
+        global _device_width, _device_height
+        _device_width, _device_height = await _get_device_screen_size(new_sid)
+        dispatch_fn = _register_tool_handlers(new_sid, glm_client=glm_client)
+        print(f"  [会话已自动恢复: {new_sid[:8]}...]")
+        return new_sid, dispatch_fn, glm_client
+    return None, None, glm_client
+
+
 async def interactive_chat() -> None:
     """交互式自然语言测试聊天模式。"""
+    global _device_width, _device_height
     from testagent.agent.loop import agent_loop
     from testagent.config.settings import get_settings
     from testagent.llm.local_provider import LLMProviderFactory
 
     # 检查 Appium
     print("  Appium 健康检查...")
-    healthy = await _check_appium_health()
-    if not healthy:
-        print("  ! Appium 服务器不可用，请先启动 Appium")
-        print("  ! 工具调用将不可用，仅支持对话\n")
+    appium_ok = await _ensure_appium_running()
+    if not appium_ok:
+        print("  ! 无法启动 Appium 或创建会话，将以对话模式运行\n")
     else:
         print("  Appium 已连接\n")
 
@@ -520,12 +987,12 @@ async def interactive_chat() -> None:
     settings = get_settings()
     llm = LLMProviderFactory.create(settings)
 
-    from testagent.mcp_servers.vision_server.glm_client import GLMClient
+    from testagent.mcp_servers.vision_server.volcano_client import VolcanoVisionClient
 
-    glm_client: Any = None
+    vision_client: Any = None
     vision_key = settings.vision_api_key.get_secret_value()
     if vision_key:
-        glm_client = GLMClient(
+        vision_client = VolcanoVisionClient(
             api_key=vision_key,
             api_url=settings.vision_api_url,
             model=settings.vision_model,
@@ -564,26 +1031,72 @@ async def interactive_chat() -> None:
             continue
 
         # 是否需要创建 Appium 会话
-        if dispatch_fn is None and healthy:
-            session_id = await _create_session()
+        if dispatch_fn is None and appium_ok:
+            # 如果第一次创建失败，重试几次（Appium 可能还在初始化）
+            session_id = None
+            for attempt in range(5):
+                session_id = await _create_session()
+                if session_id:
+                    break
+                if attempt < 4:
+                    await asyncio.sleep(2)
             if session_id:
                 await asyncio.sleep(2)
-                dispatch_fn = _register_tool_handlers(session_id, glm_client=glm_client)
+                _device_width, _device_height = await _get_device_screen_size(session_id)
+                dispatch_fn = _register_tool_handlers(session_id, glm_client=vision_client)
                 print(f"  [Appium 会话已创建: {session_id[:8]}...]")
             else:
-                print("  [无法创建 Appium 会话，将以对话模式运行]")
+                # 可能是旧 Appium 没杀死，尝试重启
+                print("  [无法创建 Appium 会话，尝试重启 Appium...]")
+                appium_ok = await _ensure_appium_running()
+                if appium_ok:
+                    for attempt in range(5):
+                        session_id = await _create_session()
+                        if session_id:
+                            break
+                        if attempt < 4:
+                            await asyncio.sleep(2)
+                    if session_id:
+                        await asyncio.sleep(2)
+                        _device_width, _device_height = await _get_device_screen_size(session_id)
+                        dispatch_fn = _register_tool_handlers(session_id, glm_client=vision_client)
+                        print(f"  [Appium 会话已创建: {session_id[:8]}...]")
+                    else:
+                        print("  [仍无法创建 Appium 会话，将以对话模式运行]")
+                else:
+                    print("  [无法创建 Appium 会话，将以对话模式运行]")
 
         # 传给 agent 的 tools（有会话时才给 Appium 工具）
         tools = APPIUM_TOOLS if dispatch_fn is not None else []
 
         messages.append({"role": "user", "content": user_input})
 
+        # Wrap dispatch with auto session recovery
+        safe_dispatch = (
+            _wrap_with_session_recovery(dispatch_fn, session_id, vision_client)
+            if dispatch_fn
+            else None
+        )
+
+        def _safe_print(text: str) -> None:
+            try:
+                print(text)
+            except UnicodeEncodeError:
+                safe = text.encode("ascii", errors="replace").decode("ascii")
+                print(safe)
+
         def _on_progress(round_info: dict[str, Any], tool_results: list[dict[str, Any]]) -> None:
             """Print intermediate agent progress in real-time."""
+            round_n = round_info.get("round", 0)
             assistant_msg = round_info.get("assistant", {})
             content = assistant_msg.get("content") or ""
             tool_calls = round_info.get("tool_calls", [])
             is_final = round_info.get("final", False)
+
+            # 轮次接近上限时告警
+            max_r = 1000
+            if round_n >= max_r - 3:
+                _safe_print(f"  [警告: 已达 {round_n}/{max_r} 轮, 即将自动结束]")
 
             # Print LLM text output
             if content:
@@ -592,37 +1105,59 @@ async def interactive_chat() -> None:
                     texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
                     text = "\n".join(texts)
                 if text.strip():
-                    print(f"  Agent: {text.strip()}")
+                    _safe_print(f"  Agent: {text.strip()}")
 
             # Print tool calls
             for tc in (tool_calls or []):
                 fn = tc.get("function", {})
                 name = fn.get("name", "")
                 args_str = fn.get("arguments", "{}")
-                print(f"  -> 调用工具: {name}({args_str[:200]})")
+                _safe_print(f"  -> 调用工具: {name}({args_str[:200]})")
 
             # Print tool results (first 300 chars each)
             for tr in (tool_results or []):
-                tr_str = json.dumps(tr, ensure_ascii=False)
+                tr_str = json.dumps(tr, ensure_ascii=True)
                 if len(tr_str) > 300:
                     tr_str = tr_str[:297] + "..."
-                print(f"  <- 结果: {tr_str}")
+                _safe_print(f"  <- 结果: {tr_str}")
 
             if is_final:
                 print()
 
         try:
-            await agent_loop(
+            result_msgs = await agent_loop(
                 messages=messages,
                 tools=tools,
                 system=_SYSTEM_PROMPT,
                 llm_provider=llm,
-                dispatch_fn=dispatch_fn,
-                max_rounds=30,
+                dispatch_fn=safe_dispatch or dispatch_fn,
+                max_rounds=1000,
                 progress_callback=_on_progress,
             )
+            # 检查最后一条消息是否含 tool_calls（说明被 max_rounds 截断）
+            if result_msgs and result_msgs[-1].get("tool_calls"):
+                _safe_print("  [已达最大轮数，任务可能未完成。输入新指令可继续]")
+        except LLMTokenLimitError:
+            print("  [Token 预算已耗尽，正在清理历史并重置...]")
+            messages.clear()
+            llm.reset_budget()
+            print("  [已重置，请继续输入]")
         except Exception as exc:
             print(f"\n  [错误: {exc}]\n")
+
+        # 检查会话是否还存活（UiAutomator2 instrumentation 可能崩溃）
+        if session_id and dispatch_fn and not await _check_session_alive(session_id):
+            print("  [UiAutomator2 进程已崩溃，正在自动恢复会话...]")
+            new_sid, new_dispatch_fn, vision_client = await _recover_session(
+                session_id, glm_client=vision_client
+            )
+            session_id = new_sid
+            dispatch_fn = new_dispatch_fn
+            if session_id:
+                print("  [会话已自动恢复，请继续操作]")
+            else:
+                print("  [会话恢复失败，将重新创建]")
+                dispatch_fn = None
 
     # 清理
     if session_id:

@@ -40,6 +40,8 @@ class ILLMProvider(Protocol):
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
 
+    def reset_budget(self) -> None: ...
+
 
 class RateLimiter:
     __test__ = False
@@ -96,10 +98,13 @@ class RateLimiter:
 class BudgetManager:
     __test__ = False
 
-    def __init__(self, total_budget: int = 1000000) -> None:
+    def __init__(self, total_budget: int = 3000000) -> None:
         self._total_budget = total_budget
         self._used = 0
         self._lock = asyncio.Lock()
+
+    def reset(self) -> None:
+        self._used = 0
 
     @property
     def remaining(self) -> int:
