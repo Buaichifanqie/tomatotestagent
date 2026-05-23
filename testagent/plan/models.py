@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
-from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -65,7 +65,6 @@ class EventType(str, Enum):
 
 
 class WaitCondition(BaseModel):
-    __test__ = False
     type: str
     target: str
     timeout_ms: int = 5000
@@ -83,8 +82,8 @@ class TestStep(BaseModel):
     action: str
     target: str
     value: str = ""
-    timeout_ms: int = 10000
-    poll_interval_ms: int = 500
+    timeout_ms: int = Field(default=10000, ge=0)
+    poll_interval_ms: int = Field(default=500, ge=0)
     wait_after: WaitCondition | None = None
     success_condition: SuccessCondition | None = None
     screenshot: bool = True
@@ -121,7 +120,7 @@ class EvidenceItem(BaseModel):
 class TCExecution(BaseModel):
     status: ExecutionStatus = ExecutionStatus.PENDING
     verdict: ExecutionVerdict | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     failed_step: int | None = None
     failure_type: FailureType | None = None
     error_message: str = ""
@@ -148,7 +147,7 @@ class TestCase(BaseModel):
 
 class EvaluationOutput(BaseModel):
     verdict: ExecutionVerdict
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0)
     reason: str
     evidence: list[EvidenceItem] = Field(default_factory=list)
     evidence_missing: list[str] = Field(default_factory=list)
@@ -179,9 +178,9 @@ class OverallEvaluation(BaseModel):
 
 
 class EventLogEntry(BaseModel):
-    time: str
+    time: datetime
     level: EventLevel
-    type: EventType
+    event_type: EventType
     step: int | None = None
     tc_id: str = ""
     message: str = ""

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -452,13 +454,13 @@ class TestOverallEvaluation:
 class TestEventLogEntry:
     def test_minimal_creation(self) -> None:
         entry = EventLogEntry(
-            time="2025-01-01T00:00:00",
+            time=datetime(2025, 1, 1, 0, 0, 0),
             level=EventLevel.INFO,
-            type=EventType.STEP_START,
+            event_type=EventType.STEP_START,
         )
-        assert entry.time == "2025-01-01T00:00:00"
+        assert entry.time == datetime(2025, 1, 1, 0, 0, 0)
         assert entry.level == EventLevel.INFO
-        assert entry.type == EventType.STEP_START
+        assert entry.event_type == EventType.STEP_START
         assert entry.step is None
         assert entry.tc_id == ""
         assert entry.message == ""
@@ -469,9 +471,9 @@ class TestEventLogEntry:
 
     def test_full_creation(self) -> None:
         entry = EventLogEntry(
-            time="2025-01-01T00:00:05",
+            time=datetime(2025, 1, 1, 0, 0, 5),
             level=EventLevel.ERROR,
-            type=EventType.APP_CRASHED,
+            event_type=EventType.APP_CRASHED,
             step=1,
             tc_id="TC-001",
             message="Element not found",
@@ -583,3 +585,28 @@ class TestPlanConfig:
         assert config.retry.step == 2
         assert config.max_workers == 4
         assert len(config.popup_rules) == 1
+
+
+# ── Validation Tests ─────────────────────────────────────────────────────────
+
+
+class TestValidation:
+    def test_rejects_negative_timeout(self) -> None:
+        with pytest.raises(ValidationError):
+            TestStep(step=1, action="tap", target="x", timeout_ms=-1)
+
+    def test_rejects_out_of_range_confidence(self) -> None:
+        with pytest.raises(ValidationError):
+            EvaluationOutput(verdict=ExecutionVerdict.PASS, confidence=2.5, reason="bad")
+
+    def test_rejects_string_for_step(self) -> None:
+        with pytest.raises(ValidationError):
+            TestStep(step="not_an_int", action="tap", target="x")  # type: ignore[arg-type]
+
+    def test_rejects_missing_required_fields(self) -> None:
+        with pytest.raises(ValidationError):
+            TestStep()  # type: ignore[call-arg]
+
+    def test_rejects_event_log_entry_missing_required(self) -> None:
+        with pytest.raises(ValidationError):
+            EventLogEntry()  # type: ignore[call-arg]
