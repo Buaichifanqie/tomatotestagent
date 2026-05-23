@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
+
+__all__ = ["PrdDocument", "PrdParser"]
 
 
 class PrdDocument:
@@ -51,33 +52,43 @@ class PrdParser:
 
     def parse_md(self, file_path: str) -> PrdDocument:
         """Parse a markdown file and extract text and image references."""
-        text = self.parse_text(file_path)
-        images = self._extract_md_images(text, file_path)
-        # Clean markdown syntax from the text
-        clean_text = self._strip_markdown(text)
+        raw_text = Path(file_path).read_text(encoding="utf-8")
+        clean_text = self.parse_text(file_path)
+        images = self._extract_md_images(raw_text, file_path)
         return PrdDocument(text=clean_text, images=images, format="md")
 
     def parse_pdf(self, file_path: str) -> PrdDocument:
         """Parse a PDF file using PyMuPDF (fitz)."""
-        import fitz  # type: ignore[import-untyped]
+        try:
+            import fitz  # type: ignore[import-untyped]
+        except ImportError:
+            raise ImportError("PyMuPDF not installed. Run: pip install PyMuPDF")
 
         doc = fitz.open(file_path)
         text_parts: list[str] = []
         images: list[dict[str, str]] = []
         for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
+            page = doc[page_num]
             text_parts.append(page.get_text())
             for img_index, img in enumerate(page.get_images(full=True)):
                 xref = img[0]
                 base_image = doc.extract_image(xref)
-                img_filename = f"page{page_num + 1}_img{img_index + 1}.{base_image['ext']}"
-                images.append({"path": img_filename, "description": f"Page {page_num + 1} image {img_index + 1}"})
+                output_dir = Path(file_path).parent / f"{Path(file_path).stem}_images"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                ext = base_image.get("ext", "png")
+                img_path = output_dir / f"page{page_num + 1}_img{img_index + 1}.{ext}"
+                img_path.write_bytes(base_image["image"])
+                images.append({"path": str(img_path), "description": ""})
         doc.close()
-        return PrdDocument(text="\n".join(text_parts), images=images, format="pdf")
+        text = "\n".join(text_parts).strip()
+        return PrdDocument(text=text, images=images, format="pdf")
 
     def parse_docx(self, file_path: str) -> PrdDocument:
         """Parse a DOCX file using python-docx."""
-        from docx import Document  # type: ignore[import-untyped]
+        try:
+            from docx import Document  # type: ignore[import-untyped]
+        except ImportError:
+            raise ImportError("python-docx not installed. Run: pip install python-docx")
 
         doc = Document(file_path)
         text_parts: list[str] = []
@@ -85,11 +96,14 @@ class PrdParser:
             text_parts.append(para.text)
 
         images: list[dict[str, str]] = []
-        # Extract inline shapes (images) from the document
+        output_dir = Path(file_path).parent / f"{Path(file_path).stem}_images"
+        output_dir.mkdir(parents=True, exist_ok=True)
         for rel_id, rel in doc.part.rels.items():  # type: ignore[attr-defined]
             if "image" in rel.reltype:
+                img_path = output_dir / f"{rel_id}.png"
+                img_path.write_bytes(rel.target_part.blob)
                 images.append({
-                    "path": rel.target_ref,
+                    "path": str(img_path),
                     "description": f"Image: {Path(rel.target_ref).name}",
                 })
         return PrdDocument(text="\n".join(text_parts), images=images, format="docx")
@@ -97,8 +111,28 @@ class PrdParser:
     def parse_text(self, file_path: str, content: str | None = None) -> str:
         """Read text from a file, or return the provided content."""
         if content is not None:
-            return content
-        return Path(file_path).read_text(encoding="utf-8")
+            raw_text = content
+        else:
+            path = Path(file_path)
+            raw_text = path.read_text(encoding="utf-8")
+        return self._strip_markdown(raw_text)
+
+    def _parse_pdf_text_only(self, file_path: str) -> PrdDocument:
+        """Fallback: extract text from PDF using PyMuPDF without image extraction."""
+        import fitz  # type: ignore[import-untyped]
+
+        doc = fitz.open(file_path)
+        text_parts = [page.get_text() for page in doc]
+        doc.close()
+        return PrdDocument(text="\n".join(text_parts).strip(), format="pdf")
+
+    def _parse_docx_text_only(self, file_path: str) -> PrdDocument:
+        """Fallback: extract text from DOCX without image extraction."""
+        from docx import Document  # type: ignore[import-untyped]
+
+        doc = Document(file_path)
+        text_parts = [para.text for para in doc.paragraphs]
+        return PrdDocument(text="\n".join(text_parts).strip(), format="docx")
 
     # ── Private helpers ──────────────────────────────────────────────────────────
 

@@ -129,3 +129,19 @@ class TestPrdParserParseText:
         txt_file.write_text("File content")
         result = self.parser.parse_text(str(txt_file), content="Override")
         assert result == "Override"
+
+
+class TestPrdParserParse:
+    def setup_method(self) -> None:
+        self.parser = PrdParser()
+
+    def test_parse_dispatches_md(self, tmp_path: Path) -> None:
+        f = tmp_path / "test.md"
+        f.write_text("# Title\n\nContent", encoding="utf-8")
+        doc = self.parser.parse(str(f))
+        assert doc.format == "md"
+        assert "Title" in doc.text
+
+    def test_parse_unsupported_format(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported file format"):
+            self.parser.parse("file.xyz")
