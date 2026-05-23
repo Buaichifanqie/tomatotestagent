@@ -7,8 +7,10 @@ import httpx
 
 from testagent.mcp_servers.appium_server.tools import (
     app_assert_element,
+    app_exec,
     app_get_source,
     app_install,
+    app_launch,
     app_screenshot,
     app_start_recording,
     app_stop_recording,
@@ -142,10 +144,35 @@ class AppiumMCPServer(BaseMCPServer):
                 "properties": {},
             },
         },
+        {
+            "name": "app_launch",
+            "description": "通过包名直接启动应用（比截图+视觉分析找图标点击更快更稳定）。适用于已知包名的应用启动。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "应用包名，如 tv.danmaku.bili"},
+                    "activity": {"type": "string", "description": "可选，Activity 名称，如 .MainActivity"},
+                },
+                "required": ["package"],
+            },
+        },
+        {
+            "name": "app_exec",
+            "description": "在设备上执行 shell 命令（通过 Appium mobile:shell）。适用于快速操作如开关 WiFi(svc wifi)、检查设备状态、执行 ADB 命令等。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的 shell 命令，如 svc wifi enable、dumpsys battery、input keyevent KEYCODE_HOME"},
+                },
+                "required": ["command"],
+            },
+        },
     ]
 
     _tool_registry: ClassVar[dict[str, Any]] = {
         "app_install": app_install,
+        "app_launch": app_launch,
+        "app_exec": app_exec,
         "app_tap": app_tap,
         "app_swipe": app_swipe,
         "app_type": app_type,

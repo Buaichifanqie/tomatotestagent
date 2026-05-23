@@ -21,6 +21,9 @@ ENV/
 .env.local
 .env.*.local
 
+# Local sensitive configs
+configs/
+
 # IDE
 .idea/
 .vscode/

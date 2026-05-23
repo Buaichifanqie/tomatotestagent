@@ -66,6 +66,9 @@ class OpenAIProvider:
             await self._client.aclose()
             self._client = None
 
+    def reset_budget(self) -> None:
+        self._budget_manager.reset()
+
     async def chat(
         self,
         system: str,

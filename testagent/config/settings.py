@@ -66,9 +66,9 @@ class TestAgentSettings(BaseSettings):
     docker_timeout_web: int = 120
 
     vision_api_key: SecretStr = SecretStr("")
-    vision_api_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-    vision_model: str = "glm-4.6v-flash"
-    vision_timeout: int = 30
+    vision_api_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    vision_model: str = "doubao-seed-2-0-lite-260428"
+    vision_timeout: int = 60
     vision_max_retries: int = 3
 
     repo_path: str = ""

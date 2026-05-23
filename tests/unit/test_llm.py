@@ -126,6 +126,9 @@ class TestILLMProviderProtocol:
             async def embed_batch(self, texts: list[str]) -> list[list[float]]:
                 return [[0.0]]
 
+            def reset_budget(self) -> None:
+                pass
+
         assert isinstance(DummyProvider(), ILLMProvider)
 
     def test_incomplete_class_does_not_satisfy_protocol(self) -> None:

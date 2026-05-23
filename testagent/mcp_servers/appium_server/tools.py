@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -67,6 +68,22 @@ async def _find_element(
         "xpath": "xpath",
     }
     appium_strategy = strategy_map.get(strategy, strategy)
+
+    # When using uiautomator strategy with a plain text selector, auto-wrap it
+    # into a valid UiSelector expression to avoid the invalid `new UiSelector().<text>` error.
+    if strategy == "uiautomator" and selector and not re.match(r'^(new UiSelector\(\)|\.)', selector):
+        # Resource-id like "tv.danmaku.bili:id/search_src_text" → resourceId()
+        if ":" in selector or selector.startswith("android:id/"):
+            selector = f'new UiSelector().resourceId("{selector}")'
+        # Chinese text → textContains()
+        elif bool(re.search(r'[一-鿿]', selector)):
+            escaped = selector.replace("\\", "\\\\").replace('"', '\\"')
+            selector = f'new UiSelector().textContains("{escaped}")'
+        # Short plain text (< 50 chars, no special chars) → textContains()
+        elif len(selector) < 50 and "/" not in selector:
+            escaped = selector.replace("\\", "\\\\").replace('"', '\\"')
+            selector = f'new UiSelector().textContains("{escaped}")'
+
     payload: dict[str, object] = {
         "using": appium_strategy,
         "value": selector,
@@ -99,9 +116,16 @@ async def app_tap(
     if x is not None and y is not None:
         payload: dict[str, object] = {
             "actions": [
-                {"type": "pointerMove", "duration": 0, "x": x, "y": y},
-                {"type": "pointerDown", "button": 0},
-                {"type": "pointerUp", "button": 0},
+                {
+                    "type": "pointer",
+                    "id": "finger1",
+                    "parameters": {"pointerType": "touch"},
+                    "actions": [
+                        {"type": "pointerMove", "duration": 0, "x": x, "y": y},
+                        {"type": "pointerDown", "button": 0},
+                        {"type": "pointerUp", "button": 0},
+                    ],
+                }
             ],
         }
         return await _appium_post(appium_url, "/session/:sessionId/actions", payload, session_id=session_id)
@@ -135,11 +159,18 @@ async def app_swipe(
 ) -> dict[str, Any]:
     payload: dict[str, object] = {
         "actions": [
-            {"type": "pointerMove", "duration": 0, "x": start_x, "y": start_y},
-            {"type": "pointerDown", "button": 0},
-            {"type": "pause", "duration": duration},
-            {"type": "pointerMove", "duration": duration, "x": end_x, "y": end_y},
-            {"type": "pointerUp", "button": 0},
+            {
+                "type": "pointer",
+                "id": "finger1",
+                "parameters": {"pointerType": "touch"},
+                "actions": [
+                    {"type": "pointerMove", "duration": 0, "x": start_x, "y": start_y},
+                    {"type": "pointerDown", "button": 0},
+                    {"type": "pause", "duration": duration},
+                    {"type": "pointerMove", "duration": duration, "x": end_x, "y": end_y},
+                    {"type": "pointerUp", "button": 0},
+                ],
+            }
         ],
     }
     return await _appium_post(appium_url, "/session/:sessionId/actions", payload, session_id=session_id)
@@ -229,7 +260,14 @@ async def app_screenshot(
         return {"error": f"Screenshot failed: {result['body']}", "status_code": result["status_code"]}
     screenshot_data = result["body"].get("value", "")
     if isinstance(screenshot_data, str) and screenshot_data:
-        return {"screenshot_base64": screenshot_data, "format": "png"}
+        from testagent.mcp_servers.shared_cache import store_screenshot
+
+        screenshot_id = store_screenshot(screenshot_data)
+        return {
+            "screenshot_id": screenshot_id,
+            "format": "png",
+            "message": f"截图已保存(screenshot_id={screenshot_id})。调用 vision_find_element 时请传入此 screenshot_id 参数。",
+        }
     return {"error": "No screenshot data returned", "body": result["body"]}
 
 
@@ -283,3 +321,54 @@ async def app_stop_recording(
     if isinstance(video_data, str) and video_data:
         return {"video_base64": video_data, "format": "mp4"}
     return {"error": "No video data returned", "body": result["body"]}
+
+
+async def app_launch(
+    package: str,
+    activity: str = "",
+    appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Launch an app by package name using mobile:shell.
+
+    Faster than visually finding and tapping the app icon.
+    """
+    cmd = f"monkey -p {package} 1" if not activity else f"am start -n {package}/{activity}"
+    payload: dict[str, object] = {
+        "script": "mobile: shell",
+        "args": [{"command": cmd}],
+    }
+    result = await _appium_post(
+        appium_url,
+        "/session/:sessionId/execute/sync",
+        payload,
+        timeout=15,
+        session_id=session_id,
+    )
+    if result["status_code"] == 200:
+        return {"result": f"App '{package}' launched", "package": package}
+    return result
+
+
+async def app_exec(
+    command: str,
+    appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Execute a shell command on the device via Appium mobile:shell.
+
+    Use for fast operations like toggling WiFi (svc wifi enable/disable),
+    checking device state, or running quick ADB commands.
+    """
+    payload: dict[str, object] = {
+        "script": "mobile: shell",
+        "args": [{"command": command}],
+    }
+    result = await _appium_post(
+        appium_url,
+        "/session/:sessionId/execute/sync",
+        payload,
+        timeout=30,
+        session_id=session_id,
+    )
+    return result
