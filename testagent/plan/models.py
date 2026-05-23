@@ -24,6 +24,7 @@ class ExecutionVerdict(str, Enum):
     BLOCKED = "BLOCKED"
     NEED_REVIEW = "NEED_REVIEW"
     INCONCLUSIVE = "INCONCLUSIVE"
+    PARTIAL = "PARTIAL"
 
 
 class FailureType(str, Enum):
