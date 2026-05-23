@@ -156,10 +156,18 @@ class TestExecuteSingle:
         assert "Precondition" in tc.execution.error_message
 
     def test_executes_successfully_without_precondition(self):
+        """Mock _execute_step to test _execute_single flow independently."""
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         step = TestStep(step=1, action="tap", target="button")
         tc = TestCase(id="TC1", title="Test", steps=[step])
+        engine._handle_popups = MagicMock()
+        engine._execute_step = MagicMock(
+            return_value=StepExecution(
+                step=1, action="tap", target="button",
+                success=True,
+            )
+        )
         engine._execute_single(tc)
         assert tc.execution.status == ExecutionStatus.EXECUTED
         assert len(tc.execution.steps) == 1
@@ -169,6 +177,7 @@ class TestExecuteSingle:
         assert tc.execution.steps[0].target == "button"
 
     def test_executes_with_precondition(self):
+        """Mock _execute_step to test _execute_single flow independently."""
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         step = TestStep(step=1, action="tap", target="button")
@@ -176,6 +185,13 @@ class TestExecuteSingle:
         tc = TestCase(
             id="TC1", title="Test",
             steps=[step], precondition=precondition,
+        )
+        engine._handle_popups = MagicMock()
+        engine._execute_step = MagicMock(
+            return_value=StepExecution(
+                step=1, action="tap", target="button",
+                success=True,
+            )
         )
         engine._execute_single(tc)
         assert tc.execution.status == ExecutionStatus.EXECUTED
@@ -248,7 +264,8 @@ class TestHandlePopups:
 class TestExecuteStep:
     """_execute_step method."""
 
-    def test_returns_step_execution_with_defaults(self):
+    def test_returns_step_execution_on_failure_without_session(self):
+        """Without an Appium session, step execution returns a failure result."""
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         step = TestStep(step=1, action="tap", target="ok_button")
@@ -258,9 +275,8 @@ class TestExecuteStep:
         assert result.step == 1
         assert result.action == "tap"
         assert result.target == "ok_button"
-        assert result.success is True
-        assert result.failure_type is None
-        assert result.error_message == ""
+        assert result.success is False
+        assert result.failure_type == FailureType.ACTION_FAILED
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 

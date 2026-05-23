@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 
+from testagent.mcp_servers.appium_server.tools import (
+    app_assert_element,
+    app_exec,
+    app_get_source,
+    app_launch,
+    app_screenshot,
+    app_swipe,
+    app_tap,
+    app_type,
+)
 from testagent.plan.models import (
     ExecutionStatus,
     FailureType,
@@ -134,8 +145,8 @@ class ExecutionEngine:
     def _execute_step(self, tc: TestCase, step: TestStep) -> StepExecution:
         """Execute a single test step.
 
-        Handles popups before executing the step action. The actual action
-        execution is stubbed with a TODO placeholder for real Appium calls.
+        Handles popups before executing the step action, then dispatches
+        to the async implementation via asyncio.run().
 
         Args:
             tc: The parent TestCase (used for context).
@@ -145,20 +156,140 @@ class ExecutionEngine:
             A StepExecution with the result of the step.
         """
         self._handle_popups(tc)
+        return asyncio.run(self._execute_step_async(tc, step))
 
-        start = time.monotonic()
+    async def _execute_step_async(self, tc: TestCase, step: TestStep) -> StepExecution:
+        """Async implementation of step execution with real Appium calls.
+
+        Maps step actions to the corresponding Appium MCP tool and returns
+        a StepExecution capturing success/failure and timing.
+
+        Args:
+            tc: The parent TestCase (used for context).
+            step: The TestStep to execute.
+
+        Returns:
+            A StepExecution with the result of the step.
+        """
+        session_id = self.session_manager.session_id
+        appium_url = self.session_manager.appium_url
+
+        step_start = time.time()
+        success = True
+        failure_type = None
+        error_message = ""
+
         try:
-            # TODO: Replace with actual Appium call
-            _ = tc
-            success = True
-            failure_type = None
-            error_message = ""
+            if step.action == "tap":
+                result = await app_tap(
+                    selector=step.target,
+                    strategy="accessibility_id",
+                    appium_url=appium_url,
+                    session_id=session_id,
+                )
+                if result.get("error"):
+                    success = False
+                    failure_type = FailureType.ACTION_FAILED
+                    error_message = str(result["error"])
+
+            elif step.action == "type":
+                result = await app_type(
+                    selector=step.target,
+                    text=step.value,
+                    strategy="accessibility_id",
+                    appium_url=appium_url,
+                    session_id=session_id,
+                )
+                if result.get("error"):
+                    success = False
+                    failure_type = FailureType.ACTION_FAILED
+                    error_message = str(result["error"])
+
+            elif step.action == "swipe":
+                # Format: "start_x,start_y,end_x,end_y"
+                try:
+                    parts = step.target.split(",")
+                    if len(parts) >= 4:
+                        result = await app_swipe(
+                            start_x=int(parts[0]),
+                            start_y=int(parts[1]),
+                            end_x=int(parts[2]),
+                            end_y=int(parts[3]),
+                            appium_url=appium_url,
+                            session_id=session_id,
+                        )
+                        if result.get("error"):
+                            success = False
+                            failure_type = FailureType.ACTION_FAILED
+                            error_message = str(result["error"])
+                    else:
+                        success = False
+                        failure_type = FailureType.ACTION_FAILED
+                        error_message = "Invalid swipe coordinates: need start_x,start_y,end_x,end_y"
+                except (ValueError, IndexError):
+                    success = False
+                    failure_type = FailureType.ACTION_FAILED
+                    error_message = "Invalid swipe coordinate format"
+
+            elif step.action == "launch":
+                result = await app_launch(
+                    package=step.target,
+                    appium_url=appium_url,
+                    session_id=session_id,
+                )
+                if result.get("error"):
+                    success = False
+                    failure_type = FailureType.ACTION_FAILED
+                    error_message = str(result["error"])
+
+            elif step.action == "assert":
+                result = await app_assert_element(
+                    selector=step.target,
+                    assertion="visible",
+                    appium_url=appium_url,
+                    session_id=session_id,
+                )
+                if result.get("error"):
+                    success = False
+                    failure_type = FailureType.ASSERTION_FAILED
+                    error_message = str(result["error"])
+                elif not result.get("passed", True):
+                    success = False
+                    failure_type = FailureType.ASSERTION_FAILED
+                    error_message = result.get("reason", "Assertion failed")
+
+            elif step.action == "exec":
+                result = await app_exec(
+                    command=step.value or step.target,
+                    appium_url=appium_url,
+                    session_id=session_id,
+                )
+                if result.get("error"):
+                    success = False
+                    failure_type = FailureType.ACTION_FAILED
+                    error_message = str(result["error"])
+
+            elif step.action == "screenshot":
+                result = await app_screenshot(
+                    appium_url=appium_url,
+                    session_id=session_id,
+                )
+                if result.get("error"):
+                    success = False
+                    failure_type = FailureType.SCREENSHOT_FAILED
+                    error_message = str(result["error"])
+
+            else:
+                success = False
+                failure_type = FailureType.ACTION_FAILED
+                error_message = f"Unknown action: {step.action}"
+
         except Exception as e:
             success = False
             failure_type = FailureType.ACTION_FAILED
             error_message = str(e)
 
-        elapsed = int((time.monotonic() - start) * 1000)
+        elapsed = int((time.time() - step_start) * 1000)
         return StepExecution(
             step=step.step,
             action=step.action,
@@ -203,12 +334,33 @@ class ExecutionEngine:
     def _handle_popups(self, tc: TestCase) -> None:
         """Detect and handle popups before step execution.
 
+        Retrieves the current page source from the Appium session and
+        passes it to the popup handler. If a popup is detected, an event
+        is recorded.
+
         Args:
             tc: The current TestCase (provides context for popup handling).
         """
-        _ = tc
-        # TODO: Get page_source from driver and call
-        #       self.popup_handler.handle(page_source)
+        session_id = self.session_manager.session_id
+        if not session_id:
+            return
+        try:
+            result = asyncio.run(
+                app_get_source(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=session_id,
+                )
+            )
+            page_source = result.get("source", "")
+            popup_result = self.popup_handler.handle(page_source=page_source)
+            if popup_result:
+                self._add_event(
+                    event_type="INFO",
+                    tc_id=tc.id,
+                    message=f"Popup handled: {popup_result['rule_name']}",
+                )
+        except Exception:
+            pass
 
     def _mark_aborted(self, tc: TestCase, reason: str) -> None:
         """Mark a test case as aborted with a reason.
