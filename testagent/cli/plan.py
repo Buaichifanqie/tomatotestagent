@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -32,6 +33,58 @@ def parse_requirement(requirement: str) -> tuple[str, bool]:
     if path.exists() and path.is_file():
         return requirement, True
     return requirement, False
+
+
+def _try_init_vision_client() -> Any | None:
+    """Try to initialize a synchronous vision client for image description.
+
+    Returns a wrapper with a ``describe(image_path: str) -> str`` method,
+    or ``None`` if vision is not configured/available.
+    """
+    try:
+        import asyncio
+        import base64
+
+        from testagent.config.settings import get_settings
+
+        settings = get_settings()
+        vision_key = settings.vision_api_key.get_secret_value()
+        if not vision_key:
+            return None
+
+        from testagent.mcp_servers.vision_server.volcano_client import (
+            VolcanoVisionClient,
+        )
+
+        async_client = VolcanoVisionClient(
+            api_key=vision_key,
+            api_url=settings.vision_api_url,
+            model=settings.vision_model,
+            timeout=settings.vision_timeout,
+            max_retries=settings.vision_max_retries,
+        )
+
+        class _SyncVisionAdapter:
+            """Synchronous adapter wrapping an async vision client."""
+
+            def __init__(self, client: VolcanoVisionClient) -> None:
+                self._client = client
+
+            def describe(self, image_path: str) -> str:
+                with open(image_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                result = asyncio.run(
+                    self._client.analyze(
+                        b64, "请详细描述这张图片的内容和布局"
+                    )
+                )
+                if "error" in result:
+                    raise RuntimeError(result["error"])
+                return result.get("content", "")
+
+        return _SyncVisionAdapter(async_client)
+    except Exception:
+        return None
 
 
 def _sanitize_name(name: str) -> str:
@@ -165,6 +218,19 @@ def plan_command(
         typer.echo("Parsing PRD document...")
         parser = PrdParser()
         prd_doc = parser.parse(content)
+
+        # ── Phase 1b: Vision image description (optional) ────────────────
+        if prd_doc.images:
+            vision_client = _try_init_vision_client()
+            if vision_client is not None:
+                typer.echo(
+                    f"  \U0001f50d 正在识别 {len(prd_doc.images)} 张图片..."
+                )
+                prd_doc.images = parser.describe_images(
+                    prd_doc.images, vision_client
+                )
+                typer.echo("  ✅ 图片描述完成")
+
         prd_text = prd_doc.formatted_text
     else:
         prd_text = content

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -145,3 +146,64 @@ class TestPrdParserParse:
     def test_parse_unsupported_format(self) -> None:
         with pytest.raises(ValueError, match="Unsupported file format"):
             self.parser.parse("file.xyz")
+
+
+class TestPrdParserDescribeImages:
+    def setup_method(self) -> None:
+        self.parser = PrdParser()
+
+    def test_describe_images_all_empty(self) -> None:
+        """Multiple images, all get described."""
+        mock_client = MagicMock()
+        mock_client.describe.return_value = "搜索栏位于页面顶部"
+        images = [
+            {"path": "/tmp/test_img1.png", "description": ""},
+            {"path": "/tmp/test_img2.png", "description": ""},
+        ]
+        with patch("pathlib.Path.exists", return_value=True):
+            result = self.parser.describe_images(images, mock_client)
+        assert result[0]["description"] == "搜索栏位于页面顶部"
+        assert result[1]["description"] == "搜索栏位于页面顶部"
+        assert mock_client.describe.call_count == 2
+
+    def test_describe_images_skip_existing(self) -> None:
+        """Images with existing descriptions are skipped."""
+        mock_client = MagicMock()
+        images = [
+            {"path": "/tmp/img1.png", "description": "已有描述"},
+            {"path": "/tmp/img2.png", "description": ""},
+        ]
+        with patch("pathlib.Path.exists", return_value=True):
+            result = self.parser.describe_images(images, mock_client)
+        assert result[0]["description"] == "已有描述"
+        assert result[1]["description"] == mock_client.describe.return_value
+        assert mock_client.describe.call_count == 1
+
+    def test_describe_images_file_not_found(self) -> None:
+        """Image file doesn't exist, gets placeholder text."""
+        mock_client = MagicMock()
+        images = [
+            {"path": "/tmp/missing.png", "description": ""},
+        ]
+        with patch("pathlib.Path.exists", return_value=False):
+            result = self.parser.describe_images(images, mock_client)
+        assert result[0]["description"] == "[图片文件不存在: /tmp/missing.png]"
+        mock_client.describe.assert_not_called()
+
+    def test_describe_images_vision_error(self) -> None:
+        """Vision client raises exception, handled gracefully."""
+        mock_client = MagicMock()
+        mock_client.describe.side_effect = RuntimeError("API timeout")
+        images = [
+            {"path": "/tmp/img.png", "description": ""},
+        ]
+        with patch("pathlib.Path.exists", return_value=True):
+            result = self.parser.describe_images(images, mock_client)
+        assert "API timeout" in result[0]["description"]
+
+    def test_describe_images_empty_list(self) -> None:
+        """Empty images list returns empty."""
+        mock_client = MagicMock()
+        result = self.parser.describe_images([], mock_client)
+        assert result == []
+        mock_client.describe.assert_not_called()

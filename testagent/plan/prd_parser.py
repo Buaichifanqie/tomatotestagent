@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 __all__ = ["PrdDocument", "PrdParser"]
 
@@ -133,6 +134,37 @@ class PrdParser:
         doc = Document(file_path)
         text_parts = [para.text for para in doc.paragraphs]
         return PrdDocument(text="\n".join(text_parts).strip(), format="docx")
+
+    def describe_images(
+        self,
+        images: list[dict[str, str]],
+        vision_client: Any,
+    ) -> list[dict[str, str]]:
+        """Use vision API to describe images in the document.
+
+        For each image with an empty description, call the vision client
+        to generate a description. Updated images list is returned.
+
+        Args:
+            images: list of {"path": ..., "description": ...} dicts
+            vision_client: object with a ``describe(image_path: str) -> str`` method
+
+        Returns:
+            Updated images list with descriptions filled in
+        """
+        for img in images:
+            if not img.get("description") and img.get("path"):
+                try:
+                    path = img["path"]
+                    # Check if the image file actually exists before calling vision
+                    if Path(path).exists():
+                        description = vision_client.describe(path)
+                        img["description"] = description
+                    else:
+                        img["description"] = f"[图片文件不存在: {path}]"
+                except Exception as e:
+                    img["description"] = f"[图片描述失败: {e}]"
+        return images
 
     # ── Private helpers ──────────────────────────────────────────────────────────
 
