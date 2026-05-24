@@ -372,8 +372,14 @@ async def _ensure_appium_running() -> bool:
             async with httpx.AsyncClient(timeout=3) as client:
                 resp = await client.get(f"{_APPIUM_URL}/status")
             if resp.status_code == 200:
-                logger.info("Existing Appium is healthy")
-                return True
+                # 验证 Appium 是否能真正创建 session（测试 ANDROID_HOME 等环境是否就绪）
+                test_sid = await _create_session()
+                if test_sid:
+                    await _close_session(test_sid)
+                    logger.info("Existing Appium is healthy, session verified")
+                    return True
+                logger.warning("Appium server is up but session creation failed, will restart...")
+                break
         except (httpx.RequestError, httpx.TimeoutException):
             pass
         await asyncio.sleep(1)
