@@ -84,6 +84,25 @@ class SessionManager:
             pass
         return None
 
+    def close_session(self) -> None:
+        """Close the current Appium session via HTTP DELETE.
+
+        Sends a DELETE request to terminate the session and resets internal
+        state. Safe to call when no session exists (no-op).
+        """
+        if not self._session_id:
+            return
+        import httpx
+
+        try:
+            with httpx.Client(timeout=10) as client:
+                client.delete(f"{self.appium_url}/session/{self._session_id}")
+        except Exception:
+            pass
+        finally:
+            self._session_id = None
+            self.session_state.mark_disconnected()
+
     def is_connected(self) -> bool:
         """Check whether the session is alive via HTTP health check.
 

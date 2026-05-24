@@ -176,6 +176,14 @@ def _try_init_vision_client() -> Any | None:
         return None
 
 
+# Known LLM package-name hallucinations (e.g. "buli" instead of "bili").
+# The post-processing step in plan_command replaces these with the real
+# app_package wherever they appear in step targets and values.
+_HALLUCINATED_PACKAGES: frozenset[str] = frozenset({
+    "tv.danmaku.buli",
+})
+
+
 def _sanitize_name(name: str) -> str:
     """Sanitize a string for use as a directory name component."""
     safe = re.sub(r"[\s_]+", "-", name)
@@ -378,6 +386,35 @@ def plan_command(
     if app_info_parts:
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
 
+    # ── Phase 1c: UI pre-scan (optional enhancement) ──────────────────
+    if app_package:
+        typer.echo("  Scanning real UI elements for TC generation...")
+        try:
+            from testagent.plan.ui_scanner import (
+                discover_ui_elements,
+                format_ui_context,
+            )
+
+            scan_result = discover_ui_elements(
+                package=app_package,
+                activity=app_activity,
+            )
+            if scan_result and scan_result.elements:
+                ui_context = format_ui_context(scan_result)
+                enhanced_prd += ui_context
+                typer.echo(
+                    f"  Discovered {len(scan_result.elements)} UI elements "
+                    f"({scan_result.scan_duration_ms}ms)"
+                )
+            else:
+                typer.echo("  [UI pre-scan returned no elements — "
+                           "continuing with default prompt]")
+        except Exception as exc:
+            typer.echo(
+                f"  [UI pre-scan failed: {exc} — "
+                f"falling back to default prompt]"
+            )
+
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
     test_cases = ts_gen.generate(enhanced_prd, plan_name=name)
 
@@ -386,6 +423,20 @@ def plan_command(
         return None
 
     typer.echo(f"Generated {len(test_cases)} test case(s).")
+
+    # ── Fix LLM-hallucinated package names in generated TCs ─────────────────
+    # The LLM often generates "tv.danmaku.buli" instead of "tv.danmaku.bili".
+    # Override launch targets with the correct package and fix exec commands.
+    if app_package:
+        for tc in test_cases:
+            for step in tc.steps:
+                if step.action == "launch":
+                    step.target = app_package
+                else:
+                    for wrong in _HALLUCINATED_PACKAGES:
+                        if wrong != app_package:
+                            step.target = step.target.replace(wrong, app_package)
+                            step.value = step.value.replace(wrong, app_package)
 
     # ── Phase 3: Present to user ────────────────────────────────────────────
     if not present_tc_to_user(test_cases, auto_yes=auto_yes):

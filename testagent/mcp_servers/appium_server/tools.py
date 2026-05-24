@@ -39,6 +39,25 @@ async def _appium_post(
     return {"status_code": response.status_code, "body": body}
 
 
+async def _appium_delete(
+    appium_url: str,
+    path: str,
+    timeout: int = 30,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    if ":sessionId" in path and not session_id:
+        return {"error": "No Appium session — call create_session() first"}
+    if session_id:
+        path = path.replace(":sessionId", session_id)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+        response = await client.delete(f"{appium_url}{path}")
+    try:
+        body: dict[str, Any] = response.json()
+    except Exception:
+        body = {"raw": response.text}
+    return {"status_code": response.status_code, "body": body}
+
+
 async def _appium_get(
     appium_url: str,
     path: str,
@@ -333,22 +352,40 @@ async def app_launch(
 ) -> dict[str, Any]:
     """Launch an app by package name using mobile:shell.
 
-    Faster than visually finding and tapping the app icon.
+    Tries three strategies in order:
+    1. ``am start -n`` with the full component name (when activity is given).
+    2. ``monkey -p`` — works for most apps even without knowing the activity.
+    3. ``am start`` with MAIN/LAUNCHER intent as a last resort.
     """
-    cmd = f"monkey -p {package} 1" if not activity else f"am start -n {package}/{activity}"
-    payload: dict[str, object] = {
-        "script": "mobile: shell",
-        "args": [{"command": cmd}],
-    }
-    result = await _appium_post(
-        appium_url,
-        "/session/:sessionId/execute/sync",
-        payload,
-        timeout=15,
-        session_id=session_id,
+    commands: list[str] = []
+
+    if activity:
+        commands.append(f"am start -n {package}/{activity}")
+    commands.append(f"monkey -p {package} 1")
+    commands.append(
+        f"am start -a android.intent.action.MAIN "
+        f"-c android.intent.category.LAUNCHER -p {package}"
     )
-    if result["status_code"] == 200:
-        return {"result": f"App '{package}' launched", "package": package}
+
+    for cmd in commands:
+        payload: dict[str, object] = {
+            "script": "mobile: shell",
+            "args": [{"command": cmd}],
+        }
+        result = await _appium_post(
+            appium_url,
+            "/session/:sessionId/execute/sync",
+            payload,
+            timeout=15,
+            session_id=session_id,
+        )
+        if result["status_code"] == 200:
+            return {"result": f"App '{package}' launched via: {cmd}", "package": package}
+        # If the command ran but the app is already running, treat as success
+        body_str = str(result.get("body", ""))
+        if "already running" in body_str.lower() or "app already" in body_str.lower():
+            return {"result": f"App '{package}' already running", "package": package}
+
     return {"error": f"Launch failed (HTTP {result.get('status_code')}): {result.get('body')}"}
 
 

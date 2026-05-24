@@ -241,8 +241,11 @@ class ExecutionEngine:
                     )
                 return {"error": "Invalid swipe coordinates"}
             elif step.action == "launch":
+                # Use config package name (not LLM-generated) to prevent
+                # hallucinated package names like "buli" instead of "bili".
+                pkg = self.config.app_package or step.target
                 return await app_launch(
-                    package=step.target,
+                    package=pkg,
                     appium_url=appium_url, session_id=sid,
                 )
             elif step.action == "assert":
