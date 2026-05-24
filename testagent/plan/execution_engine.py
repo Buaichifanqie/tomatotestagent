@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
+from typing import Any
 
 from testagent.mcp_servers.appium_server.tools import (
     app_assert_element,
@@ -51,6 +52,38 @@ class ExecutionEngine:
         self._consecutive_blocked = 0
         self._start_time: float = 0.0
         self._events: list[dict] = []
+        self._vision_client: Any | None = None
+        self._suppressed_rules: set[str] = set()
+
+    # ── vision client (lazy) ─────────────────────────────────────────────────
+
+    def _init_vision_client(self) -> Any | None:
+        """Lazy-init a vision client for multimodal popup dismissal."""
+        if self._vision_client is not None:
+            return self._vision_client
+        try:
+            from testagent.config.settings import get_settings
+
+            settings = get_settings()
+            key = settings.vision_api_key.get_secret_value()
+            if not key:
+                self._vision_client = None
+                return None
+            from testagent.mcp_servers.vision_server.volcano_client import (
+                VolcanoVisionClient,
+            )
+
+            self._vision_client = VolcanoVisionClient(
+                api_key=key,
+                api_url=settings.vision_api_url,
+                model=settings.vision_model,
+                timeout=settings.vision_timeout,
+                max_retries=settings.vision_max_retries,
+            )
+            return self._vision_client
+        except Exception:
+            self._vision_client = None
+            return None
 
     def should_abort(self) -> bool:
         """Check whether execution should abort based on the abort policy.
@@ -222,10 +255,19 @@ class ExecutionEngine:
             sid = session_id or self.session_manager.session_id
 
             if step.action == "tap":
-                return await app_tap(
+                res = await app_tap(
                     selector=step.target, strategy="uiautomator",
                     appium_url=appium_url, session_id=sid,
                 )
+                # Retry once if element not found — UI may still be settling
+                # after popup dismissal, app launch, or data reset.
+                if res.get("error") and "no such element" in str(res).lower():
+                    await asyncio.sleep(2)
+                    res = await app_tap(
+                        selector=step.target, strategy="uiautomator",
+                        appium_url=appium_url, session_id=sid,
+                    )
+                return res
             elif step.action == "type":
                 return await app_type(
                     selector=step.target, text=step.value, strategy="accessibility_id",
@@ -432,6 +474,9 @@ class ExecutionEngine:
         dismiss action is executed (e.g. tapping the dismiss button).
         Keeps dismissing dialogs in a loop until none remain (handles
         cascading dialogs like privacy agreement → permission request).
+        Uses vision model as fallback when text-based tapping fails,
+        and tracks false positives so they are not re-detected within
+        the same step.
 
         Args:
             tc: The current TestCase (provides context for popup handling).
@@ -439,6 +484,8 @@ class ExecutionEngine:
         session_id = self.session_manager.session_id
         if not session_id:
             return
+
+        self._suppressed_rules.clear()
 
         max_rounds = 10
         for _round in range(max_rounds):
@@ -454,10 +501,20 @@ class ExecutionEngine:
                 if not popup_result:
                     break  # no more popups
 
+                rule_name = popup_result["rule_name"]
+
+                # ── Skip if already confirmed as false positive ─────────
+                if rule_name in self._suppressed_rules:
+                    self._log(
+                        f"Skipping already-confirmed false positive: "
+                        f"'{rule_name}'"
+                    )
+                    break
+
                 button_text = popup_result.get("button_text", "")
                 if not button_text:
                     self._log(
-                        f"Popup detected: {popup_result['rule_name']} "
+                        f"Popup detected: {rule_name} "
                         f"(no button_text configured)"
                     )
                     break
@@ -484,23 +541,124 @@ class ExecutionEngine:
                     if not tap_result.get("error"):
                         tapped = True
                         self._log(
-                            f"Popup dismissed: {popup_result['rule_name']} "
+                            f"Popup dismissed: {rule_name} "
                             f"(tapped '{button_text}')"
                         )
                         break
 
                 if not tapped:
+                    # ── Vision-based fallback ──────────────────────────
                     self._log(
-                        f"Popup '{popup_result['rule_name']}' detected "
-                        f"but tap '{button_text}' failed"
+                        f"Popup '{rule_name}': "
+                        f"text tap failed, trying vision..."
                     )
-                    break  # can't dismiss, stop looping
+                    vision_ok = asyncio.run(
+                        self._dismiss_with_vision(rule_name)
+                    )
+                    if vision_ok:
+                        tapped = True
+                    else:
+                        # Vision confirmed no popup — suppress this rule
+                        # so we don't waste time on the same false positive
+                        self._suppressed_rules.add(rule_name)
+                        self._log(
+                            f"Vision confirmed no popup for '{rule_name}' "
+                            f"— suppressing further detection"
+                        )
+                        break  # no popup, stop looping
 
                 import time
-                time.sleep(0.5)  # brief pause for next dialog to render
+                time.sleep(1.5)  # pause for next dialog or UI to render
             except Exception as exc:
                 self._log(f"Popup handler error: {exc}")
                 break
+
+    async def _dismiss_with_vision(self, rule_name: str) -> bool:
+        """Try to dismiss a popup using the vision model.
+
+        Takes a screenshot, asks the vision model to locate a dismiss/close
+        button, and taps at the returned pixel coordinates. Falls back to a
+        broader search if the first attempt yields nothing.
+
+        Returns:
+            True if the vision model found a button and the tap succeeded.
+        """
+        client = self._init_vision_client()
+        if not client:
+            self._log("  [Vision client not available]")
+            return False
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return False
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return False
+
+        # ── Use vision model directly with a popup-specific prompt ────
+        prompt = (
+            "当前屏幕上可能有一个弹窗/对话框。\n"
+            "请分析屏幕内容，找到弹窗上可以点击来关闭该弹窗的按钮。\n"
+            "关闭按钮的文字通常是：关闭、取消、稍后、知道了、不再提醒、确定、拒绝\n"
+            "也可能是一个叉号(X)关闭图标。\n\n"
+            "请按以下格式回复：\n"
+            "- found: true/false\n"
+            "- 如果找到，提供 center 百分比坐标 (pct_x%, pct_y%)\n"
+            "- 如果找到，提供 bounds [pct_x1%, pct_y1%, pct_x2%, pct_y2%]\n"
+            "- 简要描述你找到的按钮内容。"
+        )
+
+        result = await client.analyze(
+            b64, prompt, device_width=1080, device_height=2400,
+        )
+        if "error" in result:
+            self._log(f"  [Vision API error: {result['error'][:80]}]")
+            return False
+
+        content = result.get("content", "")
+
+        # Parse coordinates using shared helpers
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_found_status,
+            _parse_percentage_coordinates,
+        )
+
+        coords = _parse_percentage_coordinates(content, 1080, 2400)
+        found = _parse_found_status(content) or bool(coords.get("center"))
+
+        if not found:
+            self._log(
+                f"  [Vision: no dismiss button found — "
+                f"model says: {content[:100]}]"
+            )
+            return False
+
+        center = coords["center"]
+        self._log(
+            f"  [Vision found button at ({center['x']}, {center['y']})]"
+        )
+
+        tap_result = await app_tap(
+            x=center["x"], y=center["y"],
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        if not tap_result.get("error"):
+            self._log(
+                f"Popup dismissed via vision: {rule_name} "
+                f"(coords: {center['x']},{center['y']})"
+            )
+            return True
+
+        self._log(f"  [Vision tap failed: {tap_result.get('error', '')[:80]}]")
+        return False
 
     def _mark_aborted(self, tc: TestCase, reason: str) -> None:
         """Mark a test case as aborted with a reason.
