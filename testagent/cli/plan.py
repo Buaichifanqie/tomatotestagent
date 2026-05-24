@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from datetime import datetime
@@ -18,6 +19,94 @@ from testagent.plan.test_case_generator import TestCaseGenerator
 
 
 # ── helper functions ─────────────────────────────────────────────────────────
+
+
+def _detect_app_package(requirement: str) -> str | None:
+    """Auto-detect app package from connected Android device.
+
+    Uses ``adb`` to list third-party packages on the connected device, then
+    asks the LLM to match the app description (from the requirement text) to
+    one of the installed packages.
+
+    Returns:
+        The matched package name, or ``None`` if detection fails.
+    """
+    import subprocess
+
+    # ── Check device connection ────────────────────────────────────────────
+    try:
+        result = subprocess.run(
+            ["adb", "devices"],
+            capture_output=True, text=True, timeout=5,
+        )
+        lines = [l.strip() for l in result.stdout.split("\n") if l.strip()]
+        # lines[0] is "List of devices attached"; anything after with \t means connected
+        devices = [l for l in lines[1:] if "\tdevice" in l]
+        if not devices:
+            typer.echo("  [adb: no device connected, cannot auto-detect app package]")
+            return None
+    except FileNotFoundError:
+        typer.echo("  [adb not found, cannot auto-detect app package]")
+        return None
+    except Exception as exc:
+        typer.echo(f"  [adb check failed: {exc}]")
+        return None
+
+    # ── List 3rd-party packages ────────────────────────────────────────────
+    try:
+        result = subprocess.run(
+            ["adb", "shell", "pm", "list", "packages", "-3"],
+            capture_output=True, text=True, timeout=10,
+        )
+        packages = [
+            line.replace("package:", "").strip()
+            for line in result.stdout.split("\n")
+            if line.startswith("package:")
+        ]
+        if not packages:
+            typer.echo("  [no third-party packages found on device]")
+            return None
+    except Exception as exc:
+        typer.echo(f"  [failed to list packages: {exc}]")
+        return None
+
+    # ── Use LLM to match ───────────────────────────────────────────────────
+    from testagent.config.settings import get_settings
+    from testagent.llm.local_provider import LLMProviderFactory
+
+    settings = get_settings()
+    provider = LLMProviderFactory.create(settings)
+
+    package_list = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(packages))
+    prompt = (
+        f"用户需求: {requirement}\n\n"
+        f"设备上已安装的第三方应用包名列表:\n{package_list}\n\n"
+        "请根据用户需求，选择最匹配的应用包名。只输出包名本身，不要任何额外文字。"
+    )
+
+    try:
+        response = asyncio.run(provider.chat(
+            system="你是一个 Android 工程师，擅长根据应用名称匹配包名。",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        ))
+        for block in response.content:
+            if block.get("type") == "text":
+                matched = str(block.get("text", "")).strip()
+                # Validate the match is in the installed list
+                if matched in packages:
+                    typer.echo(f"  [auto-detected app package: {matched}]")
+                    return matched
+                else:
+                    typer.echo(
+                        f"  [LLM suggested '{matched}' but it's not in the installed list]"
+                    )
+                    return None
+    except Exception as exc:
+        typer.echo(f"  [LLM matching failed: {exc}]")
+        return None
+
+    return None
 
 
 def parse_requirement(requirement: str) -> tuple[str, bool]:
@@ -235,6 +324,12 @@ def plan_command(
     else:
         prd_text = content
 
+    # ── Auto-detect app package if not provided ──────────────────────────
+    if not app_package:
+        detected = _detect_app_package(requirement)
+        if detected:
+            app_package = detected
+
     # ── Set up output directory ─────────────────────────────────────────────
     output_dir = setup_output_dir(name)
     typer.echo(f"Output directory: {output_dir}")
@@ -249,8 +344,42 @@ def plan_command(
 
     # ── Phase 2: Generate test cases ────────────────────────────────────────
     typer.echo("Generating test cases...")
-    ts_gen = TestCaseGenerator()
-    test_cases = ts_gen.generate(prd_text, plan_name=name)
+
+    def _build_llm_callable() -> Any:
+        """Build a sync callable that wraps the async LLM provider for TC generation."""
+        from testagent.config.settings import get_settings
+        from testagent.llm.local_provider import LLMProviderFactory
+
+        settings = get_settings()
+        provider = LLMProviderFactory.create(settings)
+
+        from testagent.plan.test_case_generator import TC_GENERATION_SYSTEM_PROMPT
+
+        async def _call(text: str) -> str:
+            response = await provider.chat(
+                system=TC_GENERATION_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": text}],
+                temperature=0,
+            )
+            for block in response.content:
+                if block.get("type") == "text":
+                    return str(block.get("text", ""))
+            return ""
+
+        return lambda text: asyncio.run(_call(text))
+
+    # ── Inject app info into TC generation prompt ──────────────────────
+    enhanced_prd = prd_text
+    app_info_parts = []
+    if app_package:
+        app_info_parts.append(f"Android app package name: {app_package}")
+    if app_activity:
+        app_info_parts.append(f"Android launch activity: {app_activity}")
+    if app_info_parts:
+        enhanced_prd += "\n\n" + "\n".join(app_info_parts)
+
+    ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
+    test_cases = ts_gen.generate(enhanced_prd, plan_name=name)
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")

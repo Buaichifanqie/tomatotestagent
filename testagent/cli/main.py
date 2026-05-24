@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
 import typer
+
+
+def _fix_win_console() -> None:
+    """Force UTF-8 encoding on Windows consoles to display CJK correctly."""
+    if sys.platform == "win32":
+        import os as _os
+        _os.environ["PYTHONUTF8"] = "1"
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except Exception:
+            pass
+        try:
+            sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
+_fix_win_console()
 
 from testagent.cli.mcp_cmd import mcp_app
 from testagent.cli.output import RichOutput

@@ -5,9 +5,9 @@ from testagent.plan.models import PopupRule
 DEFAULT_POPUP_RULES = [
     PopupRule(name="permission_dialog", target_text=["允许", "权限"], action="tap", button_text="允许"),
     PopupRule(name="update_dialog", target_text=["更新", "升级", "新版本"], action="tap", button_text="稍后"),
-    PopupRule(name="privacy_agreement", target_text=["隐私", "协议", "同意"], action="tap", button_text="同意"),
+    PopupRule(name="privacy_agreement", target_text=["隐私", "协议", "同意并继续"], action="tap", button_text="同意并继续"),
     PopupRule(name="ad_dialog", target_text=["广告", "推广"], action="dismiss", button_text="关闭"),
-    PopupRule(name="teen_mode", target_text=["青少年", "未成年"], action="tap", button_text="我知道了"),
+    PopupRule(name="teen_mode", target_text=["青少年", "未成年", "未成年人模式"], action="tap", button_text="不再提醒"),
     PopupRule(name="location_permission", target_text=["位置", "定位"], action="tap", button_text="允许"),
     PopupRule(name="notification_permission", target_text=["通知", "推送"], action="tap", button_text="允许"),
     PopupRule(name="network_error", target_text=["网络", "无网络", "连接失败"], action="dismiss", button_text="确定"),

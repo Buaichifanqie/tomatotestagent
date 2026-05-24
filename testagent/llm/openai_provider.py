@@ -57,7 +57,7 @@ class OpenAIProvider:
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
                 },
-                timeout=httpx.Timeout(60.0, connect=10.0),
+                timeout=httpx.Timeout(180.0, connect=15.0),
             )
         return self._client
 
@@ -154,8 +154,13 @@ class OpenAIProvider:
         )
 
     def _parse_chat_response(self, data: dict[str, Any]) -> LLMResponse:
-        choice = data["choices"][0]
-        message = choice["message"]
+        choices = data.get("choices", [])
+        choice = choices[0] if choices else {}
+        if not isinstance(choice, dict):
+            choice = {}
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        if not isinstance(message, dict):
+            message = {}
         content: list[dict[str, Any]] = []
 
         if message.get("content"):
@@ -163,7 +168,12 @@ class OpenAIProvider:
 
         if message.get("tool_calls"):
             for tc in message["tool_calls"]:
-                raw_args = tc["function"]["arguments"]
+                if not isinstance(tc, dict):
+                    continue
+                func = tc.get("function")
+                if not isinstance(func, dict):
+                    continue
+                raw_args = func.get("arguments", "{}")
                 if isinstance(raw_args, str):
                     import json as _json
 
@@ -176,14 +186,14 @@ class OpenAIProvider:
                 content.append(
                     {
                         "type": "tool_use",
-                        "id": tc["id"],
-                        "name": tc["function"]["name"],
+                        "id": tc.get("id", ""),
+                        "name": func.get("name", ""),
                         "input": parsed_args,
                     }
                 )
 
-        finish_reason = choice.get("finish_reason", "stop")
-        stop_reason = self._map_stop_reason(finish_reason, bool(message.get("tool_calls")))
+        finish_reason = choice.get("finish_reason", "stop") if isinstance(choice, dict) else "stop"
+        stop_reason = self._map_stop_reason(finish_reason, bool(message.get("tool_calls") if isinstance(message, dict) else False))
 
         usage = data.get("usage", {})
         usage_dict = {

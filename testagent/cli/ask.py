@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Any
@@ -616,17 +617,6 @@ def _register_tool_handlers(
             await asyncio.sleep(2)
         return {"result": result}
 
-        result = await app_tap(
-            selector=str(input_data.get("selector", "")),
-            strategy=str(input_data.get("strategy", "accessibility_id")),
-            appium_url=_APPIUM_URL,
-            session_id=session_id,
-        )
-        # 点击后等待界面稳定再返回
-        if result.get("status_code") == 200 or "status_code" not in result:
-            await asyncio.sleep(2)
-        return {"result": result}
-
     async def _handler_type(input_data: dict[str, Any]) -> dict[str, Any]:
         from testagent.mcp_servers.appium_server.tools import app_type
 
@@ -809,7 +799,14 @@ def _wrap_with_session_recovery(
         result = await dispatch_fn(tool_name, tool_input)
         result_str = _json.dumps(result, ensure_ascii=False)
 
-        if "invalid session id" in result_str or "session is either terminated" in result_str:
+        _session_dead_patterns = (
+            "invalid session id",
+            "session is either terminated",
+            "instrumentation process is not running",
+            "cannot be proxied to UiAutomator2",
+            "has already been deleted",
+        )
+        if any(p in result_str for p in _session_dead_patterns):
             retry_result, new_sid, new_dispatch = await _recover_and_retry(
                 tool_name, tool_input, glm_client
             )
@@ -974,6 +971,96 @@ async def _recover_session(
     return None, None, glm_client
 
 
+def _clean_orphan_tool_messages(messages: list[dict[str, Any]]) -> None:
+    """Remove stale tool messages and strip unfulfilled tool_calls from assistant messages.
+
+    After auto-compact strips the middle of a conversation:
+    1. Tool messages in the tail may reference tool_call_ids from assistant messages
+       that were compacted away — these orphaned tool messages are removed.
+    2. Assistant messages with tool_calls may be missing their tool responses
+       (compacted away), which violates the LLM API requirement that every
+       assistant tool_calls must be followed by tool responses — strip tool_calls
+       from these assistant messages so the sequence is valid.
+    """
+    # Step 1: Collect tool_call_ids that still have matching tool responses
+    tid_has_response: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id", "")
+            if tid:
+                tid_has_response.add(tid)
+
+    # Step 2: Remove orphaned tool messages (tool msgs with no matching assistant tool_call)
+    # First collect all valid tool_call_ids from assistant messages
+    valid_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in (msg.get("tool_calls") or []):
+                tid = tc.get("id", "") if isinstance(tc, dict) else ""
+                if tid:
+                    valid_ids.add(tid)
+
+    i = len(messages) - 1
+    removed = 0
+    while i >= 0:
+        msg = messages[i]
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id", "")
+            if tid and tid not in valid_ids:
+                messages.pop(i)
+                removed += 1
+        i -= 1
+
+    if removed:
+        logger.debug(
+            "Removed orphaned tool messages",
+            extra={"extra_data": {"count": removed}},
+        )
+
+    # Step 3: Strip tool_calls from assistant messages whose tool responses
+    # were compacted away. Scan from the END so we can safely check "following"
+    # messages (which are towards the end of the list).
+    stripped = 0
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg.get("role") != "assistant":
+            continue
+        tc_list = msg.get("tool_calls")
+        if not tc_list:
+            continue
+
+        # Collect the tool_call_ids this assistant message expects
+        expected_tids: set[str] = set()
+        for tc in tc_list:
+            tid = tc.get("id", "") if isinstance(tc, dict) else ""
+            if tid:
+                expected_tids.add(tid)
+
+        if not expected_tids:
+            continue
+
+        # Check which of these tool_call_ids have tool responses AFTER this message
+        found_tids: set[str] = set()
+        for j in range(i + 1, len(messages)):
+            later = messages[j]
+            if later.get("role") == "tool":
+                tid = later.get("tool_call_id", "")
+                if tid in expected_tids:
+                    found_tids.add(tid)
+
+        # If any tool_calls are missing their responses, strip ALL tool_calls
+        # (having partial tool responses is also invalid for the API)
+        if found_tids != expected_tids:
+            del msg["tool_calls"]
+            stripped += 1
+
+    if stripped:
+        logger.debug(
+            "Stripped tool_calls from assistant messages with missing responses",
+            extra={"extra_data": {"count": stripped}},
+        )
+
+
 async def interactive_chat() -> None:
     """交互式自然语言测试聊天模式。"""
     global _device_width, _device_height
@@ -1075,6 +1162,10 @@ async def interactive_chat() -> None:
         # 传给 agent 的 tools（有会话时才给 Appium 工具）
         tools = APPIUM_TOOLS if dispatch_fn is not None else []
 
+        # 清洗 messages 中的孤立 tool 消息：如果 tool message 之前没有匹配的
+        # assistant tool_calls（auto-compact 后可能出现），移除它们以避免 LLM API 报错
+        _clean_orphan_tool_messages(messages)
+
         messages.append({"role": "user", "content": user_input})
 
         # Wrap dispatch with auto session recovery
@@ -1148,8 +1239,32 @@ async def interactive_chat() -> None:
             messages.clear()
             llm.reset_budget()
             print("  [已重置，请继续输入]")
+        except asyncio.TimeoutError:
+            logger.warning("LLM API 调用超时，重试中...")
+            print("  [LLM 超时，正在重试...]")
+            try:
+                result_msgs = await agent_loop(
+                    messages=messages,
+                    tools=tools,
+                    system=_SYSTEM_PROMPT,
+                    llm_provider=llm,
+                    dispatch_fn=safe_dispatch or dispatch_fn,
+                    max_rounds=1000,
+                    progress_callback=_on_progress,
+                )
+                if result_msgs and result_msgs[-1].get("tool_calls"):
+                    _safe_print("  [已达最大轮数，任务可能未完成。输入新指令可继续]")
+            except Exception as retry_exc:
+                import traceback
+                logger.error("重试仍然失败: %s\n%s", retry_exc, traceback.format_exc())
+                exc_type = type(retry_exc).__name__
+                print(f"\n  [错误: {exc_type}] {retry_exc}\n")
         except Exception as exc:
-            print(f"\n  [错误: {exc}]\n")
+            import traceback
+            logger.error("交互循环异常: %s\n%s", exc, traceback.format_exc())
+            exc_type = type(exc).__name__
+            exc_msg = str(exc) or f"<{exc_type}: 无详细信息>"
+            print(f"\n  [错误: {exc_msg}]\n")
 
         # 检查会话是否还存活（UiAutomator2 instrumentation 可能崩溃）
         if session_id and dispatch_fn and not await _check_session_alive(session_id):

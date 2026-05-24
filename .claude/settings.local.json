@@ -1,7 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:docs.bigmodel.cn)"
+      "WebFetch(domain:docs.bigmodel.cn)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python -m pytest tests/unit/plan/test_prd_parser.py -v)",
+      "Bash(.venv/Scripts/python *)",
+      "Bash(git commit *)",
+      "Bash(python *)",
+      "Bash(.venv/Scripts/testagent plan *)",
+      "Read(//d/D/test-ai-agent/**)",
+      "Bash(adb logcat *)",
+      "Bash(.venv/Scripts/python.exe -m testagent.cli.main plan \"测试打开哔哩哔哩首页\" --name \"smoke-test\" -y)",
+      "Bash(.venv/Scripts/testagent.exe plan *)",
+      "Bash(adb devices *)"
     ]
   }
 }

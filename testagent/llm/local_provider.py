@@ -42,7 +42,7 @@ class LocalProvider:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
-                timeout=httpx.Timeout(120.0, connect=10.0),
+                timeout=httpx.Timeout(180.0, connect=15.0),
             )
         return self._client
 

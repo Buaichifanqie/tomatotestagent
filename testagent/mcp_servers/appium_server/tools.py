@@ -26,6 +26,8 @@ async def _appium_post(
     timeout: int = 30,
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    if ":sessionId" in path and not session_id:
+        return {"error": "No Appium session — call create_session() first"}
     if session_id:
         path = path.replace(":sessionId", session_id)
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
@@ -43,6 +45,8 @@ async def _appium_get(
     timeout: int = 30,
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    if ":sessionId" in path and not session_id:
+        return {"error": "No Appium session — call create_session() first"}
     if session_id:
         path = path.replace(":sessionId", session_id)
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
@@ -213,9 +217,7 @@ async def app_assert_element(
         return {"error": f"Invalid assertion '{assertion}'. Must be one of {sorted(_VALID_ASSERTIONS)}"}
     find_result = await _find_element(appium_url, strategy, selector, session_id=session_id)
     if find_result["status_code"] != 200:
-        if assertion == "visible":
-            return {"passed": False, "reason": f"Element not found: {find_result['body']}"}
-        return {"error": f"Element not found: {find_result['body']}", "status_code": find_result["status_code"]}
+        return {"passed": False, "reason": f"Element not found: {find_result['body']}"}
     element_id = find_result["body"].get("ELEMENT") or find_result["body"].get("elementId")
     if not element_id:
         value = find_result["body"].get("value", {})
@@ -347,7 +349,7 @@ async def app_launch(
     )
     if result["status_code"] == 200:
         return {"result": f"App '{package}' launched", "package": package}
-    return result
+    return {"error": f"Launch failed (HTTP {result.get('status_code')}): {result.get('body')}"}
 
 
 async def app_exec(
@@ -371,4 +373,6 @@ async def app_exec(
         timeout=30,
         session_id=session_id,
     )
+    if result.get("status_code", 0) != 200:
+        return {"error": f"Shell command failed (HTTP {result.get('status_code')}): {result.get('body')}"}
     return result
