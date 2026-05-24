@@ -411,7 +411,10 @@ class ExecutionEngine:
 
         Runs cleanup commands asynchronously via the Appium session:
         - Re-enable WiFi and mobile data
-        - Send app to background (home key) so its state persists
+        - Force-stop the app so the next TC starts from a clean state
+          (sending to background with KEYCODE_HOME caused cascading
+           failures — e.g. TC-A opened search, TC-B looked for bottom
+           nav but found search page instead)
         """
         session_id = self.session_manager.session_id
         appium_url = self.session_manager.appium_url
@@ -419,11 +422,13 @@ class ExecutionEngine:
             return
 
         async def _cleanup() -> None:
+            pkg = self.config.app_package or ""
             cmds = [
                 "svc wifi enable",
                 "svc data enable",
-                "input keyevent KEYCODE_HOME",
             ]
+            if pkg:
+                cmds.append(f"am force-stop {pkg}")
             for cmd in cmds:
                 try:
                     await app_exec(

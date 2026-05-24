@@ -104,12 +104,62 @@ def _truncate(text: str, max_len: int) -> str:
     return text[: max_len - 3] + "..."
 
 
+def _filter_dynamic_content(elements: list[UIElement]) -> list[UIElement]:
+    """Filter out transient/dynamic content, keep structural UI elements.
+
+    Dynamic content (video titles, usernames, descriptions, counts) changes
+    on every app launch — using them as tap targets guarantees flaky tests.
+    This function keeps only structural elements that are stable across runs.
+
+    Keep rules (any one is sufficient):
+    1. Has a non-generic resource-id → layout control
+    2. Short text (≤ 15) + clickable → button/tab
+    3. Short text (≤ 15) + content-desc → accessible control
+
+    Filter out:
+    1. No resource-id, not clickable, text > 12 → likely dynamic content
+    2. Text > 20 chars → definitely a title/description
+    3. Generic Android resource-ids like ``android:id/content``
+    """
+    result: list[UIElement] = []
+    for el in elements:
+        rid = (el.resource_id or "").strip()
+
+        # ── Always keep elements with a real resource-id ──────────
+        if rid and ":id/" in rid:
+            short = rid.split(":id/", 1)[1]
+            # Skip generic Android system IDs
+            if short and short != "content" and not short.startswith("android:"):
+                result.append(el)
+                continue
+
+        # ── Keep short clickable elements (buttons, tabs, nav items) ──
+        if el.clickable and len(el.text) <= 15:
+            result.append(el)
+            continue
+
+        # ── Keep short elements with accessibility labels ──
+        if el.content_desc and len(el.text) <= 15:
+            result.append(el)
+            continue
+
+        # ── Filter out long text without resource-id ──
+        if not rid and len(el.text) > 12:
+            continue
+
+        # ── Keep other short text elements ──
+        if len(el.text) <= 12:
+            result.append(el)
+
+    return result
+
+
 def format_ui_context(result: UIScanResult, max_elements: int = 80) -> str:
     """Format discovered UI elements into a structured block for the LLM prompt.
 
-    Deduplicates elements by (text, resource_id), sorts clickable elements
-    first, truncates to ``max_elements``, and produces both a markdown table
-    and a quick-scan text label list.
+    Deduplicates elements by (text, resource_id), filters out dynamic/transient
+    content (video titles, usernames), separates clickable structural elements
+    from reference-only labels, and produces a markdown table.
 
     Args:
         result: The scan result to format.
@@ -130,39 +180,64 @@ def format_ui_context(result: UIScanResult, max_elements: int = 80) -> str:
             seen.add(key)
             unique.append(el)
 
+    # Filter out dynamic content so the LLM only sees stable structural elements
+    unique = _filter_dynamic_content(unique)
+
     # Sort: clickable first, then by text length ascending
     unique.sort(key=lambda e: (not e.clickable, len(e.text)))
 
     # Truncate
     unique = unique[:max_elements]
 
-    # Build markdown table rows
-    rows: list[str] = []
-    for el in unique:
+    # Separate clickable (safe for tap) from non-clickable (reference only)
+    clickable_els = [el for el in unique if el.clickable]
+    reference_els = [el for el in unique if not el.clickable]
+
+    # ── Clickable elements table (safe for tap targets) ──────────
+    clickable_rows: list[str] = []
+    for el in clickable_els:
         text_cell = _truncate(el.text, _TRUNCATE_TEXT_AT) or "--"
-        desc_cell = _truncate(el.content_desc, _TRUNCATE_DESC_AT) or "--"
         rid_cell = _short_rid(el.resource_id) or "--"
-        clickable_cell = "Yes" if el.clickable else ""
-        rows.append(f"| {text_cell} | {desc_cell} | {rid_cell} | {clickable_cell} |")
+        clickable_rows.append(f"| {text_cell} | {rid_cell} |")
 
-    rows_str = "\n".join(rows)
+    # ── Reference labels table (visible text, NOT safe for tap) ──
+    ref_rows: list[str] = []
+    for el in reference_els:
+        text_cell = _truncate(el.text, _TRUNCATE_TEXT_AT) or "--"
+        rid_cell = _short_rid(el.resource_id) or "--"
+        ref_rows.append(f"| {text_cell} | {rid_cell} |")
 
-    # Build comma-separated text labels for quick LLM scanning
-    labels = [el.text for el in unique if el.text and len(el.text) < 30]
-    labels_str = ", ".join(f'"{l}"' for l in labels)
+    # Build comma-separated safe clickable text labels
+    safe_labels = [el.text for el in clickable_els if el.text and len(el.text) < 30]
+    safe_labels_str = ", ".join(f'"{l}"' for l in safe_labels)
 
-    return (
-        "\n\n## Real UI Elements Detected on Device\n\n"
-        "The following real UI elements were found on the current screen. "
-        "Use these EXACT values when writing test step targets.\n\n"
-        "| Text | Content Desc | Resource ID | Clickable |\n"
-        "|---|---|---|---|\n"
-        f"{rows_str}\n\n"
-        "### Element Text Labels (use these for tap/assert targets)\n"
-        f"{labels_str}\n\n"
-        "**IMPORTANT:** All `assert` and `tap` targets MUST use one of the "
-        "text values from the table above. Do NOT invent UI labels.\n"
-    )
+    parts = [
+        "\n\n## Real UI Elements Detected on Device\n",
+        "Below are real UI elements found on screen. "
+        "Only use **Clickable Elements** for `tap` targets. "
+        "The reference labels are visible but should NOT be used as tap targets.\n",
+    ]
+
+    if clickable_rows:
+        parts.append("### Clickable Elements (safe for tap targets)\n")
+        parts.append("| Text | Resource ID |\n|---|---|\n")
+        parts.append("\n".join(clickable_rows))
+        parts.append("\n")
+
+    if reference_els:
+        parts.append("### Other Visible Labels (reference only — do NOT use as tap targets)\n")
+        parts.append("| Text | Resource ID |\n|---|---|\n")
+        parts.append("\n".join(ref_rows))
+        parts.append("\n")
+
+    if safe_labels:
+        parts.append(
+            "**IMPORTANT:** All `tap` targets MUST use one of the "
+            "Clickable Elements text values. Do NOT use reference labels or "
+            "invent UI labels for tap actions.\n"
+        )
+
+    return "\n".join(parts)
 
 
 def _close_session(session_id: str | None, appium_url: str) -> None:

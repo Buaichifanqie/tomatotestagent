@@ -13,7 +13,13 @@
       "Bash(adb logcat *)",
       "Bash(.venv/Scripts/python.exe -m testagent.cli.main plan \"测试打开哔哩哔哩首页\" --name \"smoke-test\" -y)",
       "Bash(.venv/Scripts/testagent.exe plan *)",
-      "Bash(adb devices *)"
+      "Bash(adb devices *)",
+      "Bash(appium --version)",
+      "Bash(appium --log-level info)",
+      "Bash(curl -s http://localhost:4723/status)",
+      "Bash(curl -s -X POST http://localhost:4723/session -H \"Content-Type: application/json\" -d \"{\\\\\"capabilities\\\\\":{\\\\\"alwaysMatch\\\\\":{\\\\\"platformName\\\\\":\\\\\"Android\\\\\",\\\\\"appium:automationName\\\\\":\\\\\"UiAutomator2\\\\\",\\\\\"appium:deviceName\\\\\":\\\\\"emulator-5554\\\\\",\\\\\"appium:noReset\\\\\":true,\\\\\"appium:autoGrantPermissions\\\\\":true,\\\\\"appium:newCommandTimeout\\\\\":120},\\\\\"firstMatch\\\\\":[{}]}}\")",
+      "Bash(export ANDROID_HOME=\"/c/Users/kongwenshuo/AppData/Local/Android/Sdk\")",
+      "Bash(export ANDROID_SDK_ROOT=\"/c/Users/kongwenshuo/AppData/Local/Android/Sdk\")"
     ]
   }
 }
