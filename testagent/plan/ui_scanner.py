@@ -120,10 +120,18 @@ def _filter_dynamic_content(elements: list[UIElement]) -> list[UIElement]:
     1. No resource-id, not clickable, text > 12 → likely dynamic content
     2. Text > 20 chars → definitely a title/description
     3. Generic Android resource-ids like ``android:id/content``
+    4. Ad-related text patterns → ``跳过`` (skip ad), ``查看详情`` (ad link)
     """
+    _AD_PATTERNS = frozenset({"跳过", "查看详情", "了解详情", "包邮", "立即购买"})
+
     result: list[UIElement] = []
     for el in elements:
+        text = el.text.strip()
         rid = (el.resource_id or "").strip()
+
+        # ── Filter out ad-related transient content ──────────────
+        if any(pat in text for pat in _AD_PATTERNS):
+            continue
 
         # ── Always keep elements with a real resource-id ──────────
         if rid and ":id/" in rid:
@@ -134,21 +142,21 @@ def _filter_dynamic_content(elements: list[UIElement]) -> list[UIElement]:
                 continue
 
         # ── Keep short clickable elements (buttons, tabs, nav items) ──
-        if el.clickable and len(el.text) <= 15:
+        if el.clickable and len(text) <= 15:
             result.append(el)
             continue
 
         # ── Keep short elements with accessibility labels ──
-        if el.content_desc and len(el.text) <= 15:
+        if el.content_desc and len(text) <= 15:
             result.append(el)
             continue
 
         # ── Filter out long text without resource-id ──
-        if not rid and len(el.text) > 12:
+        if not rid and len(text) > 12:
             continue
 
         # ── Keep other short text elements ──
-        if len(el.text) <= 12:
+        if len(text) <= 12:
             result.append(el)
 
     return result

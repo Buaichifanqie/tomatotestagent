@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from testagent.mcp_servers.appium_server.tools import (
@@ -11,11 +13,14 @@ from testagent.mcp_servers.appium_server.tools import (
     app_get_source,
     app_launch,
     app_screenshot,
+    app_start_recording,
+    app_stop_recording,
     app_swipe,
     app_tap,
     app_type,
 )
 from testagent.plan.models import (
+    EvidenceItem,
     ExecutionStatus,
     FailureType,
     PlanConfig,
@@ -54,6 +59,7 @@ class ExecutionEngine:
         self._events: list[dict] = []
         self._vision_client: Any | None = None
         self._suppressed_rules: set[str] = set()
+        self._current_recording_tc: str = ""
 
     # ── vision client (lazy) ─────────────────────────────────────────────────
 
@@ -148,7 +154,16 @@ class ExecutionEngine:
 
             self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
             self._logcat_start(tc.id)
-            self._execute_single(tc)
+
+            # ── Start screen recording for this TC ───────────────────────
+            self._start_recording(tc)
+
+            try:
+                self._execute_single(tc)
+            finally:
+                # ── Stop recording for this TC (always, even on error) ───
+                self._stop_recording(tc)
+
             self._logcat_stop(tc)
 
             status = tc.execution.status.value if tc.execution.status else "UNKNOWN"
@@ -286,10 +301,36 @@ class ExecutionEngine:
                 # Use config package name (not LLM-generated) to prevent
                 # hallucinated package names like "buli" instead of "bili".
                 pkg = self.config.app_package or step.target
-                return await app_launch(
+                result = await app_launch(
                     package=pkg,
                     appium_url=appium_url, session_id=sid,
                 )
+                # Wait for the app to fully render after launch.
+                # `monkey -p` returns immediately but the app may still
+                # be initialising, especially after force-stop.
+                await asyncio.sleep(3)
+                # Verify the app is actually in the foreground by
+                # checking page source for the app's package name.
+                if not result.get("error"):
+                    try:
+                        src = await app_get_source(
+                            appium_url=appium_url, session_id=sid,
+                        )
+                        xml = src.get("source", "")
+                        if pkg not in xml:
+                            # App didn't come to foreground — retry once
+                            self._log(
+                                f"App not visible after launch, retrying..."
+                            )
+                            await asyncio.sleep(2)
+                            result = await app_launch(
+                                package=pkg,
+                                appium_url=appium_url, session_id=sid,
+                            )
+                            await asyncio.sleep(3)
+                    except Exception:
+                        pass
+                return result
             elif step.action == "assert":
                 return await app_assert_element(
                     selector=step.target, assertion="visible",
@@ -370,14 +411,35 @@ class ExecutionEngine:
             duration_ms=elapsed,
         )
 
-        # ── On failure: use vision to analyze the current screen ────
+        # ── On failure: save screenshot + vision analysis ──────────
         if not success:
             try:
+                # Save screenshot to disk
+                scr_result = await app_screenshot(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=self.session_manager.session_id,
+                )
+                scr_id = scr_result.get("screenshot_id", "")
+                if scr_id:
+                    from testagent.mcp_servers.shared_cache import get_screenshot
+
+                    b64_data = get_screenshot(scr_id)
+                    if b64_data:
+                        scr_dir = Path(self.config.output_dir) / "screenshots"
+                        scr_dir.mkdir(parents=True, exist_ok=True)
+                        scr_path = scr_dir / f"{tc.id}_step{step.step}.png"
+                        scr_path.write_bytes(base64.b64decode(b64_data))
+                        step_exec.screenshot_after = str(scr_path)
+                        tc.execution.evidence.append(
+                            EvidenceItem(type="screenshot", path=str(scr_path))
+                        )
+
+                # Vision analysis
                 vision_note = await self._analyze_failure_with_vision(step)
                 if vision_note:
                     step_exec.vision_analysis = vision_note
             except Exception:
-                pass  # Vision analysis is best-effort
+                pass  # Both are best-effort
 
         return step_exec
 
@@ -451,6 +513,75 @@ class ExecutionEngine:
                     pass
 
         asyncio.run(_cleanup())
+
+    # ── screen recording ───────────────────────────────────────────────────
+
+    def _start_recording(self, tc: TestCase) -> None:
+        """Start screen recording for a test case using Appium's recording API.
+
+        The recording spans the execution of the current test case, capturing
+        the actual UI behaviour including popups, navigation, and any error
+        states. The recording is stopped in a ``finally`` block after execution.
+
+        Best-effort — failures log a warning but don't block execution.
+        """
+        session_id = self.session_manager.session_id
+        if not session_id:
+            self._log(f"  [Cannot start recording for {tc.id}: no session]")
+            return
+        try:
+            result = asyncio.run(
+                app_start_recording(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=session_id,
+                )
+            )
+            if not result.get("error"):
+                self._current_recording_tc = tc.id
+                self._log(f"[Recording started for {tc.id}]")
+            else:
+                self._log(f"  [Recording start failed for {tc.id}: {result['error'][:80]}]")
+        except Exception as exc:
+            self._log(f"  [Recording start error for {tc.id}: {exc}]")
+
+    def _stop_recording(self, tc: TestCase | None = None) -> None:
+        """Stop screen recording, save the video, and add as evidence."""
+        tc_id = self._current_recording_tc
+        self._current_recording_tc = ""
+        session_id = self.session_manager.session_id
+        if not session_id:
+            if tc_id:
+                self._log(f"  [Cannot stop recording for {tc_id}: no session]")
+            return
+        if not tc_id:
+            return
+        try:
+            result = asyncio.run(
+                app_stop_recording(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=session_id,
+                )
+            )
+            video_b64 = result.get("video_base64", "")
+            if not video_b64:
+                err = result.get("error", "no video data")
+                self._log(f"  [Recording stop for {tc_id}: {err[:80]}]")
+                return
+
+            video_dir = Path(self.config.output_dir) / "recordings"
+            video_dir.mkdir(parents=True, exist_ok=True)
+            video_path = video_dir / f"{tc_id}.mp4"
+            video_path.write_bytes(base64.b64decode(video_b64))
+
+            # Add as evidence
+            if tc is not None:
+                tc.execution.evidence.append(
+                    EvidenceItem(type="recording", path=str(video_path))
+                )
+
+            self._log(f"[Recording saved: {video_path.name}]")
+        except Exception as exc:
+            self._log(f"  [Recording save error for {tc_id}: {exc}]")
 
     def _logcat_start(self, tc_id: str) -> None:
         """Clear logcat buffer before a test case."""
@@ -593,7 +724,6 @@ class ExecutionEngine:
                         )
                         break  # no popup, stop looping
 
-                import time
                 time.sleep(1.5)  # pause for next dialog or UI to render
             except Exception as exc:
                 self._log(f"Popup handler error: {exc}")
@@ -628,19 +758,24 @@ class ExecutionEngine:
             return False
 
         prompt = (
-            "请分析当前屏幕截图，判断是否存在弹窗/对话框/浮层遮挡了主界面内容。\n\n"
-            "弹窗的特征包括：\n"
-            "1. 屏幕中央有一个对话框，周围背景变暗或模糊\n"
-            "2. 有「同意」「拒绝」「允许」「取消」「确定」「知道了」「关闭」"
-            "「稍后」「以后再说」等按钮的对话框\n"
-            "3. 有「权限」「更新」「通知」「位置」「广告」「青少年」「隐私」"
-            "等关键词的弹窗\n"
-            "4. 全屏浮层或引导页\n\n"
-            "如果存在弹窗，请找到关闭/确认/同意按钮，并提供其中心百分比坐标。\n\n"
+            "请严格判断当前屏幕截图是否存在弹窗/对话框遮挡了主界面内容。\n\n"
+            "**以下情况不是弹窗，请不要误判：**\n"
+            "- 正常的 app 首页内容（推荐流、视频列表、图文卡片）\n"
+            "- 广告横幅/banner（只是页面中的广告位，不是弹窗）\n"
+            "- 底部导航栏、顶部 Tab 栏\n"
+            "- 视频播放界面（播放器、评论区、相关推荐）\n\n"
+            "**真正的弹窗特征：**\n"
+            "1. 屏幕中央有明确的对话框卡片，周围背景变暗或模糊\n"
+            "2. 对话框上有明显的关闭/确认按钮（如「同意」「拒绝」「允许」「取消」"
+            "「确定」「知道了」「关闭」「稍后」「以后再说」）\n"
+            "3. 对话框内有「权限」「更新」「通知」「位置」「青少年」「隐私」等关键词\n"
+            "4. 全屏浮层/引导页覆盖了所有内容\n\n"
+            "只有当明确存在真正的弹窗时，才回复 found: true 并提供关闭按钮坐标。\n"
+            "如果只是普通的内容页面，请回复 found: false。\n\n"
             "请按以下格式回复：\n"
             "- found: true/false\n"
             "- 如果找到，提供 center 百分比坐标 (pct_x%, pct_y%)\n"
-            "- 描述你找到的弹窗内容和按钮文字"
+            "- 简要描述弹窗内容和按钮文字"
         )
 
         result = await client.analyze(

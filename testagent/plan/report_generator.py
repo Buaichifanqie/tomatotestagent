@@ -90,7 +90,7 @@ class ReportGenerator:
             "|---|---|---|---|---|---|---|---|"
         )
         for tc in test_cases:
-            core_mark = "✅" if tc.is_core else "❌"
+            core_mark = "✓" if tc.is_core else ""
             verdict_str = tc.execution.verdict.value if tc.execution.verdict else ""
             duration = tc.execution.duration_ms
             error = tc.execution.error_message or ""
@@ -110,6 +110,25 @@ class ReportGenerator:
             ) if tc.execution.verdict else ""
             lines.append(f"### {tc.id}: {tc.title} {verdict_emoji}")
             lines.append("")
+
+            # ── Evidence (recording, screenshots) ────────────────────
+            if tc.execution.evidence:
+                lines.append("**证据:**")
+                lines.append("")
+                for ev in tc.execution.evidence:
+                    ev_path = Path(ev.path)
+                    if ev.type == "recording":
+                        rel = ev_path.relative_to(self._output_dir)
+                        lines.append(
+                            f"- 🎬 [录屏回放]({rel.as_posix()})"
+                        )
+                    elif ev.type == "screenshot" and ev_path.exists():
+                        rel = ev_path.relative_to(self._output_dir)
+                        lines.append(
+                            f"- 🖼️ [截图]({rel.as_posix()})"
+                        )
+                lines.append("")
+
             steps = tc.execution.steps
             if steps:
                 lines.append(
@@ -126,7 +145,17 @@ class ReportGenerator:
                         f"| {s.step} | {s.action} | {s.target} "
                         f"| {result_mark} | {dur} | {err} |"
                     )
-                    # Append vision analysis for failed steps
+                    # Screenshot for failed steps
+                    if not s.success and s.screenshot_after:
+                        scr_path = Path(s.screenshot_after)
+                        try:
+                            rel = scr_path.relative_to(self._output_dir)
+                            lines.append("")
+                            lines.append(f"  ![失败截图]({rel.as_posix()})")
+                            lines.append("")
+                        except ValueError:
+                            pass
+                    # Vision analysis for failed steps
                     if not s.success and s.vision_analysis:
                         lines.append("")
                         lines.append("  > **多模态分析:**")

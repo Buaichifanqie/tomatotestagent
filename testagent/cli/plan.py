@@ -414,6 +414,16 @@ def plan_command(
                 f"  [UI pre-scan failed: {exc} — "
                 f"falling back to default prompt]"
             )
+        finally:
+            # Kill the app after pre-scan so TCs start from a clean state
+            import subprocess
+            try:
+                subprocess.run(
+                    ["adb", "shell", "am", "force-stop", app_package],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
     test_cases = ts_gen.generate(enhanced_prd, plan_name=name)
