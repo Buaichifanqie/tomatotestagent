@@ -126,6 +126,13 @@ class ReportGenerator:
                         f"| {s.step} | {s.action} | {s.target} "
                         f"| {result_mark} | {dur} | {err} |"
                     )
+                    # Append vision analysis for failed steps
+                    if not s.success and s.vision_analysis:
+                        lines.append("")
+                        lines.append("  > **多模态分析:**")
+                        for line in s.vision_analysis.strip().split("\n"):
+                            lines.append(f"  > {line}")
+                        lines.append("")
             else:
                 lines.append("无详细步骤记录。")
             lines.append("")

@@ -360,7 +360,7 @@ class ExecutionEngine:
             error_message = str(e)
 
         elapsed = int((time.time() - step_start) * 1000)
-        return StepExecution(
+        step_exec = StepExecution(
             step=step.step,
             action=step.action,
             target=step.target,
@@ -369,6 +369,17 @@ class ExecutionEngine:
             error_message=error_message,
             duration_ms=elapsed,
         )
+
+        # ── On failure: use vision to analyze the current screen ────
+        if not success:
+            try:
+                vision_note = await self._analyze_failure_with_vision(step)
+                if vision_note:
+                    step_exec.vision_analysis = vision_note
+            except Exception:
+                pass  # Vision analysis is best-effort
+
+        return step_exec
 
     def _check_precondition(self, tc: TestCase) -> bool:
         """Check and execute precondition setup with retry.
@@ -483,6 +494,10 @@ class ExecutionEngine:
         and tracks false positives so they are not re-detected within
         the same step.
 
+        When text-based rules find nothing, vision is still consulted
+        as a general popup detector — catching unknown system dialogs
+        that no keyword rule covers.
+
         Args:
             tc: The current TestCase (provides context for popup handling).
         """
@@ -504,7 +519,13 @@ class ExecutionEngine:
                 page_source = result.get("source", "")
                 popup_result = self.popup_handler.handle(page_source=page_source)
                 if not popup_result:
-                    break  # no more popups
+                    # ── Text rules found nothing. Try vision as a
+                    #     general popup detector for unknown dialogs ────
+                    vision_ok = asyncio.run(self._detect_unknown_popup())
+                    if vision_ok:
+                        time.sleep(1.0)
+                        continue   # popup dismissed, re-check
+                    break  # no popup detected at all
 
                 rule_name = popup_result["rule_name"]
 
@@ -577,6 +598,86 @@ class ExecutionEngine:
             except Exception as exc:
                 self._log(f"Popup handler error: {exc}")
                 break
+
+    async def _detect_unknown_popup(self) -> bool:
+        """Use vision to detect and dismiss an unknown popup (no text rule matched).
+
+        Takes a screenshot and asks the vision model whether a dialog/popup
+        is obscuring the screen. If found, locates the dismiss/close button
+        and taps it.
+
+        Returns:
+            True if a popup was found and dismissed, False otherwise.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return False
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return False
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return False
+
+        prompt = (
+            "请分析当前屏幕截图，判断是否存在弹窗/对话框/浮层遮挡了主界面内容。\n\n"
+            "弹窗的特征包括：\n"
+            "1. 屏幕中央有一个对话框，周围背景变暗或模糊\n"
+            "2. 有「同意」「拒绝」「允许」「取消」「确定」「知道了」「关闭」"
+            "「稍后」「以后再说」等按钮的对话框\n"
+            "3. 有「权限」「更新」「通知」「位置」「广告」「青少年」「隐私」"
+            "等关键词的弹窗\n"
+            "4. 全屏浮层或引导页\n\n"
+            "如果存在弹窗，请找到关闭/确认/同意按钮，并提供其中心百分比坐标。\n\n"
+            "请按以下格式回复：\n"
+            "- found: true/false\n"
+            "- 如果找到，提供 center 百分比坐标 (pct_x%, pct_y%)\n"
+            "- 描述你找到的弹窗内容和按钮文字"
+        )
+
+        result = await client.analyze(
+            b64, prompt, device_width=1080, device_height=2400,
+        )
+        if "error" in result:
+            return False
+
+        content = result.get("content", "")
+
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_found_status,
+            _parse_percentage_coordinates,
+        )
+
+        coords = _parse_percentage_coordinates(content, 1080, 2400)
+        found = _parse_found_status(content) or bool(coords.get("center"))
+
+        if not found:
+            return False
+
+        center = coords["center"]
+        self._log(
+            f"  [Vision detected unknown popup — tapping at "
+            f"({center['x']}, {center['y']})]"
+        )
+
+        tap_result = await app_tap(
+            x=center["x"], y=center["y"],
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        if not tap_result.get("error"):
+            self._log(f"Unknown popup dismissed via vision")
+            return True
+
+        return False
 
     async def _dismiss_with_vision(self, rule_name: str) -> bool:
         """Try to dismiss a popup using the vision model.
@@ -664,6 +765,64 @@ class ExecutionEngine:
 
         self._log(f"  [Vision tap failed: {tap_result.get('error', '')[:80]}]")
         return False
+
+    async def _analyze_failure_with_vision(self, step: TestStep | None = None) -> str:
+        """When a step fails, use vision to analyze what's on screen.
+
+        Takes a screenshot and asks the vision model to describe the current
+        screen state — what's visible, whether there's a popup blocking,
+        whether the app crashed, etc. The analysis is stored in the step
+        execution record and shown in the test report.
+
+        Args:
+            step: The step that failed (used for context in the prompt).
+
+        Returns:
+            A human-readable analysis string, or empty string on failure.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return ""
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return ""
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return ""
+
+        action_desc = f"执行操作「{step.action}」目标「{step.target}」" if step else "执行操作"
+        prompt = (
+            f"当前测试步骤失败了（{action_desc}）。请分析这张截图，告诉我当前界面是什么情况。\n\n"
+            "请回答以下问题：\n"
+            "1. 当前屏幕上显示的是什么内容？（是正常界面、弹窗、错误页、还是崩溃白屏？）\n"
+            "2. 屏幕上是否有弹窗/对话框遮挡？如果有，弹窗内容和按钮是什么？\n"
+            "3. 屏幕上是否有错误提示（如网络错误、连接失败、无数据等）？\n"
+            "4. 如果有弹窗，如何关闭它（点击哪个按钮）？\n\n"
+            "请用中文简要描述。"
+        )
+
+        try:
+            result = await client.analyze(
+                b64, prompt, device_width=1080, device_height=2400,
+            )
+        except Exception as exc:
+            return f"[Vision analysis error: {exc}]"
+
+        if "error" in result:
+            return f"[Vision analysis failed: {result['error'][:80]}]"
+
+        content = result.get("content", "")
+        if content:
+            self._log(f"  [Vision failure analysis: {content[:120]}...]")
+        return content
 
     def _mark_aborted(self, tc: TestCase, reason: str) -> None:
         """Mark a test case as aborted with a reason.

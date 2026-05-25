@@ -189,9 +189,19 @@ def format_ui_context(result: UIScanResult, max_elements: int = 80) -> str:
     # Truncate
     unique = unique[:max_elements]
 
-    # Separate clickable (safe for tap) from non-clickable (reference only)
-    clickable_els = [el for el in unique if el.clickable]
-    reference_els = [el for el in unique if not el.clickable]
+    # Separate clickable (safe for tap) from reference-only elements.
+    # Elements without readable text (empty text + code-like resource ID)
+    # are excluded from the clickable list — they can't be tapped via text
+    # selector and would cause the LLM to hallucinate invalid tap targets
+    # like "expand_search".
+    clickable_els = [
+        el for el in unique
+        if el.clickable and el.text.strip()
+    ]
+    reference_els = [
+        el for el in unique
+        if not (el.clickable and el.text.strip())
+    ]
 
     # ── Clickable elements table (safe for tap targets) ──────────
     clickable_rows: list[str] = []

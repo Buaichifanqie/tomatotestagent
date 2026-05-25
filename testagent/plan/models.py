@@ -111,6 +111,7 @@ class StepExecution(BaseModel):
     screenshot_after: str = ""
     page_source_before: str = ""
     page_source_after: str = ""
+    vision_analysis: str = ""  # Multimodal model's analysis of the screen on failure
 
 
 class EvidenceItem(BaseModel):

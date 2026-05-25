@@ -19,7 +19,10 @@
       "Bash(curl -s http://localhost:4723/status)",
       "Bash(curl -s -X POST http://localhost:4723/session -H \"Content-Type: application/json\" -d \"{\\\\\"capabilities\\\\\":{\\\\\"alwaysMatch\\\\\":{\\\\\"platformName\\\\\":\\\\\"Android\\\\\",\\\\\"appium:automationName\\\\\":\\\\\"UiAutomator2\\\\\",\\\\\"appium:deviceName\\\\\":\\\\\"emulator-5554\\\\\",\\\\\"appium:noReset\\\\\":true,\\\\\"appium:autoGrantPermissions\\\\\":true,\\\\\"appium:newCommandTimeout\\\\\":120},\\\\\"firstMatch\\\\\":[{}]}}\")",
       "Bash(export ANDROID_HOME=\"/c/Users/kongwenshuo/AppData/Local/Android/Sdk\")",
-      "Bash(export ANDROID_SDK_ROOT=\"/c/Users/kongwenshuo/AppData/Local/Android/Sdk\")"
+      "Bash(export ANDROID_SDK_ROOT=\"/c/Users/kongwenshuo/AppData/Local/Android/Sdk\")",
+      "Bash(env)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/plan/ -x -q)"
     ]
   }
 }
