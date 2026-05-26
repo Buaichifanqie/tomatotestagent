@@ -117,6 +117,40 @@ class ExecutionEngine:
 
         return False
 
+    def _retry_create_session(self, max_attempts: int = 5, delay: float = 5.0) -> str | None:
+        """Create a new Appium session with retries and delay between attempts.
+
+        After force-stop kills the app and UiAutomator2, Appium needs time to
+        clean up the stale session state before accepting a new session. This
+        method retries with delays instead of failing immediately, avoiding
+        wasted TC iterations in ``execute_all()``.
+
+        Args:
+            max_attempts: Maximum number of creation attempts.
+            delay: Seconds to wait between attempts.
+
+        Returns:
+            The new session ID string, or None if all attempts failed.
+        """
+        # Small initial wait for Appium to register the UiAutomator2 death
+        time.sleep(2)
+
+        for attempt in range(1, max_attempts + 1):
+            sid = self.session_manager.create_session()
+            if sid:
+                return sid
+            if attempt < max_attempts:
+                self._log(
+                    f"  [Session creation attempt {attempt}/{max_attempts} "
+                    f"failed, retrying in {delay}s...]"
+                )
+                time.sleep(delay)
+
+        self._log(
+            f"  [Session creation failed after {max_attempts} attempts, giving up]"
+        )
+        return None
+
     def execute_all(self, test_cases: list[TestCase]) -> list[TestCase]:
         """Execute all test cases sequentially.
 
