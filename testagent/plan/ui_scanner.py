@@ -133,11 +133,14 @@ def _filter_dynamic_content(elements: list[UIElement]) -> list[UIElement]:
         if any(pat in text for pat in _AD_PATTERNS):
             continue
 
-        # ── Always keep elements with a real resource-id ──────────
+        # ── Skip system-level Android resource IDs (not app controls) ─
+        if rid and rid.startswith("android:"):
+            continue
+
+        # ── Always keep elements with a real app resource-id ────────────
         if rid and ":id/" in rid:
             short = rid.split(":id/", 1)[1]
-            # Skip generic Android system IDs
-            if short and short != "content" and not short.startswith("android:"):
+            if short and short != "content":
                 result.append(el)
                 continue
 

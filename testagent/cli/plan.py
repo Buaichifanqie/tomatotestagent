@@ -367,6 +367,7 @@ def plan_command(
             response = await provider.chat(
                 system=TC_GENERATION_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": text}],
+                max_tokens=32768,
                 temperature=0,
             )
             for block in response.content:
@@ -430,6 +431,10 @@ def plan_command(
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")
+        raw = ts_gen.last_raw_output
+        if raw:
+            typer.echo("\n--- Raw LLM output (first 2000 chars) ---")
+            typer.echo(raw[:2000])
         return None
 
     typer.echo(f"Generated {len(test_cases)} test case(s).")

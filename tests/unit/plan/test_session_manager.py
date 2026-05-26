@@ -200,7 +200,7 @@ class TestRecoverSession:
         assert sid == "new-sid-456"
         assert mgr.session_id == "new-sid-456"
         assert mgr.session_state.connected is True
-        assert mgr.session_state.recovery_count == 1
+        assert mgr.session_state.recovery_count == 0  # reset on success
 
     @patch("httpx.post")
     def test_recover_session_failure(self, mock_post) -> None:
@@ -212,6 +212,17 @@ class TestRecoverSession:
         assert mgr.session_id is None
         assert mgr.session_state.connected is False
         assert mgr.session_state.recovery_count == 1
+
+
+class TestResetRecovery:
+    """reset_recovery method."""
+
+    def test_resets_recovery_count_to_zero(self) -> None:
+        mgr = SessionManager()
+        mgr.session_state.recovery_count = 5
+        mgr.reset_recovery()
+        assert mgr.session_state.recovery_count == 0
+        assert mgr.should_abort() is False
 
 
 class TestShouldAbort:

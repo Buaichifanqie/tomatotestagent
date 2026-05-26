@@ -62,7 +62,7 @@ class SessionManager:
             "appium:deviceName": "emulator-5554",
             "appium:noReset": True,
             "appium:autoGrantPermissions": True,
-            "appium:newCommandTimeout": 120,
+            "appium:newCommandTimeout": 300,
         }
         capabilities = {"capabilities": {"alwaysMatch": caps, "firstMatch": [{}]}}
         try:
@@ -134,7 +134,9 @@ class SessionManager:
 
         Clears the current session ID, marks the state as disconnected,
         increments the recovery counter, and attempts to create a fresh
-        session.
+        session. Resets the recovery counter on success so that a
+        successfully recovered session does not accumulate toward the
+        retry limit.
 
         Returns:
             The new session ID string, or None if recovery failed.
@@ -142,7 +144,21 @@ class SessionManager:
         self._session_id = None
         self.session_state.mark_disconnected()
         self.session_state.record_recovery()
-        return self.create_session()
+        sid = self.create_session()
+        if sid:
+            # Successful recovery — reset the counter so a stable
+            # session doesn't exhaust the retry limit.
+            self.session_state.recovery_count = 0
+        return sid
+
+    def reset_recovery(self) -> None:
+        """Reset the recovery counter so should_abort returns False.
+
+        Call this when creating a brand-new session (not recovering an
+        existing one) to avoid exhausting the retry limit on a session
+        that died through no fault of the recovery mechanism.
+        """
+        self.session_state.recovery_count = 0
 
     def should_abort(self) -> bool:
         """Return True when recovery attempts have reached the retry limit."""

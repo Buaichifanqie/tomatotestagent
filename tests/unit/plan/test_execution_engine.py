@@ -284,9 +284,20 @@ class TestExecuteStep:
 class TestExecuteAll:
     """execute_all method."""
 
+    @staticmethod
+    def _make_mock_session() -> MagicMock:
+        """Create a mock SessionManager with a fake active session."""
+        sm = MagicMock(spec=SessionManager)
+        sm.create_session.return_value = "fake-session-id"
+        sm.session_id = "fake-session-id"
+        sm.appium_url = "http://localhost:4723"
+        sm.should_abort.return_value = False
+        sm.needs_recovery.return_value = False
+        return sm
+
     def test_processes_all_test_cases(self):
         config = PlanConfig()
-        engine = ExecutionEngine(config=config)
+        engine = ExecutionEngine(config=config, session_manager=self._make_mock_session())
         tcs = [
             TestCase(id="TC1", title="Test 1"),
             TestCase(id="TC2", title="Test 2"),
@@ -298,7 +309,7 @@ class TestExecuteAll:
 
     def test_aborts_after_too_many_blocked(self):
         config = PlanConfig(abort_policy=AbortPolicy(max_consecutive_blocked=2))
-        engine = ExecutionEngine(config=config)
+        engine = ExecutionEngine(config=config, session_manager=self._make_mock_session())
         tcs = [
             TestCase(id="TC1", title="Test 1"),
             TestCase(id="TC2", title="Test 2"),

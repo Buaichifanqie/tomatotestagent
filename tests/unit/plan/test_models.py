@@ -519,7 +519,7 @@ class TestRetryPolicy:
         rp = RetryPolicy()
         assert rp.step == 1
         assert rp.test_case == 1
-        assert rp.session == 2
+        assert rp.session == 3
         assert rp.app_crash == 1
 
     def test_custom_values(self) -> None:

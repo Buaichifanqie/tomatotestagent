@@ -152,6 +152,19 @@ class ExecutionEngine:
                 self._log("Resetting device environment...")
                 self._teardown_app()
 
+                # ── Session died during teardown? Create a fresh one ────
+                if not self.session_manager.is_connected():
+                    self._log("Session lost during teardown — creating fresh session...")
+                    self.session_manager.close_session()
+                    self.session_manager.reset_recovery()
+                    self._consecutive_blocked = 0
+                    new_sid = self.session_manager.create_session()
+                    if new_sid:
+                        self._log(f"[Session recreated: {new_sid[:12]}...]")
+                    else:
+                        self._mark_aborted(tc, "Failed to recreate session after teardown")
+                        continue
+
             self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
             self._logcat_start(tc.id)
 
@@ -371,29 +384,58 @@ class ExecutionEngine:
                 failure_type = FailureType.ACTION_FAILED
                 error_message = str(result["error"])
             elif result.get("passed") is False:
-                # ── Assert failed: fall back to dynamic UI check ─────────
-                # The LLM's guessed text may not match the real UI.
-                # Grab the page source and look for ANY visible text
-                # from the app to confirm it's alive.
+                # ── Assert failed: try navigation recovery before giving up ─
+                # The app might be on a sub-page (favorites, search, settings)
+                # instead of the expected screen. Try to navigate back and
+                # retry the assert before declaring failure.
                 _sid = session_id or self.session_manager.session_id
-                source_result = await app_get_source(
-                    appium_url=appium_url, session_id=_sid,
-                )
-                source_xml = source_result.get("source", "")
-                # Extract text attributes from XML
-                import re as _re
-                texts = _re.findall(r'text="([^"]{1,20})"', source_xml)
-                visible_texts = [t.strip() for t in texts if t.strip()]
-                if visible_texts:
-                    # App has visible UI — treat as soft pass
-                    self._log(
-                        f"Target '{step.target}' not found, but app is alive. "
-                        f"Visible texts: {visible_texts[:5]}"
+                _recovered = False
+
+                # Attempt 1: KEYCODE_BACK (fast, no AI needed, handles
+                # standard Android back-stack navigation)
+                for _back_i in range(2):
+                    try:
+                        await app_exec(
+                            command="input keyevent KEYCODE_BACK",
+                            appium_url=appium_url, session_id=_sid,
+                        )
+                        await asyncio.sleep(1)
+                        retry = await _exec_action()
+                        if not retry.get("error") and retry.get("passed") is not False:
+                            result = retry
+                            _recovered = True
+                            break
+                    except Exception:
+                        break
+
+                # Attempt 2: Vision-based navigation recovery (finds back
+                # button / close button / nav tab visually)
+                if not _recovered:
+                    nav_ok = await self._try_navigation_recovery_with_vision(step)
+                    if nav_ok:
+                        retry = await _exec_action()
+                        if not retry.get("error") and retry.get("passed") is not False:
+                            result = retry
+                            _recovered = True
+
+                if not _recovered:
+                    # ── Still failing: diagnostic check ───────────────
+                    source_result = await app_get_source(
+                        appium_url=appium_url, session_id=_sid,
                     )
-                else:
-                    success = False
-                    failure_type = FailureType.ACTION_FAILED
-                    error_message = result.get("reason", "Assertion failed")
+                    source_xml = source_result.get("source", "")
+                    import re as _re
+                    texts = _re.findall(r'text="([^"]{1,20})"', source_xml)
+                    visible_texts = [t.strip() for t in texts if t.strip()]
+                    if visible_texts:
+                        self._log(
+                            f"Target '{step.target}' not found, but app is alive. "
+                            f"Visible texts: {visible_texts[:5]}"
+                        )
+                    else:
+                        success = False
+                        failure_type = FailureType.ACTION_FAILED
+                        error_message = result.get("reason", "Assertion failed")
 
         except Exception as e:
             success = False
@@ -480,33 +522,46 @@ class ExecutionEngine:
         print(f"  [{ts}] {msg}", **kwargs)
 
     def _teardown_app(self) -> None:
-        """Reset device state between test cases.
+        """Force-stop the app between test cases using direct ADB.
 
-        Runs cleanup commands asynchronously via the Appium session:
-        - Re-enable WiFi and mobile data
-        - Force-stop the app so the next TC starts from a clean state
-          (sending to background with KEYCODE_HOME caused cascading
-           failures — e.g. TC-A opened search, TC-B looked for bottom
-           nav but found search page instead)
+        Using ``adb shell am force-stop`` directly (not through the Appium
+        session) ensures the app is killed even when the UiAutomator2
+        instrumentation has crashed. Each TC must start from a clean app
+        state to prevent cascading failures from stale navigation state
+        (e.g. TC-A navigates to a sub-page, TC-B starts on that sub-page
+        instead of the home screen).
+
+        Killing the app also kills the UiAutomator2 instrumentation, which
+        will be detected by the session health check in ``execute_all()``
+        and trigger a fresh session creation before the next TC.
         """
+        import subprocess
+
+        pkg = self.config.app_package or ""
+        if pkg:
+            try:
+                subprocess.run(
+                    ["adb", "shell", "am", "force-stop", pkg],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+        # Also try cleanup via Appium session if still alive
         session_id = self.session_manager.session_id
-        appium_url = self.session_manager.appium_url
         if not session_id:
             return
 
         async def _cleanup() -> None:
-            pkg = self.config.app_package or ""
             cmds = [
                 "svc wifi enable",
                 "svc data enable",
             ]
-            if pkg:
-                cmds.append(f"am force-stop {pkg}")
             for cmd in cmds:
                 try:
                     await app_exec(
                         command=cmd,
-                        appium_url=appium_url,
+                        appium_url=self.session_manager.appium_url,
                         session_id=session_id,
                     )
                 except Exception:
@@ -937,10 +992,10 @@ class ExecutionEngine:
         prompt = (
             f"当前测试步骤失败了（{action_desc}）。请分析这张截图，告诉我当前界面是什么情况。\n\n"
             "请回答以下问题：\n"
-            "1. 当前屏幕上显示的是什么内容？（是正常界面、弹窗、错误页、还是崩溃白屏？）\n"
-            "2. 屏幕上是否有弹窗/对话框遮挡？如果有，弹窗内容和按钮是什么？\n"
-            "3. 屏幕上是否有错误提示（如网络错误、连接失败、无数据等）？\n"
-            "4. 如果有弹窗，如何关闭它（点击哪个按钮）？\n\n"
+            "1. 当前屏幕上显示的是什么内容？（是正常界面、子页面、弹窗、错误页、还是崩溃白屏？）\n"
+            "2. 如果当前不是目标页面，是否有**返回按钮**或**导航Tab**可以回到上一级？\n"
+            "3. 屏幕上是否有弹窗/对话框遮挡？如果有，弹窗内容和按钮是什么？\n"
+            "4. 屏幕上是否有错误提示（如网络错误、连接失败、无数据等）？\n\n"
             "请用中文简要描述。"
         )
 
@@ -958,6 +1013,90 @@ class ExecutionEngine:
         if content:
             self._log(f"  [Vision failure analysis: {content[:120]}...]")
         return content
+
+    async def _try_navigation_recovery_with_vision(self, step: TestStep) -> bool:
+        """Use vision to detect wrong-screen state and attempt navigation recovery.
+
+        When a step fails because the app is on an unexpected screen, this
+        method takes a screenshot and asks the vision model to identify the
+        current screen and find navigation elements (back button, close
+        button, navigation tabs). If a navigation element is found, it is
+        tapped at its pixel coordinates.
+
+        Returns:
+            True if a navigation element was found and tapped, False otherwise.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return False
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return False
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return False
+
+        prompt = (
+            "当前测试步骤执行失败了，因为找不到目标元素。可能是 App 走错了页面。\n\n"
+            "请分析当前屏幕截图：\n"
+            "1. 当前屏幕上是什么内容？（首页 / 搜索页 / 收藏页 / 播放页 / 个人中心 / 弹窗 / 其他）\n"
+            "2. 屏幕左上角或其它位置是否有**返回按钮**、**关闭按钮**、或**导航 Tab**"
+            " 可以点击以退出当前页面？\n\n"
+            "如果找到返回/关闭/导航按钮，请提供其 **center 百分比坐标** (pct_x%, pct_y%)。\n"
+            "只有当明确找到了可点击的导航元素时才提供坐标。\n\n"
+            "请按以下格式回复：\n"
+            "- found: true/false\n"
+            "- 如果找到，center: (pct_x%, pct_y%)\n"
+            "- description: 你的分析"
+        )
+
+        result = await client.analyze(
+            b64, prompt, device_width=1080, device_height=2400,
+        )
+        if "error" in result:
+            return False
+
+        content = result.get("content", "")
+
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_found_status,
+            _parse_percentage_coordinates,
+        )
+
+        coords = _parse_percentage_coordinates(content, 1080, 2400)
+        found = _parse_found_status(content) or bool(coords.get("center"))
+
+        if not found or not coords.get("center"):
+            self._log(
+                "  [Vision: no navigation element found for screen recovery]"
+            )
+            return False
+
+        center = coords["center"]
+        self._log(
+            f"  [Vision screen recovery: tapping at "
+            f"({center['x']}, {center['y']})]"
+        )
+
+        tap_result = await app_tap(
+            x=center["x"], y=center["y"],
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        if not tap_result.get("error"):
+            self._log("Vision screen recovery succeeded")
+            await asyncio.sleep(1.5)
+            return True
+
+        return False
 
     def _mark_aborted(self, tc: TestCase, reason: str) -> None:
         """Mark a test case as aborted with a reason.

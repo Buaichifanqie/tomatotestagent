@@ -202,7 +202,7 @@ class PopupRule(BaseModel):
 class RetryPolicy(BaseModel):
     step: int = 1
     test_case: int = 1
-    session: int = 2
+    session: int = 3
     app_crash: int = 1
 
 

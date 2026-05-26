@@ -324,10 +324,12 @@ class TestPlanCommand:
     @patch("testagent.cli.plan.ExecutionEngine")
     @patch("testagent.cli.plan.TestCaseGenerator")
     @patch("testagent.cli.plan.PrdParser")
+    @patch("testagent.cli.plan._detect_app_package")
     @patch("testagent.cli.plan.typer.echo")
     def test_plan_command_with_prd_file(
         self,
         mock_echo: MagicMock,
+        mock_detect: MagicMock,
         mock_prd_parser_cls: MagicMock,
         mock_tc_gen_cls: MagicMock,
         mock_engine_cls: MagicMock,
@@ -337,6 +339,7 @@ class TestPlanCommand:
         tmp_path: Path,
     ) -> None:
         """Orchestration with PRD file input."""
+        mock_detect.return_value = None  # no auto-detect
         file_path = tmp_path / "requirements.md"
         file_path.write_text("# PRD", encoding="utf-8")
         report_path = str(tmp_path / "reports" / "x" / "plan-report.md")
@@ -407,14 +410,14 @@ class TestPlanCommand:
 
 
 class TestMainPlanRegistration:
-    def test_main_registers_plan_command(self) -> None:
-        """Verify main.py has the plan command registered via --help output."""
+    def test_main_registers_app_plan_command(self) -> None:
+        """Verify main.py has `testagent app plan` registered."""
         from typer.testing import CliRunner
 
         from testagent.cli.main import app
 
         runner = CliRunner()
-        result = runner.invoke(app, ["plan", "--help"])
+        result = runner.invoke(app, ["app", "plan", "--help"])
         assert result.exit_code == 0
         assert "产品需求文档路径" in result.stdout
         assert "--auto-yes" in result.stdout or "-y" in result.stdout
