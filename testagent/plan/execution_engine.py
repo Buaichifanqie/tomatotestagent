@@ -158,7 +158,7 @@ class ExecutionEngine:
                     self.session_manager.close_session()
                     self.session_manager.reset_recovery()
                     self._consecutive_blocked = 0
-                    new_sid = self.session_manager.create_session()
+                    new_sid = self._retry_create_session()
                     if new_sid:
                         self._log(f"[Session recreated: {new_sid[:12]}...]")
                     else:
