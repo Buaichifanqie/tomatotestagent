@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from testagent.common.appium_manager import ensure_android_home
+
 
 class SessionState:
     """Tracks the state of an Appium session."""
@@ -56,14 +58,19 @@ class SessionManager:
         Returns:
             The session ID string, or None if creation failed.
         """
-        caps = {
+        android_home = ensure_android_home()
+        caps: dict[str, object] = {
             "platformName": "Android",
             "appium:automationName": "UiAutomator2",
             "appium:deviceName": "emulator-5554",
+            "appium:udid": "emulator-5554",
             "appium:noReset": True,
             "appium:autoGrantPermissions": True,
             "appium:newCommandTimeout": 300,
+            "appium:allowInsecure": "*:adb_shell",
         }
+        if android_home:
+            caps["appium:androidHome"] = android_home
         capabilities = {"capabilities": {"alwaysMatch": caps, "firstMatch": [{}]}}
         try:
             import httpx

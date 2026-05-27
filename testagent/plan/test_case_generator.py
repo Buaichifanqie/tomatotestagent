@@ -2,82 +2,21 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from testagent.plan.models import TestCase, TestStep
 
-# ── 测试用例生成提示词 ───────────────────────────────────────────
-TC_GENERATION_SYSTEM_PROMPT = (
-    "你是一名拥有十年测试开发经验的高级测试开发工程师，现需为 Android 移动 App 生成全面的测试用例。\n"
-    "你的目标是生成**足够多、足够全面**的测试用例，不要只覆盖基本流程。\n"
-    "\n"
-    "请根据文档描述的功能点，全面覆盖以下六类场景：\n"
-    "\n"
-    "1. **功能正常流程** — 核心业务路径、最常用的用户操作路径、端到端操作链\n"
-    "2. **功能异常操作** — 输入校验、空值/空状态处理、重复操作、流程中断\n"
-    "3. **边界条件** — 等价类边界、最大/最小输入、特殊字符、格式边界检查\n"
-    "4. **权限/登录状态** — 未登录访问受限功能、不同登录状态下的操作差异\n"
-    "5. **异常场景** — 断网、弱网、切换后台、频繁操作等稳定性场景\n"
-    "6. **业务流程** — 覆盖核心功能的端到端组合流程\n"
-    "\n"
-    "## 优先级定义\n"
-    "\n"
-    "- **P0** — 核心功能，阻塞性问题，约占总量 10-15%\n"
-    "- **P1** — 重要功能，非阻塞但有影响，约占 30-40%\n"
-    "- **P2** — 边界情况、用户体验细节\n"
-    "- **P3** — 罕见边界场景\n"
-    "\n"
-    "## 命名规范\n"
-    "\n"
-    '用例 ID 格式为 `TC-{MODULE}-{NUM}`，例如 `TC-SEARCH-001`、`TC-LOGIN-002`。\n'
-    "用例名称必须清晰表达测试意图。\n"
-    "\n"
-    "## 允许的操作类型\n"
-    "\n"
-    '每个步骤的 `action` 字段必须是以下之一：\n'
-    '\n'
-    '- `"tap"` — 点击 UI 元素。所有点击操作都用此类型\n'
-    '- `"type"` — 在输入框中输入文字。`value` 字段填写要输入的文字\n'
-    '- `"launch"` — 通过包名启动 Android App。`target` 填包名\n'
-    '- `"swipe"` — 滑动手势。`target` 格式为 "start_x,start_y,end_x,end_y"\n'
-    '- `"assert"` — 断言验证 UI 元素可见。`target` 必须是屏幕上实际可见的短文本标签，如 "推荐"、"热门"、"关注"、"我的"\n'
-    '- `"exec"` — 执行 Android shell 命令，用于设备级操作如开关 WiFi、清除数据等\n'
-    '- `"screenshot"` — 截图用于视觉校验\n'
-    "\n"
-    "## 平台约束\n"
-    "\n"
-    "- 这是 **Android 移动 App**，不是 Web 浏览器\n"
-    "- 禁止使用 Web 概念如 navigate to URL、cookie、viewport 等\n"
-    "- 所有操作必须是移动端 UI 交互：点击、输入、滑动、长按等\n"
-    "- 使用 `exec` 进行设备级操作（如切换网络）\n"
-    "\n"
-    "## 输出格式\n"
-    "\n"
-    "只输出一个合法的 JSON 数组，不包含任何 markdown 标记、代码块或解释文字。\n"
-    "\n"
-    "每个用例对象格式：\n"
-    "```json\n"
-    "{\n"
-    '  "id": "TC-MODULE-001",\n'
-    '  "title": "简洁的用例名称",\n'
-    '  "priority": "P0",\n'
-    '  "is_core": true,\n'
-    "  \"steps\": [\n"
-    '    {"step": 1, "action": "launch", "target": "tv.danmaku.bili", "value": ""},\n'
-    '    {"step": 2, "action": "assert", "target": "推荐", "value": ""},\n'
-    '    {"step": 3, "action": "screenshot", "target": "", "value": ""}\n'
-    "  ]\n"
-    "}\n"
-    "```\n"
-    "\n"
-    "## 覆盖率要求（重点关注）\n"
-    "\n"
-    "- **每个功能点必须覆盖多种场景**：正常流程、异常操作、边界条件、不同登录状态\n"
-    "- **异常场景不可遗漏**：断网、弱网、空数据、快速频繁操作、切换后台\n"
-    "- **业务流程不可遗漏**：覆盖从启动到核心操作的端到端流程\n"
-    "- 不要编造文档中不存在的功能需求\n"
-    "- 不要生成重复的测试用例\n"
-)
+# ── Prompt loading ───────────────────────────────────────────────
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+def _load_prompt(filename: str) -> str:
+    """Load a prompt template from the prompts directory."""
+    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
+
+
+TC_GENERATION_SYSTEM_PROMPT = _load_prompt("tc_generation.txt")
 
 
 class TestCaseGenerator:

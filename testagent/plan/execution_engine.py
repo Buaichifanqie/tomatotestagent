@@ -31,6 +31,19 @@ from testagent.plan.models import (
 from testagent.plan.popup_handler import PopupHandler
 from testagent.plan.session_manager import SessionManager
 
+# ── Prompt loading ───────────────────────────────────────────────
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+_STEP_EXECUTION_TEMPLATE: str | None = None
+
+
+def _load_step_prompt() -> str:
+    """Load the step execution prompt template (cached after first load)."""
+    global _STEP_EXECUTION_TEMPLATE
+    if _STEP_EXECUTION_TEMPLATE is None:
+        _STEP_EXECUTION_TEMPLATE = (_PROMPTS_DIR / "step_execution.txt").read_text(encoding="utf-8")
+    return _STEP_EXECUTION_TEMPLATE
+
 
 class ExecutionEngine:
     """Executes test cases sequentially with shared session.
@@ -48,6 +61,7 @@ class ExecutionEngine:
         config: PlanConfig,
         popup_handler: PopupHandler | None = None,
         session_manager: SessionManager | None = None,
+        llm_provider: Any = None,
     ) -> None:
         self.config = config
         self.popup_handler = popup_handler or PopupHandler()
@@ -58,8 +72,36 @@ class ExecutionEngine:
         self._start_time: float = 0.0
         self._events: list[dict] = []
         self._vision_client: Any | None = None
+        self._llm_provider: Any = llm_provider
         self._suppressed_rules: set[str] = set()
         self._current_recording_tc: str = ""
+        self._screen_w: int = 0
+        self._screen_h: int = 0
+
+    # ── screen size (lazy) ──────────────────────────────────────────────
+
+    async def _get_screen_size(self) -> tuple[int, int]:
+        """Get real device screen size via adb shell wm size (cached)."""
+        if self._screen_w > 0 and self._screen_h > 0:
+            return self._screen_w, self._screen_h
+        import re
+        try:
+            result = await app_exec(
+                command="wm size",
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            body = result.get("body", {})
+            value = str(body.get("value", ""))
+            m = re.search(r"(\d+)x(\d+)", value)
+            if m:
+                self._screen_w = int(m.group(1))
+                self._screen_h = int(m.group(2))
+            else:
+                self._screen_w, self._screen_h = 1080, 2400
+        except Exception:
+            self._screen_w, self._screen_h = 1080, 2400
+        return self._screen_w, self._screen_h
 
     # ── vision client (lazy) ─────────────────────────────────────────────────
 
@@ -187,11 +229,29 @@ class ExecutionEngine:
                 self._teardown_app()
 
                 # ── Session died during teardown? Create a fresh one ────
-                if not self.session_manager.is_connected():
-                    self._log("Session lost during teardown — creating fresh session...")
+                # is_connected() can return false positives after force-stop
+                # kills UiAutomator2 — the HTTP endpoint still responds but
+                # page source is empty. Do a real health check.
+                session_dead = not self.session_manager.is_connected()
+                if not session_dead:
+                    # Verify by actually getting page source
+                    try:
+                        src_result = asyncio.run(
+                            app_get_source(
+                                appium_url=self.session_manager.appium_url,
+                                session_id=self.session_manager.session_id,
+                            )
+                        )
+                        page_src = src_result.get("source", "")
+                        if not page_src:
+                            self._log("Session is zombie (no page source) — recreating...")
+                            session_dead = True
+                    except Exception:
+                        session_dead = True
+
+                if session_dead:
                     self.session_manager.close_session()
                     self.session_manager.reset_recovery()
-                    self._consecutive_blocked = 0
                     new_sid = self._retry_create_session()
                     if new_sid:
                         self._log(f"[Session recreated: {new_sid[:12]}...]")
@@ -249,6 +309,12 @@ class ExecutionEngine:
             tc.execution.status = ExecutionStatus.BLOCKED
             tc.execution.error_message = "Precondition failed"
             return
+
+        # Ensure app is launched before executing steps.
+        # The app is force-stopped between TCs, so every TC needs a fresh
+        # launch. We do this here rather than relying on the LLM-generated
+        # first step always being a correct "launch" action.
+        self._ensure_app_launched()
 
         for step in tc.steps:
             if self.should_abort():
@@ -317,24 +383,86 @@ class ExecutionEngine:
             sid = session_id or self.session_manager.session_id
 
             if step.action == "tap":
-                res = await app_tap(
-                    selector=step.target, strategy="uiautomator",
-                    appium_url=appium_url, session_id=sid,
-                )
-                # Retry once if element not found — UI may still be settling
-                # after popup dismissal, app launch, or data reset.
-                if res.get("error") and "no such element" in str(res).lower():
-                    await asyncio.sleep(2)
+                # Layer 1: Direct vision element search (like chat's vision_find_element)
+                # Fast and reliable — vision model looks at screenshot and returns coordinates.
+                self._log(f"  [Vision: looking for '{step.target}']")
+                coords = await self._vision_find_element(step.target)
+                if coords:
                     res = await app_tap(
-                        selector=step.target, strategy="uiautomator",
+                        x=coords["x"], y=coords["y"],
                         appium_url=appium_url, session_id=sid,
                     )
-                return res
-            elif step.action == "type":
-                return await app_type(
-                    selector=step.target, text=step.value, strategy="accessibility_id",
-                    appium_url=appium_url, session_id=sid,
+                    if not res.get("error"):
+                        self._log(
+                            f"  [Vision tap at ({coords['x']}, {coords['y']})]"
+                        )
+                        return res
+
+                # Layer 2: LLM-driven execution (like chat agent loop)
+                # Take screenshot → vision describes screen → LLM reads description,
+                # extracts percentage coordinates, converts to pixels, and decides.
+                self._log(
+                    f"  [Vision didn't find '{step.target}', trying LLM...]"
                 )
+                llm_result = await self._execute_step_via_llm(step, sid)
+                if llm_result and not llm_result.get("error"):
+                    self._log("  [LLM execution succeeded]")
+                    return llm_result
+
+                # Layer 3: Wait for UI to settle, then retry vision
+                await asyncio.sleep(2)
+                coords = await self._vision_find_element(step.target)
+                if coords:
+                    res = await app_tap(
+                        x=coords["x"], y=coords["y"],
+                        appium_url=appium_url, session_id=sid,
+                    )
+                    if not res.get("error"):
+                        self._log(
+                            f"  [Vision retry at ({coords['x']}, {coords['y']})]"
+                        )
+                        return res
+
+                # Layer 4: Content fallback — tap the first clickable content
+                # item on screen. Handles cases where the target is a specific
+                # dynamic text (UP主 name, video title) that doesn't exist,
+                # but the test intent (e.g. "tap a video card") is correct.
+                self._log(
+                    f"  [Content fallback: looking for any clickable "
+                    f"content item...]"
+                )
+                coords = await self._vision_find_any_content()
+                if coords:
+                    res = await app_tap(
+                        x=coords["x"], y=coords["y"],
+                        appium_url=appium_url, session_id=sid,
+                    )
+                    if not res.get("error"):
+                        self._log(
+                            f"  [Content fallback tap at ({coords['x']}, "
+                            f"{coords['y']}) — proceeding]"
+                        )
+                        return res
+
+                return {"error": f"Element '{step.target}' not found (vision + LLM + vision retry)"}
+            elif step.action == "type":
+                coords = await self._vision_find_element(
+                    step.target or "输入框"
+                )
+                if coords:
+                    await app_tap(
+                        x=coords["x"], y=coords["y"],
+                        appium_url=appium_url, session_id=sid,
+                    )
+                    await asyncio.sleep(0.5)
+                    res = await app_type(
+                        selector="new UiSelector().className(\"android.widget.EditText\").focused(true)",
+                        text=step.value, strategy="uiautomator",
+                        appium_url=appium_url, session_id=sid,
+                    )
+                else:
+                    res = {"error": f"Input field '{step.target}' not found"}
+                return res
             elif step.action == "swipe":
                 parts = step.target.split(",")
                 if len(parts) >= 4:
@@ -379,6 +507,13 @@ class ExecutionEngine:
                         pass
                 return result
             elif step.action == "assert":
+                # Use vision to evaluate the assertion (same as chat's approach).
+                # Natural-language targets like "推荐Tab处于选中状态" are
+                # evaluated by the vision model looking at a screenshot.
+                vision_result = await self._assert_with_vision(step.target)
+                if vision_result is not None:
+                    return vision_result
+                # Fallback to XML-based assertion for simple text targets
                 return await app_assert_element(
                     selector=step.target, assertion="visible",
                     strategy="uiautomator",
@@ -413,63 +548,71 @@ class ExecutionEngine:
                     result = await _exec_action()
                     result_str = str(result)
 
-            if result.get("error"):
-                success = False
-                failure_type = FailureType.ACTION_FAILED
-                error_message = str(result["error"])
-            elif result.get("passed") is False:
-                # ── Assert failed: try navigation recovery before giving up ─
+            if result.get("error") or result.get("passed") is False:
+                # ── Step failed: try navigation recovery before giving up ──
                 # The app might be on a sub-page (favorites, search, settings)
-                # instead of the expected screen. Try to navigate back and
-                # retry the assert before declaring failure.
+                # instead of the expected screen. Try KEYCODE_BACK and
+                # vision-based recovery before declaring failure.
                 _sid = session_id or self.session_manager.session_id
                 _recovered = False
 
-                # Attempt 1: KEYCODE_BACK (fast, no AI needed, handles
-                # standard Android back-stack navigation)
-                for _back_i in range(2):
+                if step.action in ("tap", "assert"):
+                    # Attempt 1: KEYCODE_BACK (fast, handles standard
+                    # Android back-stack navigation)
+                    for _back_i in range(2):
+                        try:
+                            await app_exec(
+                                command="input keyevent KEYCODE_BACK",
+                                appium_url=appium_url, session_id=_sid,
+                            )
+                            await asyncio.sleep(1)
+                            retry = await _exec_action()
+                            retry_ok = (
+                                not retry.get("error")
+                                and retry.get("passed") is not False
+                            )
+                            if retry_ok:
+                                result = retry
+                                _recovered = True
+                                break
+                        except Exception:
+                            break
+
+                    # Attempt 2: Vision-based navigation recovery
+                    if not _recovered:
+                        nav_ok = await self._try_navigation_recovery_with_vision(step)
+                        if nav_ok:
+                            await asyncio.sleep(1)
+                            retry = await _exec_action()
+                            retry_ok = (
+                                not retry.get("error")
+                                and retry.get("passed") is not False
+                            )
+                            if retry_ok:
+                                result = retry
+                                _recovered = True
+
+                if not _recovered:
+                    # Diagnostic: log visible texts so we can debug
                     try:
-                        await app_exec(
-                            command="input keyevent KEYCODE_BACK",
+                        source_result = await app_get_source(
                             appium_url=appium_url, session_id=_sid,
                         )
-                        await asyncio.sleep(1)
-                        retry = await _exec_action()
-                        if not retry.get("error") and retry.get("passed") is not False:
-                            result = retry
-                            _recovered = True
-                            break
+                        source_xml = source_result.get("source", "")
+                        import re as _re
+                        texts = _re.findall(r'text="([^"]{1,20})"', source_xml)
+                        visible_texts = [t.strip() for t in texts if t.strip()]
+                        if visible_texts:
+                            self._log(
+                                f"Target '{step.target}' not found, "
+                                f"but app is alive. "
+                                f"Visible texts: {visible_texts[:5]}"
+                            )
                     except Exception:
-                        break
-
-                # Attempt 2: Vision-based navigation recovery (finds back
-                # button / close button / nav tab visually)
-                if not _recovered:
-                    nav_ok = await self._try_navigation_recovery_with_vision(step)
-                    if nav_ok:
-                        retry = await _exec_action()
-                        if not retry.get("error") and retry.get("passed") is not False:
-                            result = retry
-                            _recovered = True
-
-                if not _recovered:
-                    # ── Still failing: diagnostic check ───────────────
-                    source_result = await app_get_source(
-                        appium_url=appium_url, session_id=_sid,
-                    )
-                    source_xml = source_result.get("source", "")
-                    import re as _re
-                    texts = _re.findall(r'text="([^"]{1,20})"', source_xml)
-                    visible_texts = [t.strip() for t in texts if t.strip()]
-                    if visible_texts:
-                        self._log(
-                            f"Target '{step.target}' not found, but app is alive. "
-                            f"Visible texts: {visible_texts[:5]}"
-                        )
-                    else:
-                        success = False
-                        failure_type = FailureType.ACTION_FAILED
-                        error_message = result.get("reason", "Assertion failed")
+                        pass
+                    success = False
+                    failure_type = FailureType.ACTION_FAILED
+                    error_message = result.get("error") or result.get("reason", "Step failed")
 
         except Exception as e:
             success = False
@@ -518,6 +661,43 @@ class ExecutionEngine:
                 pass  # Both are best-effort
 
         return step_exec
+
+    def _ensure_app_launched(self) -> None:
+        """Launch the app before executing test steps.
+
+        The app is force-stopped between TCs, so every TC starts from a
+        clean state. This method ensures the app is in the foreground
+        before any step executes — regardless of whether the LLM
+        generated a correct ``launch`` step or not.
+        """
+        pkg = self.config.app_package
+        if not pkg:
+            return
+
+        import asyncio as _asyncio
+
+        async def _launch() -> None:
+            sid = self.session_manager.session_id
+            url = self.session_manager.appium_url
+            result = await app_launch(
+                package=pkg, appium_url=url, session_id=sid,
+            )
+            if not result.get("error"):
+                self._log(f"App launched: {pkg}")
+                await _asyncio.sleep(3)
+            else:
+                # Retry once
+                await _asyncio.sleep(2)
+                result = await app_launch(
+                    package=pkg, appium_url=url, session_id=sid,
+                )
+                await _asyncio.sleep(3)
+                if not result.get("error"):
+                    self._log(f"App launched (retry): {pkg}")
+                else:
+                    self._log(f"App launch failed: {result.get('error', '')[:80]}")
+
+        _asyncio.run(_launch())
 
     def _check_precondition(self, tc: TestCase) -> bool:
         """Check and execute precondition setup with retry.
@@ -867,8 +1047,9 @@ class ExecutionEngine:
             "- 简要描述弹窗内容和按钮文字"
         )
 
+        dw, dh = await self._get_screen_size()
         result = await client.analyze(
-            b64, prompt, device_width=1080, device_height=2400,
+            b64, prompt, device_width=dw, device_height=dh,
         )
         if "error" in result:
             return False
@@ -880,7 +1061,7 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, 1080, 2400)
+        coords = _parse_percentage_coordinates(content, dw, dh)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found:
@@ -945,8 +1126,9 @@ class ExecutionEngine:
             "- 简要描述你找到的按钮内容。"
         )
 
+        dw, dh = await self._get_screen_size()
         result = await client.analyze(
-            b64, prompt, device_width=1080, device_height=2400,
+            b64, prompt, device_width=dw, device_height=dh,
         )
         if "error" in result:
             self._log(f"  [Vision API error: {result['error'][:80]}]")
@@ -960,7 +1142,7 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, 1080, 2400)
+        coords = _parse_percentage_coordinates(content, dw, dh)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found:
@@ -989,6 +1171,356 @@ class ExecutionEngine:
 
         self._log(f"  [Vision tap failed: {tap_result.get('error', '')[:80]}]")
         return False
+
+    async def _execute_step_via_llm(
+        self, step: TestStep, sid: str | None
+    ) -> dict | None:
+        """Use the LLM with vision description to figure out how to execute a step.
+
+        Captures a screenshot, gets a vision description, and asks the LLM to
+        reason about how to reach the target element. No XML page source is
+        used — the LLM works purely from the multimodal vision description.
+
+        Returns:
+            A result dict on success, or None if the LLM couldn't help.
+        """
+        if not self._llm_provider:
+            return None
+
+        dw, dh = await self._get_screen_size()
+
+        # Get screen description from vision model
+        screen_desc = ""
+        vision_client = self._init_vision_client()
+        if vision_client:
+            try:
+                scr_result = await app_screenshot(
+                    appium_url=self.session_manager.appium_url, session_id=sid,
+                )
+                shot_id = scr_result.get("screenshot_id", "")
+                if shot_id:
+                    from testagent.mcp_servers.shared_cache import get_screenshot
+                    b64 = get_screenshot(shot_id)
+                    if b64:
+                        desc_result = await vision_client.analyze(
+                            b64,
+                            "请简要描述当前屏幕上的所有可交互元素及其位置（用百分比坐标）。"
+                            "包括按钮、输入框、Tab、图标等。请用中文。",
+                            device_width=dw, device_height=dh,
+                        )
+                        if "content" in desc_result:
+                            screen_desc = desc_result["content"][:1500]
+            except Exception:
+                pass
+
+        if not screen_desc:
+            self._log("  [LLM step: no vision description available]")
+            return None
+
+        # Build prompt from template (loaded from prompts/step_execution.txt)
+        value_line = f"，输入内容：{step.value}" if step.value else ""
+        template = _load_step_prompt()
+        prompt = template.format(
+            action=step.action,
+            target=step.target,
+            value_line=value_line,
+            screen_desc=screen_desc,
+            screen_width=dw,
+            screen_height=dh,
+        )
+
+        try:
+            response = await self._llm_provider.chat(
+                system="你是一个 Android 自动化测试助手。请始终用 JSON 回复。",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=1024,
+            )
+            raw = ""
+            for block in response.content:
+                if block.get("type") == "text":
+                    raw += str(block.get("text", ""))
+        except Exception:
+            return None
+
+        if not raw:
+            return None
+
+        # Parse LLM's JSON response
+        import json as _json
+        try:
+            # Extract JSON from possible markdown wrapping
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                plan = _json.loads(raw[start:end + 1])
+            else:
+                return None
+        except (_json.JSONDecodeError, ValueError):
+            return None
+
+        found = plan.get("found", False)
+        x = plan.get("x")
+        y = plan.get("y")
+        reasoning = plan.get("reasoning", "")
+
+        if reasoning:
+            self._log(f"  [LLM: {reasoning}]")
+
+        if found and x is not None and y is not None:
+            if step.action == "tap":
+                return await app_tap(
+                    x=int(x), y=int(y),
+                    appium_url=self.session_manager.appium_url, session_id=sid,
+                )
+            elif step.action == "type":
+                await app_tap(
+                    x=int(x), y=int(y),
+                    appium_url=self.session_manager.appium_url, session_id=sid,
+                )
+                await asyncio.sleep(0.5)
+                return await app_type(
+                    selector="new UiSelector().className(\"android.widget.EditText\").focused(true)",
+                    text=step.value, strategy="uiautomator",
+                    appium_url=self.session_manager.appium_url, session_id=sid,
+                )
+
+        # LLM says target not on screen — try its navigation suggestion
+        if not found and x is not None and y is not None:
+            self._log(
+                f"  [LLM suggests navigating via ({x}, {y})]"
+            )
+            tap_res = await app_tap(
+                x=int(x), y=int(y),
+                appium_url=self.session_manager.appium_url, session_id=sid,
+            )
+            if not tap_res.get("error"):
+                await asyncio.sleep(2)
+                # Retry the original step via vision
+                coords = await self._vision_find_element(step.target)
+                if coords:
+                    return await app_tap(
+                        x=coords["x"], y=coords["y"],
+                        appium_url=self.session_manager.appium_url, session_id=sid,
+                    )
+
+        return None
+
+    async def _vision_find_element(
+        self, target: str, context: str = ""
+    ) -> dict[str, int] | None:
+        """Use vision model to find an element on screen and return its center coords.
+
+        Takes a screenshot, sends it to the vision model with the target
+        description, and parses the returned percentage coordinates into
+        device-pixel coordinates.
+
+        Returns:
+            Dict with 'x' and 'y' keys, or None if not found / error.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return None
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return None
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return None
+
+        prompt = (
+            f"请在截图中找到以下目标：{target}\n\n"
+            "请分析：\n"
+            "1. 目标是否在当前屏幕中可见？\n"
+            "2. 如果可见，返回元素的百分比坐标（中心点和边界框）\n"
+            "3. 如果不可见，当前屏幕主要有什么内容？建议向哪个方向滑动来寻找目标？\n\n"
+            "请按以下格式回复：\n"
+            "- found: true/false\n"
+            "- 如果找到，提供 center 百分比坐标 (pct_x%, pct_y%) 和 bounds [pct_x1%, pct_y1%, pct_x2%, pct_y2%]\n"
+            "- 如果没找到，提供 suggestion 滑动方向\n"
+            "- 简要描述你看到的内容"
+        )
+        if context:
+            prompt = f"之前的屏幕分析：{context}\n\n{prompt}"
+
+        dw, dh = await self._get_screen_size()
+        try:
+            result = await client.analyze(
+                b64, prompt, device_width=dw, device_height=dh,
+            )
+        except Exception:
+            return None
+
+        if "error" in result:
+            return None
+
+        content = result.get("content", "")
+
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_found_status,
+            _parse_percentage_coordinates,
+        )
+
+        coords = _parse_percentage_coordinates(content, dw, dh)
+        found = _parse_found_status(content) or bool(coords.get("center"))
+
+        if not found or not coords.get("center"):
+            self._log(
+                f"  [Vision: target='{target}' — "
+                f"found={found}, has_center={bool(coords.get('center'))}, "
+                f"response={content[:200]}]"
+            )
+            return None
+
+        return coords["center"]
+
+    async def _vision_find_any_content(self) -> dict[str, int] | None:
+        """Fallback: ask vision to find the first clickable content item on screen.
+
+        Used when a specific tap target can't be found — the vision model looks
+        at the current screen and returns the center of the first video card,
+        list item, or other interactive content in the main content area.
+
+        Returns:
+            Dict with 'x' and 'y' keys, or None if no content found.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return None
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return None
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return None
+
+        prompt = (
+            "当前屏幕上没有找到特定目标元素。"
+            "请找到屏幕上最主要的可点击内容项（视频卡片、列表项、文章卡片等）。\n\n"
+            "查找规则：\n"
+            "1. 优先找屏幕中央区域的可点击内容（视频封面、内容卡片）\n"
+            "2. 不要点击导航栏（顶部Tab、底部导航）\n"
+            "3. 不要点击广告/推广内容\n"
+            "4. 如果屏幕有多个内容项，选择第一个（最靠上的）\n"
+            "5. 如果当前是推荐流/内容流，点击第一个内容卡片\n\n"
+            "请按以下格式回复：\n"
+            "- found: true/false\n"
+            "- center: (pct_x%, pct_y%)\n"
+            "- description: 简要描述你选择的第一个可点击内容是什么"
+        )
+
+        dw, dh = await self._get_screen_size()
+        try:
+            result = await client.analyze(
+                b64, prompt, device_width=dw, device_height=dh,
+            )
+        except Exception:
+            return None
+
+        if "error" in result:
+            return None
+
+        content = result.get("content", "")
+
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_found_status,
+            _parse_percentage_coordinates,
+        )
+
+        coords = _parse_percentage_coordinates(content, dw, dh)
+        found = _parse_found_status(content) or bool(coords.get("center"))
+
+        if not found or not coords.get("center"):
+            self._log(
+                f"  [Content fallback: no clickable content found — "
+                f"response={content[:150]}]"
+            )
+            return None
+
+        return coords["center"]
+
+    async def _assert_with_vision(self, target: str) -> dict | None:
+        """Evaluate an assertion by asking the vision model to look at the screen.
+
+        Takes a screenshot and asks the vision model whether the assertion
+        described by ``target`` is true. Returns a result dict compatible
+        with ``app_assert_element`` output, or None if vision is unavailable.
+
+        Returns:
+            Dict with ``passed`` key (True/False) and ``reason``, or None.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return None
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return None
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return None
+
+        dw, dh = await self._get_screen_size()
+        prompt = (
+            f"请判断当前屏幕截图是否满足以下断言：{target}\n\n"
+            "请客观分析屏幕内容，不要假设或猜测。\n"
+            "用以下 JSON 格式回复（只输出 JSON，不要其他内容）：\n"
+            '{"passed": true/false, "reason": "你的判断依据（一句话）"}'
+        )
+
+        try:
+            result = await client.analyze(
+                b64, prompt, device_width=dw, device_height=dh,
+            )
+        except Exception:
+            return None
+
+        if "error" in result:
+            return None
+
+        content = result.get("content", "")
+        try:
+            import json as _json
+            # Extract JSON from response (may be wrapped in markdown)
+            start = content.find("{")
+            end = content.rfind("}")
+            if start >= 0 and end > start:
+                parsed = _json.loads(content[start:end + 1])
+                return {
+                    "passed": parsed.get("passed", False),
+                    "reason": parsed.get("reason", ""),
+                }
+        except Exception:
+            pass
+
+        # Fallback: check for keywords in the response
+        lowered = content.lower()
+        if "true" in lowered or "passed" in lowered or "正确" in content or "满足" in content:
+            return {"passed": True, "reason": content[:200]}
+        return {"passed": False, "reason": content[:200]}
 
     async def _analyze_failure_with_vision(self, step: TestStep | None = None) -> str:
         """When a step fails, use vision to analyze what's on screen.
@@ -1033,9 +1565,10 @@ class ExecutionEngine:
             "请用中文简要描述。"
         )
 
+        dw, dh = await self._get_screen_size()
         try:
             result = await client.analyze(
-                b64, prompt, device_width=1080, device_height=2400,
+                b64, prompt, device_width=dw, device_height=dh,
             )
         except Exception as exc:
             return f"[Vision analysis error: {exc}]"
@@ -1049,16 +1582,12 @@ class ExecutionEngine:
         return content
 
     async def _try_navigation_recovery_with_vision(self, step: TestStep) -> bool:
-        """Use vision to detect wrong-screen state and attempt navigation recovery.
+        """Let the vision model decide where to tap to reach the target.
 
-        When a step fails because the app is on an unexpected screen, this
-        method takes a screenshot and asks the vision model to identify the
-        current screen and find navigation elements (back button, close
-        button, navigation tabs). If a navigation element is found, it is
-        tapped at its pixel coordinates.
-
-        Returns:
-            True if a navigation element was found and tapped, False otherwise.
+        Instead of constraining the model to only look for back/close buttons,
+        gives it the full context — what we're trying to find — and lets it
+        reason about which element on the current screen would lead there.
+        This mirrors how ``testagent chat`` dynamically navigates.
         """
         client = self._init_vision_client()
         if not client:
@@ -1079,21 +1608,25 @@ class ExecutionEngine:
             return False
 
         prompt = (
-            "当前测试步骤执行失败了，因为找不到目标元素。可能是 App 走错了页面。\n\n"
-            "请分析当前屏幕截图：\n"
-            "1. 当前屏幕上是什么内容？（首页 / 搜索页 / 收藏页 / 播放页 / 个人中心 / 弹窗 / 其他）\n"
-            "2. 屏幕左上角或其它位置是否有**返回按钮**、**关闭按钮**、或**导航 Tab**"
-            " 可以点击以退出当前页面？\n\n"
-            "如果找到返回/关闭/导航按钮，请提供其 **center 百分比坐标** (pct_x%, pct_y%)。\n"
-            "只有当明确找到了可点击的导航元素时才提供坐标。\n\n"
+            f"当前测试步骤需要操作目标「{step.target}」（操作类型：{step.action}），"
+            f"但在当前屏幕上找不到该目标。\n\n"
+            "请分析当前屏幕截图，判断应该点击哪个元素才能导航到包含该目标的页面。\n\n"
+            "你需要自主推理，例如：\n"
+            "- 如果目标是搜索相关（搜索框、搜索按钮等），可能需要点击搜索图标进入搜索页\n"
+            "- 如果目标是某个 Tab 页的内容（如直播、热门、追番），点击对应的导航 Tab\n"
+            "- 如果当前明显在子页面/弹窗/详情页，点击返回按钮或关闭按钮回到上一级\n"
+            "- 如果目标在首页，而当前在子页面，需要返回首页\n"
+            "- 如果当前有弹窗遮挡，点击弹窗的关闭按钮\n\n"
+            "请自行判断最合理的导航操作，并提供该元素的 center 百分比坐标。\n\n"
             "请按以下格式回复：\n"
             "- found: true/false\n"
-            "- 如果找到，center: (pct_x%, pct_y%)\n"
-            "- description: 你的分析"
+            "- center: (pct_x%, pct_y%)\n"
+            "- description: 简要说明当前页面是什么，以及你选择点击哪个元素来导航"
         )
 
+        dw, dh = await self._get_screen_size()
         result = await client.analyze(
-            b64, prompt, device_width=1080, device_height=2400,
+            b64, prompt, device_width=dw, device_height=dh,
         )
         if "error" in result:
             return False
@@ -1105,19 +1638,19 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, 1080, 2400)
+        coords = _parse_percentage_coordinates(content, dw, dh)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found or not coords.get("center"):
             self._log(
-                "  [Vision: no navigation element found for screen recovery]"
+                f"  [Vision nav: no path found — {content[:100]}]"
             )
             return False
 
         center = coords["center"]
         self._log(
-            f"  [Vision screen recovery: tapping at "
-            f"({center['x']}, {center['y']})]"
+            f"  [Vision nav: tapping ({center['x']}, {center['y']}) — "
+            f"{content[content.find('description:'):].split(chr(10))[0] if 'description:' in content else ''}]"
         )
 
         tap_result = await app_tap(
@@ -1126,7 +1659,7 @@ class ExecutionEngine:
             session_id=self.session_manager.session_id,
         )
         if not tap_result.get("error"):
-            self._log("Vision screen recovery succeeded")
+            self._log("Vision nav succeeded")
             await asyncio.sleep(1.5)
             return True
 

@@ -26,7 +26,8 @@
       "Bash(export ANDROID_HOME=\"C:/Users/kongwenshuo/AppData/Local/Android/Sdk\")",
       "Bash(export ANDROID_SDK_ROOT=\"C:/Users/kongwenshuo/AppData/Local/Android/Sdk\")",
       "Bash(nohup npx.cmd appium --allow-insecure \"*:adb_shell\")",
-      "Bash(xxd tests/unit/plan/test_ui_scanner.py)"
+      "Bash(xxd tests/unit/plan/test_ui_scanner.py)",
+      "Bash(git *)"
     ]
   }
 }

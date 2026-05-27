@@ -353,18 +353,19 @@ def plan_command(
     # ── Phase 2: Generate test cases ────────────────────────────────────────
     typer.echo("Generating test cases...")
 
+    # Create LLM provider once — shared between TC generation and execution
+    from testagent.config.settings import get_settings
+    from testagent.llm.local_provider import LLMProviderFactory
+
+    settings = get_settings()
+    llm_provider = LLMProviderFactory.create(settings)
+
     def _build_llm_callable() -> Any:
-        """Build a sync callable that wraps the async LLM provider for TC generation."""
-        from testagent.config.settings import get_settings
-        from testagent.llm.local_provider import LLMProviderFactory
-
-        settings = get_settings()
-        provider = LLMProviderFactory.create(settings)
-
+        """Build a sync callable that wraps the shared LLM provider for TC generation."""
         from testagent.plan.test_case_generator import TC_GENERATION_SYSTEM_PROMPT
 
         async def _call(text: str) -> str:
-            response = await provider.chat(
+            response = await llm_provider.chat(
                 system=TC_GENERATION_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": text}],
                 max_tokens=32768,
@@ -386,45 +387,6 @@ def plan_command(
         app_info_parts.append(f"Android launch activity: {app_activity}")
     if app_info_parts:
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
-
-    # ── Phase 1c: UI pre-scan (optional enhancement) ──────────────────
-    if app_package:
-        typer.echo("  Scanning real UI elements for TC generation...")
-        try:
-            from testagent.plan.ui_scanner import (
-                discover_ui_elements,
-                format_ui_context,
-            )
-
-            scan_result = discover_ui_elements(
-                package=app_package,
-                activity=app_activity,
-            )
-            if scan_result and scan_result.elements:
-                ui_context = format_ui_context(scan_result)
-                enhanced_prd += ui_context
-                typer.echo(
-                    f"  Discovered {len(scan_result.elements)} UI elements "
-                    f"({scan_result.scan_duration_ms}ms)"
-                )
-            else:
-                typer.echo("  [UI pre-scan returned no elements — "
-                           "continuing with default prompt]")
-        except Exception as exc:
-            typer.echo(
-                f"  [UI pre-scan failed: {exc} — "
-                f"falling back to default prompt]"
-            )
-        finally:
-            # Kill the app after pre-scan so TCs start from a clean state
-            import subprocess
-            try:
-                subprocess.run(
-                    ["adb", "shell", "am", "force-stop", app_package],
-                    capture_output=True, timeout=10,
-                )
-            except Exception:
-                pass
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
     test_cases = ts_gen.generate(enhanced_prd, plan_name=name)
@@ -460,7 +422,15 @@ def plan_command(
 
     # ── Phase 4: Execute all TCs ────────────────────────────────────────────
     typer.echo("Executing test cases...")
-    engine = ExecutionEngine(config)
+
+    # Ensure Appium is still healthy before execution
+    from testagent.common.appium_manager import ensure_appium_running
+
+    if not asyncio.run(ensure_appium_running()):
+        typer.echo("❌ Appium server is not available. Please start Appium manually.")
+        raise typer.Exit(1)
+
+    engine = ExecutionEngine(config, llm_provider=llm_provider)
     executed_tcs = engine.execute_all(test_cases)
 
     # ── Phase 5: Per-TC evaluation ──────────────────────────────────────────
