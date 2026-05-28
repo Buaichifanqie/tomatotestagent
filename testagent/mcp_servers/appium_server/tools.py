@@ -222,6 +222,32 @@ async def app_type(
     return await _appium_post(appium_url, "/session/:sessionId/element/" + element_id + "/value", payload, session_id=session_id)
 
 
+async def app_type_text(
+    text: str,
+    appium_url: str = "http://localhost:4723",
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Type text into the currently focused element via Appium's UiAutomator2 channel.
+
+    Uses ``mobile: type`` which goes through UiAutomator2's instrumentation
+    channel (not ADB shell), so it won't crash ``adbd`` like ``adb shell input
+    text`` can.
+
+    The element must be focused before calling this (e.g., by tapping it).
+    """
+    payload: dict[str, object] = {
+        "script": "mobile: type",
+        "args": [{"text": text}],
+    }
+    return await _appium_post(
+        appium_url,
+        "/session/:sessionId/execute/sync",
+        payload,
+        timeout=30,
+        session_id=session_id,
+    )
+
+
 async def app_assert_element(
     selector: str,
     assertion: str,

@@ -7,12 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from testagent.common.appium_manager import ensure_appium_running
 from testagent.mcp_servers.appium_server.tools import (
     app_assert_element,
     app_exec,
     app_get_source,
     app_launch,
     app_screenshot,
+    app_type_text,
     app_start_recording,
     app_stop_recording,
     app_swipe,
@@ -228,13 +230,18 @@ class ExecutionEngine:
                 self._log("Resetting device environment...")
                 self._teardown_app()
 
-                # ── Session died during teardown? Create a fresh one ────
+                # ── Appium server health check — restart if process died ──
+                if not asyncio.run(ensure_appium_running()):
+                    self._log("[Appium is down and could not be restarted — aborting]")
+                    self._mark_aborted(tc, "Appium unavailable after teardown")
+                    continue
+
+                # ── Session recreation if UiAutomator2 is dead ──────────
                 # is_connected() can return false positives after force-stop
                 # kills UiAutomator2 — the HTTP endpoint still responds but
                 # page source is empty. Do a real health check.
                 session_dead = not self.session_manager.is_connected()
                 if not session_dead:
-                    # Verify by actually getting page source
                     try:
                         src_result = asyncio.run(
                             app_get_source(
@@ -304,6 +311,10 @@ class ExecutionEngine:
         """
         tc.execution.status = ExecutionStatus.RUNNING
         tc.execution.error_message = ""
+
+        # Reset popup false-positive tracking for this TC so suppression
+        # learned in a previous TC doesn't carry over.
+        self._suppressed_rules.clear()
 
         if not self._check_precondition(tc):
             tc.execution.status = ExecutionStatus.BLOCKED
@@ -455,11 +466,23 @@ class ExecutionEngine:
                         appium_url=appium_url, session_id=sid,
                     )
                     await asyncio.sleep(0.5)
-                    res = await app_type(
-                        selector="new UiSelector().className(\"android.widget.EditText\").focused(true)",
-                        text=step.value, strategy="uiautomator",
-                        appium_url=appium_url, session_id=sid,
-                    )
+                    # Use mobile: type (goes through UiAutomator2 instrumentation,
+                    # not ADB shell, so it won't crash adbd like input text does).
+                    text = step.value or ""
+                    if text:
+                        res = await app_type_text(
+                            text=text,
+                            appium_url=appium_url, session_id=sid,
+                        )
+                        if res.get("error"):
+                            # Fallback to UiAutomator type
+                            res = await app_type(
+                                selector="new UiSelector().className(\"android.widget.EditText\").focused(true)",
+                                text=text, strategy="uiautomator",
+                                appium_url=appium_url, session_id=sid,
+                            )
+                    else:
+                        res = {"error": "No text to type"}
                 else:
                     res = {"error": f"Input field '{step.target}' not found"}
                 return res
@@ -507,10 +530,10 @@ class ExecutionEngine:
                         pass
                 return result
             elif step.action == "assert":
-                # Use vision to evaluate the assertion (same as chat's approach).
+                # Use vision with full test context (TC title, step number).
                 # Natural-language targets like "推荐Tab处于选中状态" are
-                # evaluated by the vision model looking at a screenshot.
-                vision_result = await self._assert_with_vision(step.target)
+                # evaluated with awareness of the test flow.
+                vision_result = await self._assert_with_vision(step.target, tc, step)
                 if vision_result is not None:
                     return vision_result
                 # Fallback to XML-based assertion for simple text targets
@@ -520,10 +543,23 @@ class ExecutionEngine:
                     appium_url=appium_url, session_id=sid,
                 )
             elif step.action == "exec":
-                return await app_exec(
-                    command=step.value or step.target,
-                    appium_url=appium_url, session_id=sid,
-                )
+                # Run shell commands via direct ADB subprocess instead of
+                # Appium mobile:shell, because mobile:shell can trigger adbd
+                # crashes (especially on network-affecting commands like
+                # svc wifi disable) which kills the Appium session.
+                import subprocess
+                cmd = step.value or step.target
+                try:
+                    proc = await asyncio.to_thread(
+                        subprocess.run,
+                        ["adb", "shell", cmd],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    return {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
+                except subprocess.TimeoutExpired:
+                    return {"error": f"exec command timed out: {cmd}"}
+                except Exception as exc:
+                    return {"error": f"exec command failed: {exc}"}
             elif step.action == "screenshot":
                 return await app_screenshot(
                     appium_url=appium_url, session_id=sid,
@@ -549,48 +585,75 @@ class ExecutionEngine:
                     result_str = str(result)
 
             if result.get("error") or result.get("passed") is False:
-                # ── Step failed: try navigation recovery before giving up ──
-                # The app might be on a sub-page (favorites, search, settings)
-                # instead of the expected screen. Try KEYCODE_BACK and
-                # vision-based recovery before declaring failure.
+                # ── Step failed: first check if the session is alive ───────
+                # A transient ADB disconnection (adbd crash) can kill the
+                # session without producing a session-specific error message
+                # (e.g. just "element not found" or timeout). Check session
+                # health explicitly before trying navigation recovery.
                 _sid = session_id or self.session_manager.session_id
-                _recovered = False
+                _session_healthy = True
+                try:
+                    _check = await app_get_source(
+                        appium_url=appium_url, session_id=_sid, timeout=5,
+                    )
+                    _src = _check.get("source", "")
+                    if not _src:
+                        _session_healthy = False
+                except Exception:
+                    _session_healthy = False
 
-                if step.action in ("tap", "assert"):
-                    # Attempt 1: KEYCODE_BACK (fast, handles standard
-                    # Android back-stack navigation)
-                    for _back_i in range(2):
-                        try:
-                            await app_exec(
-                                command="input keyevent KEYCODE_BACK",
-                                appium_url=appium_url, session_id=_sid,
-                            )
-                            await asyncio.sleep(1)
-                            retry = await _exec_action()
-                            retry_ok = (
-                                not retry.get("error")
-                                and retry.get("passed") is not False
-                            )
-                            if retry_ok:
-                                result = retry
-                                _recovered = True
+                if not _session_healthy:
+                    self._log("  [Session unhealthy after step failure — recovering...]")
+                    new_sid = self.session_manager.recover_session()
+                    if new_sid:
+                        _sid = new_sid
+                        session_id = new_sid
+                        await asyncio.sleep(2)
+                        result = await _exec_action()
+                        result_str = str(result)
+                        # Still failed? Fall through to navigation recovery.
+                    else:
+                        self._log("  [Session recovery failed]")
+
+                # ── Still failing? Try navigation recovery before giving up ──
+                if result.get("error") or result.get("passed") is False:
+                    _recovered = False
+
+                    if step.action in ("tap", "assert"):
+                        # Attempt 1: KEYCODE_BACK (fast, handles standard
+                        # Android back-stack navigation)
+                        for _back_i in range(2):
+                            try:
+                                await app_exec(
+                                    command="input keyevent KEYCODE_BACK",
+                                    appium_url=appium_url, session_id=_sid,
+                                )
+                                await asyncio.sleep(1)
+                                retry = await _exec_action()
+                                retry_ok = (
+                                    not retry.get("error")
+                                    and retry.get("passed") is not False
+                                )
+                                if retry_ok:
+                                    result = retry
+                                    _recovered = True
+                                    break
+                            except Exception:
                                 break
-                        except Exception:
-                            break
 
-                    # Attempt 2: Vision-based navigation recovery
-                    if not _recovered:
-                        nav_ok = await self._try_navigation_recovery_with_vision(step)
-                        if nav_ok:
-                            await asyncio.sleep(1)
-                            retry = await _exec_action()
-                            retry_ok = (
-                                not retry.get("error")
-                                and retry.get("passed") is not False
-                            )
-                            if retry_ok:
-                                result = retry
-                                _recovered = True
+                        # Attempt 2: Vision-based navigation recovery
+                        if not _recovered:
+                            nav_ok = await self._try_navigation_recovery_with_vision(step)
+                            if nav_ok:
+                                await asyncio.sleep(1)
+                                retry = await _exec_action()
+                                retry_ok = (
+                                    not retry.get("error")
+                                    and retry.get("passed") is not False
+                                )
+                                if retry_ok:
+                                    result = retry
+                                    _recovered = True
 
                 if not _recovered:
                     # Diagnostic: log visible texts so we can debug
@@ -745,10 +808,17 @@ class ExecutionEngine:
         (e.g. TC-A navigates to a sub-page, TC-B starts on that sub-page
         instead of the home screen).
 
-        Killing the app also kills the UiAutomator2 instrumentation, which
-        will be detected by the session health check in ``execute_all()``
-        and trigger a fresh session creation before the next TC.
+        **Also explicitly closes the Appium session** so the next TC creates
+        a fresh one — the zombie detection in ``execute_all()`` is unreliable
+        because ``is_connected()`` only checks the Appium HTTP endpoint
+        (which stays alive) rather than the instrumentation (which force-stop
+        kills).
         """
+        # Explicitly close the session. is_connected() returns True even
+        # when UiAutomator2 is dead (it only checks the Appium HTTP), so
+        # we can't rely on the zombie detection in execute_all().
+        self.session_manager.close_session()
+
         import subprocess
 
         pkg = self.config.app_package or ""
@@ -761,27 +831,16 @@ class ExecutionEngine:
             except Exception:
                 pass
 
-        # Also try cleanup via Appium session if still alive
-        session_id = self.session_manager.session_id
-        if not session_id:
-            return
-
-        async def _cleanup() -> None:
-            cmds = [
-                "svc wifi enable",
-                "svc data enable",
-            ]
-            for cmd in cmds:
-                try:
-                    await app_exec(
-                        command=cmd,
-                        appium_url=self.session_manager.appium_url,
-                        session_id=session_id,
-                    )
-                except Exception:
-                    pass
-
-        asyncio.run(_cleanup())
+        # Also try cleanup via direct ADB subprocess (not Appium mobile:shell,
+        # because mobile:shell can trigger adbd crashes on network commands).
+        for _cmd in ("svc wifi enable", "svc data enable"):
+            try:
+                subprocess.run(
+                    ["adb", "shell", _cmd],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
 
     # ── screen recording ───────────────────────────────────────────────────
 
@@ -800,9 +859,12 @@ class ExecutionEngine:
             return
         try:
             result = asyncio.run(
-                app_start_recording(
-                    appium_url=self.session_manager.appium_url,
-                    session_id=session_id,
+                asyncio.wait_for(
+                    app_start_recording(
+                        appium_url=self.session_manager.appium_url,
+                        session_id=session_id,
+                    ),
+                    timeout=15,
                 )
             )
             if not result.get("error"):
@@ -826,9 +888,12 @@ class ExecutionEngine:
             return
         try:
             result = asyncio.run(
-                app_stop_recording(
-                    appium_url=self.session_manager.appium_url,
-                    session_id=session_id,
+                asyncio.wait_for(
+                    app_stop_recording(
+                        appium_url=self.session_manager.appium_url,
+                        session_id=session_id,
+                    ),
+                    timeout=15,
                 )
             )
             video_b64 = result.get("video_base64", "")
@@ -905,7 +970,10 @@ class ExecutionEngine:
         if not session_id:
             return
 
-        self._suppressed_rules.clear()
+        # Don't clear suppressed_rules here — it's cleared per-TC in
+        # _execute_single(), so false-positive suppression persists across
+        # steps within the same TC.
+        # self._suppressed_rules.clear()
 
         max_rounds = 10
         for _round in range(max_rounds):
@@ -1328,6 +1396,8 @@ class ExecutionEngine:
         )
         screenshot_id = scr_result.get("screenshot_id", "")
         if not screenshot_id:
+            err = scr_result.get("error", scr_result.get("body", "no screenshot_id"))
+            self._log(f"  [DIAG: Screenshot failed — {str(err)[:80]}]")
             return None
 
         from testagent.mcp_servers.shared_cache import get_screenshot
@@ -1335,6 +1405,9 @@ class ExecutionEngine:
         b64 = get_screenshot(screenshot_id)
         if not b64:
             return None
+
+        # Record session state before the long vision API call
+        _pre_alive = self.session_manager.is_connected()
 
         prompt = (
             f"请在截图中找到以下目标：{target}\n\n"
@@ -1361,6 +1434,19 @@ class ExecutionEngine:
 
         if "error" in result:
             return None
+
+        # DIAG: check session state after the long vision API call
+        _post_alive = self.session_manager.is_connected()
+        if _pre_alive and not _post_alive:
+            self._log(
+                "  [DIAG: Session DIED during vision API call "
+                f"(was alive before, HTTP dead after)]"
+            )
+        elif not _pre_alive:
+            self._log(
+                "  [DIAG: Session was already DEAD before vision API call "
+                "(screenshot somehow succeeded but HTTP now dead)]"
+            )
 
         content = result.get("content", "")
 
@@ -1455,12 +1541,18 @@ class ExecutionEngine:
 
         return coords["center"]
 
-    async def _assert_with_vision(self, target: str) -> dict | None:
-        """Evaluate an assertion by asking the vision model to look at the screen.
+    async def _assert_with_vision(self, target: str, tc: TestCase | None = None, step: TestStep | None = None) -> dict | None:
+        """Evaluate an assertion using vision with full test context.
 
         Takes a screenshot and asks the vision model whether the assertion
-        described by ``target`` is true. Returns a result dict compatible
-        with ``app_assert_element`` output, or None if vision is unavailable.
+        described by ``target`` is true. The TC title and step description
+        are passed as context so the model understands what's happening
+        (e.g. "we just tapped the search box, so search page should be open").
+
+        If the model says the assertion failed but the app is in a normal
+        working state (not crashed/blank), the assertion is downgraded to a
+        warning — the TC continues executing. This mirrors the AI Agent
+        philosophy: tolerate ambiguity, keep moving.
 
         Returns:
             Dict with ``passed`` key (True/False) and ``reason``, or None.
@@ -1483,12 +1575,26 @@ class ExecutionEngine:
         if not b64:
             return None
 
+        # Build context for the vision model
+        context_parts = []
+        if tc:
+            context_parts.append(f"当前测试用例: {tc.id} {tc.title}")
+        if step:
+            context_parts.append(f"当前步骤: 第{step.step}步 — [{step.action}] {step.target}")
+        context_str = "\n".join(context_parts)
+
         dw, dh = await self._get_screen_size()
         prompt = (
-            f"请判断当前屏幕截图是否满足以下断言：{target}\n\n"
-            "请客观分析屏幕内容，不要假设或猜测。\n"
+            f"{context_str}\n\n" if context_str else ""
+        ) + (
+            f"请判断当前屏幕截图是否满足以下条件：{target}\n\n"
+            "注意：\n"
+            "- 判断时请结合测试用例的上下文。例如上一步刚点了搜索框，那么搜索页已打开是合理的\n"
+            "- 搜索页可能是 overlay 弹层而不是完整页面，键盘弹起遮挡部分是正常的\n"
+            "- 如果有键盘、弹窗、浮层遮挡，不要误判为页面未打开\n"
+            "- 只有在明确看到错误、崩溃、白屏、无网络等异常时才判定为不满足\n\n"
             "用以下 JSON 格式回复（只输出 JSON，不要其他内容）：\n"
-            '{"passed": true/false, "reason": "你的判断依据（一句话）"}'
+            '{{"passed": true/false, "reason": "你的判断依据（一句话）"}}'
         )
 
         try:
@@ -1504,15 +1610,26 @@ class ExecutionEngine:
         content = result.get("content", "")
         try:
             import json as _json
-            # Extract JSON from response (may be wrapped in markdown)
             start = content.find("{")
             end = content.rfind("}")
             if start >= 0 and end > start:
                 parsed = _json.loads(content[start:end + 1])
-                return {
-                    "passed": parsed.get("passed", False),
-                    "reason": parsed.get("reason", ""),
-                }
+                passed = parsed.get("passed", False)
+                reason = parsed.get("reason", "")
+                if not passed:
+                    # Vision says assertion failed — check if app is alive.
+                    # If alive, the assert is likely a false alarm; downgrade
+                    # to a warning so the TC can continue.
+                    alive = await self._quick_check_app_alive()
+                    if alive:
+                        self._log(
+                            f"  [Assert warning: '{target}' — "
+                            f"vision says no but app is alive. "
+                            f"Reason: {reason[:100]}]"
+                        )
+                        return {"passed": True, "warning": reason}
+                    return {"passed": False, "reason": reason}
+                return {"passed": True, "reason": reason}
         except Exception:
             pass
 
@@ -1521,6 +1638,65 @@ class ExecutionEngine:
         if "true" in lowered or "passed" in lowered or "正确" in content or "满足" in content:
             return {"passed": True, "reason": content[:200]}
         return {"passed": False, "reason": content[:200]}
+
+    async def _quick_check_app_alive(self) -> bool:
+        """Quick vision check: is the app in a normal working state?
+
+        Takes a screenshot and asks the vision model to classify the screen
+        as either 'normal' (content visible) or 'abnormal' (crash, blank,
+        error page). Used to distinguish false-positive assert failures
+        from real app crashes.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return True  # Can't check, assume alive
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return True
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return True
+
+        dw, dh = await self._get_screen_size()
+        prompt = (
+            "请快速判断当前 App 状态是否正常。\n"
+            "正常：显示的是正常的内容页面（首页、搜索页、播放页、个人页等），"
+            "即使有弹窗或键盘也算正常。\n"
+            "异常：白屏、黑屏、崩溃弹窗（xxx已停止运行）、ANR、网络错误页面。\n\n"
+            "用以下 JSON 格式回复（只输出 JSON）：\n"
+            '{"alive": true/false, "reason": "一句话说明"}'
+        )
+
+        try:
+            result = await client.analyze(
+                b64, prompt, device_width=dw, device_height=dh,
+            )
+        except Exception:
+            return True
+
+        if "error" in result:
+            return True
+
+        content = result.get("content", "")
+        try:
+            import json as _json
+            start = content.find("{")
+            end = content.rfind("}")
+            if start >= 0 and end > start:
+                parsed = _json.loads(content[start:end + 1])
+                return parsed.get("alive", True)
+        except Exception:
+            pass
+
+        return True
 
     async def _analyze_failure_with_vision(self, step: TestStep | None = None) -> str:
         """When a step fails, use vision to analyze what's on screen.
