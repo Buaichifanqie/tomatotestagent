@@ -209,7 +209,7 @@ class RetryPolicy(BaseModel):
 class AbortPolicy(BaseModel):
     max_consecutive_blocked: int = 3
     max_session_recreate: int = 2
-    max_total_duration_ms: int = 1_800_000
+    max_total_duration_ms: int = 18_000_000
     abort_on: list[str] = Field(default_factory=lambda: ["SESSION_LOST", "ENVIRONMENT_ERROR"])
 
 
