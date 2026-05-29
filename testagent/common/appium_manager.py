@@ -205,13 +205,10 @@ async def ensure_appium_running() -> bool:
     # Step 2: Kill old Appium process
     logger.info("Existing Appium not available, restarting...")
 
-    if _appium_process and _appium_process.returncode is None:
-        _appium_process.kill()
-        try:
-            await asyncio.wait_for(_appium_process.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            pass
-        _appium_process = None
+    # Discard stale reference to process from a previous event loop
+    _appium_process = None
+
+    await _kill_process_on_port(4723)
 
     await _kill_process_on_port(4723)
     await asyncio.sleep(2)

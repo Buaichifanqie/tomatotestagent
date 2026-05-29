@@ -21,7 +21,7 @@ from testagent.plan.test_case_generator import TestCaseGenerator
 # ── helper functions ─────────────────────────────────────────────────────────
 
 
-def _detect_app_package(requirement: str) -> str | None:
+async def _detect_app_package(requirement: str) -> str | None:
     """Auto-detect app package from connected Android device.
 
     Uses ``adb`` to list third-party packages on the connected device, then
@@ -85,11 +85,11 @@ def _detect_app_package(requirement: str) -> str | None:
     )
 
     try:
-        response = asyncio.run(provider.chat(
+        response = await provider.chat(
             system="你是一个 Android 工程师，擅长根据应用名称匹配包名。",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-        ))
+        )
         for block in response.content:
             if block.get("type") == "text":
                 matched = str(block.get("text", "")).strip()
@@ -124,56 +124,67 @@ def parse_requirement(requirement: str) -> tuple[str, bool]:
     return requirement, False
 
 
-def _try_init_vision_client() -> Any | None:
-    """Try to initialize a synchronous vision client for image description.
+async def _describe_images_with_vision(
+    images: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Describe images using the async vision client (no asyncio.run nesting).
 
-    Returns a wrapper with a ``describe(image_path: str) -> str`` method,
-    or ``None`` if vision is not configured/available.
+    Each image in the list is sent to the vision API in sequence. On
+    success the description is written back into the dict; on failure
+    an error message is stored instead.
+
+    Args:
+        images: list of {"path": ..., "description": ...} dicts.
+
+    Returns:
+        The same list with descriptions filled in.
     """
-    try:
-        import asyncio
-        import base64
+    import base64
+    from pathlib import Path
 
-        from testagent.config.settings import get_settings
+    from testagent.config.settings import get_settings
 
-        settings = get_settings()
-        vision_key = settings.vision_api_key.get_secret_value()
-        if not vision_key:
-            return None
+    settings = get_settings()
+    vision_key = settings.vision_api_key.get_secret_value()
+    if not vision_key:
+        for img in images:
+            if not img.get("description"):
+                img["description"] = "[Vision API not configured]"
+        return images
 
-        from testagent.mcp_servers.vision_server.volcano_client import (
-            VolcanoVisionClient,
-        )
+    from testagent.mcp_servers.vision_server.volcano_client import (
+        VolcanoVisionClient,
+    )
 
-        async_client = VolcanoVisionClient(
-            api_key=vision_key,
-            api_url=settings.vision_api_url,
-            model=settings.vision_model,
-            timeout=settings.vision_timeout,
-            max_retries=settings.vision_max_retries,
-        )
+    client = VolcanoVisionClient(
+        api_key=vision_key,
+        api_url=settings.vision_api_url,
+        model=settings.vision_model,
+        timeout=settings.vision_timeout,
+        max_retries=settings.vision_max_retries,
+    )
 
-        class _SyncVisionAdapter:
-            """Synchronous adapter wrapping an async vision client."""
+    for img in images:
+        if img.get("description") or not img.get("path"):
+            continue
+        path = img["path"]
+        if not Path(path).exists():
+            img["description"] = f"[图片文件不存在: {path}]"
+            continue
+        try:
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            result = await client.analyze(
+                b64, "请详细描述这张图片的内容和布局"
+            )
+            if "error" in result:
+                img["description"] = f"[Vision API error: {result['error'][:80]}]"
+            else:
+                img["description"] = result.get("content", "")[:500]
+        except Exception as e:
+            img["description"] = f"[图片描述失败: {e}]"
 
-            def __init__(self, client: VolcanoVisionClient) -> None:
-                self._client = client
-
-            def describe(self, image_path: str) -> str:
-                with open(image_path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("ascii")
-                result = asyncio.run(
-                    self._client.analyze(
-                        b64, "请详细描述这张图片的内容和布局"
-                    )
-                )
-                if "error" in result:
-                    raise RuntimeError(result["error"])
-                return result.get("content", "")
-
-        return _SyncVisionAdapter(async_client)
-    except Exception:
-        return None
+    return images
 
 
 # Known LLM package-name hallucinations (e.g. "buli" instead of "bili").
@@ -273,7 +284,26 @@ def plan_command(
     app_activity: str = "",
     auto_yes: bool = False,
 ) -> str | None:
-    """Main orchestration function called by the Typer ``plan`` command.
+    """Main orchestration function — sync entry point for the Typer CLI.
+
+    Wraps the async implementation in ``asyncio.run()``. See
+    ``_plan_command_async`` for the full docstring.
+    """
+    return asyncio.run(_plan_command_async(
+        requirement, name=name,
+        app_package=app_package, app_activity=app_activity,
+        auto_yes=auto_yes,
+    ))
+
+
+async def _plan_command_async(
+    requirement: str,
+    name: str = "",
+    app_package: str = "",
+    app_activity: str = "",
+    auto_yes: bool = False,
+) -> str | None:
+    """Async implementation of the full plan lifecycle.
 
     Orchestrates the full plan lifecycle:
 
@@ -289,15 +319,14 @@ def plan_command(
     Args:
         requirement: A product requirement document path or a natural-language
             requirement description.
-        name: Optional custom plan name. If empty, derived from the file stem
-            (when requirement is a file) or ``"adhoc-plan"``.
+        name: Optional custom plan name.
         app_package: Android app package name.
         app_activity: Android app launch activity.
         auto_yes: Skip the user confirmation step.
 
     Returns:
         The absolute path to the generated Markdown report, or ``None`` if the
-        pipeline was aborted (no test cases generated, or user cancelled).
+        pipeline was aborted.
     """
     # ── Phase 0: Parse input ────────────────────────────────────────────────
     content, is_file = parse_requirement(requirement)
@@ -318,15 +347,13 @@ def plan_command(
 
         # ── Phase 1b: Vision image description (optional) ────────────────
         if prd_doc.images:
-            vision_client = _try_init_vision_client()
-            if vision_client is not None:
-                typer.echo(
-                    f"  \U0001f50d 正在识别 {len(prd_doc.images)} 张图片..."
-                )
-                prd_doc.images = parser.describe_images(
-                    prd_doc.images, vision_client
-                )
-                typer.echo("  ✅ 图片描述完成")
+            typer.echo(
+                f"  \U0001f50d 正在识别 {len(prd_doc.images)} 张图片..."
+            )
+            prd_doc.images = await _describe_images_with_vision(
+                prd_doc.images,
+            )
+            typer.echo("  ✅ 图片描述完成")
 
         prd_text = prd_doc.formatted_text
     else:
@@ -334,7 +361,7 @@ def plan_command(
 
     # ── Auto-detect app package if not provided ──────────────────────────
     if not app_package:
-        detected = _detect_app_package(requirement)
+        detected = await _detect_app_package(requirement)
         if detected:
             app_package = detected
 
@@ -361,7 +388,7 @@ def plan_command(
     llm_provider = LLMProviderFactory.create(settings)
 
     def _build_llm_callable() -> Any:
-        """Build a sync callable that wraps the shared LLM provider for TC generation."""
+        """Build a callable (async) that wraps the shared LLM provider for TC generation."""
         from testagent.plan.test_case_generator import TC_GENERATION_SYSTEM_PROMPT
 
         async def _call(text: str) -> str:
@@ -376,7 +403,7 @@ def plan_command(
                     return str(block.get("text", ""))
             return ""
 
-        return lambda text: asyncio.run(_call(text))
+        return _call  # return async callable directly (no asyncio.run wrapper)
 
     # ── Inject app info into TC generation prompt ──────────────────────
     enhanced_prd = prd_text
@@ -389,7 +416,7 @@ def plan_command(
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
-    test_cases = ts_gen.generate(enhanced_prd, plan_name=name)
+    test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")
@@ -426,12 +453,12 @@ def plan_command(
     # Ensure Appium is still healthy before execution
     from testagent.common.appium_manager import ensure_appium_running
 
-    if not asyncio.run(ensure_appium_running()):
+    if not await ensure_appium_running():
         typer.echo("❌ Appium server is not available. Please start Appium manually.")
         raise typer.Exit(1)
 
     engine = ExecutionEngine(config, llm_provider=llm_provider)
-    executed_tcs = engine.execute_all(test_cases)
+    executed_tcs = await engine.execute_all(test_cases)
 
     # ── Phase 5: Per-TC evaluation ──────────────────────────────────────────
     typer.echo("Evaluating test case results...")

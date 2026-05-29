@@ -28,11 +28,11 @@ class TestCaseGenerator:
 
     # ── public API ───────────────────────────────────────────────────────────
 
-    def generate(
+    async def generate(
         self, prd_text: str, plan_name: str = ""
     ) -> list[TestCase]:
         if self._llm_provider is not None:
-            raw = self._call_llm(prd_text)
+            raw = await self._call_llm(prd_text)
         else:
             raw = prd_text
         self.last_raw_output = raw
@@ -51,9 +51,12 @@ class TestCaseGenerator:
 
     # ── LLM helpers ──────────────────────────────────────────────────────────
 
-    def _call_llm(self, prd_text: str) -> str:
+    async def _call_llm(self, prd_text: str) -> str:
         """Call the LLM provider and return the raw response text."""
-        return self._llm_provider(prd_text)  # type: ignore[misc]
+        result = self._llm_provider(prd_text)  # type: ignore[misc]
+        if hasattr(result, "__await__"):
+            result = await result
+        return result
 
     # ── response parsing ─────────────────────────────────────────────────────
 

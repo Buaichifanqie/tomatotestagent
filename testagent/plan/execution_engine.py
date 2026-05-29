@@ -195,7 +195,7 @@ class ExecutionEngine:
         )
         return None
 
-    def execute_all(self, test_cases: list[TestCase]) -> list[TestCase]:
+    async def execute_all(self, test_cases: list[TestCase]) -> list[TestCase]:
         """Execute all test cases sequentially.
 
         Iterates through the provided test cases, checking abort conditions
@@ -228,26 +228,21 @@ class ExecutionEngine:
             # ── Environment reset before each TC ──────────────────────────
             if tc != test_cases[0]:
                 self._log("Resetting device environment...")
-                self._teardown_app()
+                await self._teardown_app()
 
                 # ── Appium server health check — restart if process died ──
-                if not asyncio.run(ensure_appium_running()):
+                if not await ensure_appium_running():
                     self._log("[Appium is down and could not be restarted — aborting]")
                     self._mark_aborted(tc, "Appium unavailable after teardown")
                     continue
 
                 # ── Session recreation if UiAutomator2 is dead ──────────
-                # is_connected() can return false positives after force-stop
-                # kills UiAutomator2 — the HTTP endpoint still responds but
-                # page source is empty. Do a real health check.
                 session_dead = not self.session_manager.is_connected()
                 if not session_dead:
                     try:
-                        src_result = asyncio.run(
-                            app_get_source(
-                                appium_url=self.session_manager.appium_url,
-                                session_id=self.session_manager.session_id,
-                            )
+                        src_result = await app_get_source(
+                            appium_url=self.session_manager.appium_url,
+                            session_id=self.session_manager.session_id,
                         )
                         page_src = src_result.get("source", "")
                         if not page_src:
@@ -270,13 +265,13 @@ class ExecutionEngine:
             self._logcat_start(tc.id)
 
             # ── Start screen recording for this TC ───────────────────────
-            self._start_recording(tc)
+            await self._start_recording(tc)
 
             try:
-                self._execute_single(tc)
+                await self._execute_single(tc)
             finally:
                 # ── Stop recording for this TC (always, even on error) ───
-                self._stop_recording(tc)
+                await self._stop_recording(tc)
 
             self._logcat_stop(tc)
 
@@ -292,11 +287,11 @@ class ExecutionEngine:
             self._update_consecutive_blocked(tc)
 
             # ── Pause between TCs for visual pacing ───────────────────────
-            time.sleep(2)
+            await asyncio.sleep(2)
 
         return test_cases
 
-    def _execute_single(self, tc: TestCase) -> None:
+    async def _execute_single(self, tc: TestCase) -> None:
         """Execute a single test case.
 
         Flow:
@@ -322,17 +317,15 @@ class ExecutionEngine:
             return
 
         # Ensure app is launched before executing steps.
-        # The app is force-stopped between TCs, so every TC needs a fresh
-        # launch. We do this here rather than relying on the LLM-generated
-        # first step always being a correct "launch" action.
-        self._ensure_app_launched()
+        await self._ensure_app_launched()
 
         for step in tc.steps:
             if self.should_abort():
                 self._mark_aborted(tc, "Abort during execution")
                 return
 
-            step_exec = self._execute_step(tc, step)
+            await self._handle_popups(tc)
+            step_exec = await self._execute_step_async(tc, step)
             tc.execution.steps.append(step_exec)
 
             if not step_exec.success:
@@ -343,22 +336,6 @@ class ExecutionEngine:
                 return
 
         tc.execution.status = ExecutionStatus.EXECUTED
-
-    def _execute_step(self, tc: TestCase, step: TestStep) -> StepExecution:
-        """Execute a single test step.
-
-        Handles popups before executing the step action, then dispatches
-        to the async implementation via asyncio.run().
-
-        Args:
-            tc: The parent TestCase (used for context).
-            step: The TestStep to execute.
-
-        Returns:
-            A StepExecution with the result of the step.
-        """
-        self._handle_popups(tc)
-        return asyncio.run(self._execute_step_async(tc, step))
 
     async def _execute_step_async(self, tc: TestCase, step: TestStep) -> StepExecution:
         """Async implementation of step execution with real Appium calls.
@@ -725,7 +702,7 @@ class ExecutionEngine:
 
         return step_exec
 
-    def _ensure_app_launched(self) -> None:
+    async def _ensure_app_launched(self) -> None:
         """Launch the app before executing test steps.
 
         The app is force-stopped between TCs, so every TC starts from a
@@ -737,30 +714,25 @@ class ExecutionEngine:
         if not pkg:
             return
 
-        import asyncio as _asyncio
-
-        async def _launch() -> None:
-            sid = self.session_manager.session_id
-            url = self.session_manager.appium_url
+        sid = self.session_manager.session_id
+        url = self.session_manager.appium_url
+        result = await app_launch(
+            package=pkg, appium_url=url, session_id=sid,
+        )
+        if not result.get("error"):
+            self._log(f"App launched: {pkg}")
+            await asyncio.sleep(3)
+        else:
+            # Retry once
+            await asyncio.sleep(2)
             result = await app_launch(
                 package=pkg, appium_url=url, session_id=sid,
             )
+            await asyncio.sleep(3)
             if not result.get("error"):
-                self._log(f"App launched: {pkg}")
-                await _asyncio.sleep(3)
+                self._log(f"App launched (retry): {pkg}")
             else:
-                # Retry once
-                await _asyncio.sleep(2)
-                result = await app_launch(
-                    package=pkg, appium_url=url, session_id=sid,
-                )
-                await _asyncio.sleep(3)
-                if not result.get("error"):
-                    self._log(f"App launched (retry): {pkg}")
-                else:
-                    self._log(f"App launch failed: {result.get('error', '')[:80]}")
-
-        _asyncio.run(_launch())
+                self._log(f"App launch failed: {result.get('error', '')[:80]}")
 
     def _check_precondition(self, tc: TestCase) -> bool:
         """Check and execute precondition setup with retry.
@@ -798,7 +770,7 @@ class ExecutionEngine:
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"  [{ts}] {msg}", **kwargs)
 
-    def _teardown_app(self) -> None:
+    async def _teardown_app(self) -> None:
         """Force-stop the app between test cases using direct ADB.
 
         Using ``adb shell am force-stop`` directly (not through the Appium
@@ -844,7 +816,7 @@ class ExecutionEngine:
 
     # ── screen recording ───────────────────────────────────────────────────
 
-    def _start_recording(self, tc: TestCase) -> None:
+    async def _start_recording(self, tc: TestCase) -> None:
         """Start screen recording for a test case using Appium's recording API.
 
         The recording spans the execution of the current test case, capturing
@@ -858,14 +830,12 @@ class ExecutionEngine:
             self._log(f"  [Cannot start recording for {tc.id}: no session]")
             return
         try:
-            result = asyncio.run(
-                asyncio.wait_for(
-                    app_start_recording(
-                        appium_url=self.session_manager.appium_url,
-                        session_id=session_id,
-                    ),
-                    timeout=15,
-                )
+            result = await asyncio.wait_for(
+                app_start_recording(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=session_id,
+                ),
+                timeout=15,
             )
             if not result.get("error"):
                 self._current_recording_tc = tc.id
@@ -875,7 +845,7 @@ class ExecutionEngine:
         except Exception as exc:
             self._log(f"  [Recording start error for {tc.id}: {exc}]")
 
-    def _stop_recording(self, tc: TestCase | None = None) -> None:
+    async def _stop_recording(self, tc: TestCase | None = None) -> None:
         """Stop screen recording, save the video, and add as evidence."""
         tc_id = self._current_recording_tc
         self._current_recording_tc = ""
@@ -887,14 +857,12 @@ class ExecutionEngine:
         if not tc_id:
             return
         try:
-            result = asyncio.run(
-                asyncio.wait_for(
-                    app_stop_recording(
-                        appium_url=self.session_manager.appium_url,
-                        session_id=session_id,
-                    ),
-                    timeout=15,
-                )
+            result = await asyncio.wait_for(
+                app_stop_recording(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=session_id,
+                ),
+                timeout=15,
             )
             video_b64 = result.get("video_base64", "")
             if not video_b64:
@@ -947,7 +915,7 @@ class ExecutionEngine:
         except Exception:
             pass
 
-    def _handle_popups(self, tc: TestCase) -> None:
+    async def _handle_popups(self, tc: TestCase) -> None:
         """Detect and handle popups before step execution.
 
         Retrieves the current page source from the Appium session and
@@ -970,28 +938,21 @@ class ExecutionEngine:
         if not session_id:
             return
 
-        # Don't clear suppressed_rules here — it's cleared per-TC in
-        # _execute_single(), so false-positive suppression persists across
-        # steps within the same TC.
-        # self._suppressed_rules.clear()
-
         max_rounds = 10
         for _round in range(max_rounds):
             try:
-                result = asyncio.run(
-                    app_get_source(
-                        appium_url=self.session_manager.appium_url,
-                        session_id=session_id,
-                    )
+                result = await app_get_source(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=session_id,
                 )
                 page_source = result.get("source", "")
                 popup_result = self.popup_handler.handle(page_source=page_source)
                 if not popup_result:
                     # ── Text rules found nothing. Try vision as a
                     #     general popup detector for unknown dialogs ────
-                    vision_ok = asyncio.run(self._detect_unknown_popup())
+                    vision_ok = await self._detect_unknown_popup()
                     if vision_ok:
-                        time.sleep(1.0)
+                        await asyncio.sleep(1.0)
                         continue   # popup dismissed, re-check
                     break  # no popup detected at all
 
@@ -1013,24 +974,20 @@ class ExecutionEngine:
                     )
                     break
 
-                # Try exact text match first (avoids hitting dialog text
-                # that only *contains* the button_text, e.g. "要允许..."
-                # matching textContains("允许"))
+                # Try exact text match first
                 escaped = button_text.replace("\\", "\\\\").replace('"', '\\"')
                 selectors_to_try = [
-                    f'new UiSelector().text("{escaped}")',      # exact match
-                    f'new UiSelector().textContains("{escaped}")',  # fallback
+                    f'new UiSelector().text("{escaped}")',
+                    f'new UiSelector().textContains("{escaped}")',
                 ]
 
                 tapped = False
                 for selector in selectors_to_try:
-                    tap_result = asyncio.run(
-                        app_tap(
-                            selector=selector,
-                            strategy="uiautomator",
-                            appium_url=self.session_manager.appium_url,
-                            session_id=session_id,
-                        )
+                    tap_result = await app_tap(
+                        selector=selector,
+                        strategy="uiautomator",
+                        appium_url=self.session_manager.appium_url,
+                        session_id=session_id,
                     )
                     if not tap_result.get("error"):
                         tapped = True
@@ -1046,22 +1003,18 @@ class ExecutionEngine:
                         f"Popup '{rule_name}': "
                         f"text tap failed, trying vision..."
                     )
-                    vision_ok = asyncio.run(
-                        self._dismiss_with_vision(rule_name)
-                    )
+                    vision_ok = await self._dismiss_with_vision(rule_name)
                     if vision_ok:
                         tapped = True
                     else:
-                        # Vision confirmed no popup — suppress this rule
-                        # so we don't waste time on the same false positive
                         self._suppressed_rules.add(rule_name)
                         self._log(
                             f"Vision confirmed no popup for '{rule_name}' "
                             f"— suppressing further detection"
                         )
-                        break  # no popup, stop looping
+                        break
 
-                time.sleep(1.5)  # pause for next dialog or UI to render
+                await asyncio.sleep(1.5)
             except Exception as exc:
                 self._log(f"Popup handler error: {exc}")
                 break
