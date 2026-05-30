@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from testagent.plan.coordinate_cache import CacheStats
 from testagent.plan.models import (
     ExecutionVerdict,
     OverallEvaluation,
@@ -36,10 +37,11 @@ class ReportGenerator:
         test_cases: list[TestCase],
         overall: OverallEvaluation,
         config: PlanConfig,
+        cache_stats: CacheStats | None = None,
     ) -> str:
         """Build the report, write to {output_dir}/plan-report.md, return path."""
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        report = self._build_report(plan_name, test_cases, overall, config)
+        report = self._build_report(plan_name, test_cases, overall, config, cache_stats)
         path = self._output_dir / "plan-report.md"
         path.write_text(report, encoding="utf-8")
         return str(path)
@@ -52,6 +54,7 @@ class ReportGenerator:
         test_cases: list[TestCase],
         overall: OverallEvaluation,
         config: PlanConfig,
+        cache_stats: CacheStats | None = None,
     ) -> str:
         lines: list[str] = []
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -78,6 +81,18 @@ class ReportGenerator:
         lines.append("")
         if overall.summary:
             lines.append(f"**总结:** {overall.summary}")
+            lines.append("")
+
+        # ── 缓存效率统计 ────────────────────────────────────────────────────
+        if cache_stats and cache_stats.hits + cache_stats.misses > 0:
+            lines.append("## 缓存效率统计")
+            lines.append("")
+            lines.append("| 指标 | 值 |")
+            lines.append("|---|---|")
+            lines.append(f"| 缓存命中次数 | {cache_stats.hits} |")
+            lines.append(f"| 缓存未命中次数 | {cache_stats.misses} |")
+            lines.append(f"| 缓存命中率 | {cache_stats.hit_rate:.1%} |")
+            lines.append(f"| 回退重试次数 | {cache_stats.fallbacks} |")
             lines.append("")
 
         # ── 测试结果汇总 ────────────────────────────────────────────────────
@@ -132,18 +147,23 @@ class ReportGenerator:
             steps = tc.execution.steps
             if steps:
                 lines.append(
-                    "| 步骤 | 操作 | 目标 | 结果 | 耗时(ms) | 错误信息 |"
+                    "| 步骤 | 操作 | 目标 | 来源 | 结果 | 耗时(ms) | 错误信息 |"
                 )
                 lines.append(
-                    "|---|---|---|---|---|---|"
+                    "|---|---|---|---|---|---|---|"
                 )
                 for s in steps:
                     result_mark = "✅" if s.success else "❌"
                     err = s.error_message or ""
                     dur = s.duration_ms if s.duration_ms is not None else ""
+                    source = s.source or ""
+                    if source:
+                        source_mark = f"🟡 Cache Hit ({source})"
+                    else:
+                        source_mark = "🟢 LLM 视觉识别"
                     lines.append(
                         f"| {s.step} | {s.action} | {s.target} "
-                        f"| {result_mark} | {dur} | {err} |"
+                        f"| {source_mark} | {result_mark} | {dur} | {err} |"
                     )
                     # Screenshot for failed steps
                     if not s.success and s.screenshot_after:

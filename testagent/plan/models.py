@@ -112,6 +112,7 @@ class StepExecution(BaseModel):
     page_source_before: str = ""
     page_source_after: str = ""
     vision_analysis: str = ""  # Multimodal model's analysis of the screen on failure
+    source: str = ""  # 来源标识："" 表示 LLM 视觉识别，"cache:TC-xxx/stepN" 表示缓存命中
 
 
 class EvidenceItem(BaseModel):
