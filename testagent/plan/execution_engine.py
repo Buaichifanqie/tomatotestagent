@@ -21,6 +21,7 @@ from testagent.mcp_servers.appium_server.tools import (
     app_tap,
     app_type,
 )
+from testagent.plan.coordinate_cache import CoordinateCache
 from testagent.plan.models import (
     EvidenceItem,
     ExecutionStatus,
@@ -32,6 +33,7 @@ from testagent.plan.models import (
 )
 from testagent.plan.popup_handler import PopupHandler
 from testagent.plan.session_manager import SessionManager
+from testagent.plan.ui_tree_utils import get_page_hash_from_source
 
 # ── Prompt loading ───────────────────────────────────────────────
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -79,6 +81,154 @@ class ExecutionEngine:
         self._current_recording_tc: str = ""
         self._screen_w: int = 0
         self._screen_h: int = 0
+        self._coordinate_cache = CoordinateCache()
+
+    # ── coordinate cache helpers ─────────────────────────────────────────
+
+    async def _get_current_page_hash(self) -> str:
+        """获取当前页面的哈希值."""
+        try:
+            result = await app_get_source(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            source = result.get("source", "")
+            if source:
+                return get_page_hash_from_source(source)
+        except Exception:
+            pass
+        return ""
+
+    async def _wait_for_ui_stable(self, timeout: float = 2.0, interval: float = 0.5) -> None:
+        """等待 UI 稳定."""
+        last_hash = ""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current_hash = await self._get_current_page_hash()
+            if current_hash and current_hash == last_hash:
+                return
+            last_hash = current_hash
+            await asyncio.sleep(interval)
+
+    async def _execute_tap_with_cache(self, step: TestStep, tc_id: str) -> dict:
+        """带缓存的 tap 执行."""
+        appium_url = self.session_manager.appium_url
+        session_id = self.session_manager.session_id
+
+        page_hash_before = await self._get_current_page_hash()
+
+        if page_hash_before and self.config.cache_enabled:
+            cache_entry = self._coordinate_cache.get(page_hash_before, "tap", step.target)
+            if cache_entry:
+                self._log(f"  [Cache Hit: '{step.target}' -> ({cache_entry.coord['x']}, {cache_entry.coord['y']})]")
+                res = await app_tap(
+                    x=cache_entry.coord["x"], y=cache_entry.coord["y"],
+                    appium_url=appium_url, session_id=session_id,
+                )
+                if (
+                    not res.get("error")
+                    and self.config.cache_verify_after_tap
+                    and cache_entry.page_hash_after is not None
+                ):
+                    await self._wait_for_ui_stable()
+                    page_hash_after = await self._get_current_page_hash()
+                    if page_hash_after and page_hash_after != cache_entry.page_hash_after:
+                        self._log("  [Cache verify failed, falling back to vision]")
+                        return await self._fallback_to_vision(step, tc_id, page_hash_before)
+                if not res.get("error"):
+                    return res
+
+        return await self._execute_tap_and_cache(step, tc_id, page_hash_before)
+
+    async def _execute_tap_and_cache(self, step: TestStep, tc_id: str, page_hash_before: str) -> dict:
+        """执行 tap 并缓存结果."""
+        appium_url = self.session_manager.appium_url
+        session_id = self.session_manager.session_id
+
+        # Layer 1: Direct vision element search
+        self._log(f"  [Vision: looking for '{step.target}']")
+        coords = await self._vision_find_element(step.target)
+        if coords:
+            res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+            if not res.get("error"):
+                self._log(f"  [Vision tap at ({coords['x']}, {coords['y']})]")
+                await self._cache_tap_result(step, tc_id, page_hash_before, coords)
+                return res
+
+        # Layer 2: LLM-driven execution
+        self._log(f"  [Vision didn't find '{step.target}', trying LLM...]")
+        llm_result = await self._execute_step_via_llm(step, session_id)
+        if llm_result and not llm_result.get("error"):
+            self._log("  [LLM execution succeeded]")
+            return llm_result
+
+        # Layer 3: Wait for UI to settle, then retry vision
+        await asyncio.sleep(2)
+        coords = await self._vision_find_element(step.target)
+        if coords:
+            res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+            if not res.get("error"):
+                self._log(f"  [Vision retry at ({coords['x']}, {coords['y']})]")
+                await self._cache_tap_result(step, tc_id, page_hash_before, coords)
+                return res
+
+        # Layer 4: Content fallback
+        self._log(f"  [Content fallback: looking for any clickable content item...]")
+        coords = await self._vision_find_any_content()
+        if coords:
+            res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+            if not res.get("error"):
+                self._log(f"  [Content fallback tap at ({coords['x']}, {coords['y']}) — proceeding]")
+                await self._cache_tap_result(step, tc_id, page_hash_before, coords)
+                return res
+
+        return {"error": f"Element '{step.target}' not found (vision + LLM + vision retry)"}
+
+    async def _cache_tap_result(
+        self, step: TestStep, tc_id: str, page_hash_before: str, coords: dict[str, int]
+    ) -> None:
+        """将 tap 结果写入缓存."""
+        if not self.config.cache_enabled or not page_hash_before:
+            return
+        await self._wait_for_ui_stable()
+        page_hash_after = await self._get_current_page_hash()
+        self._coordinate_cache.put(
+            page_hash_before=page_hash_before,
+            action="tap",
+            target=step.target,
+            coord=coords,
+            page_hash_after=page_hash_after or None,
+            tc_id=tc_id,
+            step=step.step,
+        )
+
+    async def _fallback_to_vision(
+        self, step: TestStep, tc_id: str, page_hash_before: str
+    ) -> dict:
+        """缓存校验失败时回退到视觉 API."""
+        appium_url = self.session_manager.appium_url
+        session_id = self.session_manager.session_id
+
+        coords = await self._vision_find_element(step.target)
+        if not coords:
+            return {"error": f"Element '{step.target}' not found after cache fallback"}
+
+        res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+        if res.get("error"):
+            return res
+
+        await self._wait_for_ui_stable()
+        page_hash_after = await self._get_current_page_hash()
+        self._coordinate_cache.update(
+            page_hash_before=page_hash_before,
+            action="tap",
+            target=step.target,
+            coord=coords,
+            page_hash_after=page_hash_after or None,
+            tc_id=tc_id,
+            step=step.step,
+        )
+        return res
 
     # ── screen size (lazy) ──────────────────────────────────────────────
 
@@ -371,90 +521,39 @@ class ExecutionEngine:
             sid = session_id or self.session_manager.session_id
 
             if step.action == "tap":
-                # Layer 1: Direct vision element search (like chat's vision_find_element)
-                # Fast and reliable — vision model looks at screenshot and returns coordinates.
-                self._log(f"  [Vision: looking for '{step.target}']")
-                coords = await self._vision_find_element(step.target)
-                if coords:
-                    res = await app_tap(
-                        x=coords["x"], y=coords["y"],
-                        appium_url=appium_url, session_id=sid,
-                    )
-                    if not res.get("error"):
-                        self._log(
-                            f"  [Vision tap at ({coords['x']}, {coords['y']})]"
-                        )
-                        return res
-
-                # Layer 2: LLM-driven execution (like chat agent loop)
-                # Take screenshot → vision describes screen → LLM reads description,
-                # extracts percentage coordinates, converts to pixels, and decides.
-                self._log(
-                    f"  [Vision didn't find '{step.target}', trying LLM...]"
-                )
-                llm_result = await self._execute_step_via_llm(step, sid)
-                if llm_result and not llm_result.get("error"):
-                    self._log("  [LLM execution succeeded]")
-                    return llm_result
-
-                # Layer 3: Wait for UI to settle, then retry vision
-                await asyncio.sleep(2)
-                coords = await self._vision_find_element(step.target)
-                if coords:
-                    res = await app_tap(
-                        x=coords["x"], y=coords["y"],
-                        appium_url=appium_url, session_id=sid,
-                    )
-                    if not res.get("error"):
-                        self._log(
-                            f"  [Vision retry at ({coords['x']}, {coords['y']})]"
-                        )
-                        return res
-
-                # Layer 4: Content fallback — tap the first clickable content
-                # item on screen. Handles cases where the target is a specific
-                # dynamic text (UP主 name, video title) that doesn't exist,
-                # but the test intent (e.g. "tap a video card") is correct.
-                self._log(
-                    f"  [Content fallback: looking for any clickable "
-                    f"content item...]"
-                )
-                coords = await self._vision_find_any_content()
-                if coords:
-                    res = await app_tap(
-                        x=coords["x"], y=coords["y"],
-                        appium_url=appium_url, session_id=sid,
-                    )
-                    if not res.get("error"):
-                        self._log(
-                            f"  [Content fallback tap at ({coords['x']}, "
-                            f"{coords['y']}) — proceeding]"
-                        )
-                        return res
-
-                return {"error": f"Element '{step.target}' not found (vision + LLM + vision retry)"}
+                return await self._execute_tap_with_cache(step, tc.id)
             elif step.action == "type":
-                coords = await self._vision_find_element(
-                    step.target or "输入框"
-                )
+                page_hash_before = await self._get_current_page_hash()
+                cache_entry = None
+                if page_hash_before and self.config.cache_enabled:
+                    cache_entry = self._coordinate_cache.get(page_hash_before, "tap", step.target or "输入框")
+
+                if cache_entry:
+                    self._log(f"  [Cache Hit: input field '{step.target}']")
+                    coords = cache_entry.coord
+                else:
+                    coords = await self._vision_find_element(step.target or "输入框")
+                    if coords and page_hash_before:
+                        self._coordinate_cache.put(
+                            page_hash_before=page_hash_before,
+                            action="tap",
+                            target=step.target or "输入框",
+                            coord=coords,
+                            page_hash_after=None,
+                            tc_id=tc.id,
+                            step=step.step,
+                        )
+
                 if coords:
-                    await app_tap(
-                        x=coords["x"], y=coords["y"],
-                        appium_url=appium_url, session_id=sid,
-                    )
+                    await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=sid)
                     await asyncio.sleep(0.5)
-                    # Use mobile: type (goes through UiAutomator2 instrumentation,
-                    # not ADB shell, so it won't crash adbd like input text does).
                     text = step.value or ""
                     if text:
-                        res = await app_type_text(
-                            text=text,
-                            appium_url=appium_url, session_id=sid,
-                        )
+                        res = await app_type_text(text=text, appium_url=appium_url, session_id=sid)
                         if res.get("error"):
                             # Fallback to UiAutomator type
                             res = await app_type(
-                                selector="new UiSelector().className(\"android.widget.EditText\").focused(true)",
+                                selector='new UiSelector().className("android.widget.EditText").focused(true)',
                                 text=text, strategy="uiautomator",
                                 appium_url=appium_url, session_id=sid,
                             )
