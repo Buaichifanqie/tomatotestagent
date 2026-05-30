@@ -95,8 +95,8 @@ class ExecutionEngine:
             source = result.get("source", "")
             if source:
                 return get_page_hash_from_source(source)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(f"  [page hash failed: {e}]")
         return ""
 
     async def _wait_for_ui_stable(self, timeout: float = 2.0, interval: float = 0.5) -> None:
@@ -179,7 +179,7 @@ class ExecutionEngine:
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
             if not res.get("error"):
                 self._log(f"  [Content fallback tap at ({coords['x']}, {coords['y']}) — proceeding]")
-                await self._cache_tap_result(step, tc_id, page_hash_before, coords)
+                # 不缓存 content fallback 结果 — 它找到的是任意可点击元素，不是目标元素
                 return res
 
         return {"error": f"Element '{step.target}' not found (vision + LLM + vision retry)"}
