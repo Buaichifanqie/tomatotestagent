@@ -111,6 +111,31 @@ def _mask(val: str, field: str, show_secrets: bool) -> str:
     return val
 
 
+# ── help ────────────────────────────────────────────────────────────
+
+
+@config_app.command()
+def help() -> None:
+    """显示配置命令的帮助信息。"""
+    typer.echo("testagent config — 配置 LLM 和 Vision 多模态模型 API")
+    typer.echo("")
+    typer.echo("用法:")
+    typer.echo("  testagent config show             查看当前配置（API Key 默认隐藏）")
+    typer.echo("  testagent config show -s          查看当前配置（显示完整 Key）")
+    typer.echo("  testagent config configure        交互式配置向导")
+    typer.echo("  testagent config configure --help  查看所有非交互式选项")
+    typer.echo("")
+    typer.echo("非交互式示例:")
+    typer.echo('  testagent config configure \\')
+    typer.echo('    --llm-api-key "sk-xxx" \\')
+    typer.echo('    --llm-base-url "https://api.deepseek.com" \\')
+    typer.echo('    --llm-model "deepseek-v4-flash" \\')
+    typer.echo('    --vision-api-key "ark-xxx" \\')
+    typer.echo('    --vision-model "doubao-seed-2-0-pro-260215"')
+    typer.echo("")
+    typer.echo("配置文件: .env")
+
+
 # ── show ────────────────────────────────────────────────────────────
 
 
@@ -138,7 +163,7 @@ def show(
 
 
 @config_app.command()
-def set(
+def configure(
     llm_provider: str | None = typer.Option(
         None, "--llm-provider", help="LLM provider (openai / local)"
     ),
@@ -264,5 +289,4 @@ def set(
 
     typer.echo("")
     typer.echo("✅ 配置已保存到 .env")
-    ctx = typer.Context(config_app)
-    ctx.invoke(show, show_secrets=False)
+    show(show_secrets=False)
