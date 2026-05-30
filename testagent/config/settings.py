@@ -71,6 +71,13 @@ class TestAgentSettings(BaseSettings):
     vision_timeout: int = 60
     vision_max_retries: int = 3
 
+    # 坐标缓存配置
+    cache_enabled: bool = True
+    cache_max_size: int = 1000
+    cache_ttl_seconds: int = 1800
+    cache_verify_after_tap: bool = True
+    cache_skip_verify_for_input: bool = True
+
     repo_path: str = ""
     data_retention_days: int = 90
 
