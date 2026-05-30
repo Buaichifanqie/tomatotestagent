@@ -25,6 +25,7 @@ def _fix_win_console() -> None:
 _fix_win_console()
 
 from testagent.cli.app_cmd import app_typer as app_group
+from testagent.cli.config_cmd import config_app
 from testagent.cli.mcp_cmd import mcp_app
 from testagent.cli.output import RichOutput
 from testagent.cli.rag_cmd import rag_index, rag_query
@@ -168,6 +169,7 @@ def chat() -> None:
     asyncio.run(interactive_chat())
 
 
+app.add_typer(config_app)
 app.add_typer(skill_app)
 app.add_typer(mcp_app)
 app.add_typer(app_group)  # testagent app plan, etc.

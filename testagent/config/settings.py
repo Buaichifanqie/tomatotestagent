@@ -40,8 +40,8 @@ class TestAgentSettings(BaseSettings):
 
     llm_provider: str = "openai"
     openai_api_key: SecretStr = SecretStr("")
-    openai_model: str = "gpt-4o"
-    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = ""
+    openai_base_url: str = ""
     local_model_url: str = "http://localhost:11434"
 
     chroma_persist_dir: str = "./chroma_data"
@@ -66,8 +66,8 @@ class TestAgentSettings(BaseSettings):
     docker_timeout_web: int = 120
 
     vision_api_key: SecretStr = SecretStr("")
-    vision_api_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    vision_model: str = "doubao-seed-2-0-lite-260428"
+    vision_api_url: str = ""
+    vision_model: str = ""
     vision_timeout: int = 60
     vision_max_retries: int = 3
 
