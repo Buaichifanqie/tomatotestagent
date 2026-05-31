@@ -139,6 +139,23 @@ class ExecutionEngine:
 
     async def _execute_tap_with_cache(self, step: TestStep, tc_id: str) -> dict:
         """带缓存的 tap 执行."""
+        # ── Keyboard button fallback: use ADB KEYCODE_ENTER ──
+        _keyboard_keywords = ("键盘搜索", "键盘回车", "keyboard search", "keyboard enter", "enter键", "回车键")
+        if any(kw in (step.target or "").lower() for kw in _keyboard_keywords):
+            self._log(f"  [Keyboard target detected: '{step.target}', sending KEYCODE_ENTER]")
+            import subprocess
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                await asyncio.sleep(1)
+                return {"_source": "adb:KEYCODE_ENTER"}
+            except Exception as exc:
+                self._log(f"  [KEYCODE_ENTER failed: {exc}, falling back to vision]")
+                # Fall through to normal tap logic
+
         appium_url = self.session_manager.appium_url
         session_id = self.session_manager.session_id
 

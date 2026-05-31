@@ -225,4 +225,4 @@ class PlanConfig(BaseModel):
     popup_rules: list[PopupRule] = Field(default_factory=list)
     max_workers: int = 1
     cache_enabled: bool = True
-    cache_verify_after_tap: bool = True
+    cache_verify_after_tap: bool = False

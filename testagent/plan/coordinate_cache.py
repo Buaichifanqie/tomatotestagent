@@ -106,5 +106,8 @@ class CoordinateCache:
 
     def _make_key(self, context_hash: str, action: str, target: str) -> str:
         """生成缓存键."""
-        normalized_target = "".join(target.lower().split())
+        import re
+        # 去掉括号及内容（中英文括号），再去除空格和小写化
+        cleaned = re.sub(r"[（(][^）)]*[）)]", "", target)
+        normalized_target = "".join(cleaned.lower().split())
         return f"{context_hash}_{action}_{normalized_target}"

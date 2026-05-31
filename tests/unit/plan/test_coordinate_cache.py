@@ -68,6 +68,21 @@ class TestCoordinateCache:
         result = cache.get("abc123", "tap", "搜索框")
         assert result is not None
 
+    def test_cache_hit_strips_parenthetical(self):
+        """target 去掉括号备注后能命中."""
+        cache = CoordinateCache()
+        cache.put("abc123", "tap", "搜索框（首页顶部）", {"x": 540, "y": 1200}, "def456", "TC-001", 3)
+        result = cache.get("abc123", "tap", "搜索框")
+        assert result is not None
+        assert result.coord == {"x": 540, "y": 1200}
+
+    def test_cache_hit_strips_english_parens(self):
+        """target 去掉英文括号备注后能命中."""
+        cache = CoordinateCache()
+        cache.put("abc123", "tap", "搜索框(top)", {"x": 540, "y": 1200}, "def456", "TC-001", 3)
+        result = cache.get("abc123", "tap", "搜索框")
+        assert result is not None
+
     def test_cache_miss_different_context_hash(self):
         """不同上下文哈希未命中."""
         cache = CoordinateCache()
