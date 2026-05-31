@@ -11,7 +11,7 @@ import typer
 
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.evaluator import PerTCEvaluator
-from testagent.plan.models import PlanConfig, TestCase
+from testagent.plan.models import PlanConfig, TestCase, TestStep
 from testagent.plan.overall_evaluator import OverallEvaluator
 from testagent.plan.prd_parser import PrdParser
 from testagent.plan.report_generator import ReportGenerator
@@ -252,10 +252,10 @@ def format_tc_summary(test_cases: list[TestCase]) -> str:
 
 
 def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool) -> bool:
-    """Present test cases to the user for confirmation.
+    """Present test cases to the user for confirmation and optional editing.
 
     Args:
-        test_cases: The list of generated ``TestCase`` objects.
+        test_cases: The list of generated ``TestCase`` objects (modified in-place).
         auto_yes: When ``True``, always return ``True`` without prompting.
 
     Returns:
@@ -269,9 +269,199 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool) -> bool:
         typer.echo("No test cases generated.")
         return False
 
-    summary = format_tc_summary(test_cases)
-    typer.echo(summary)
-    return typer.confirm("Proceed with execution?")
+    while True:
+        summary = format_tc_summary(test_cases)
+        typer.echo(summary)
+        typer.echo("")
+        typer.echo("  [y] 执行所有用例  [e] 编辑用例  [n] 取消")
+        choice = typer.prompt("  请选择", default="y", show_default=False)
+
+        if choice.lower() == "y":
+            return True
+        if choice.lower() == "n":
+            return False
+        if choice.lower() == "e":
+            _tc_editor(test_cases)
+            continue
+        typer.echo("  无效输入，请输入 y / e / n")
+
+
+def _tc_editor(test_cases: list[TestCase]) -> None:
+    """Interactive sub-editor for add / delete / modify test cases."""
+    while True:
+        typer.echo("")
+        typer.echo("  ── 编辑用例 ──")
+        typer.echo("  [a] 添加用例  [d] 删除用例  [m] 修改用例  [b] 返回")
+        action = typer.prompt("  请选择", default="b", show_default=False)
+
+        if action.lower() == "b":
+            return
+        if action.lower() == "a":
+            _tc_add(test_cases)
+        elif action.lower() == "d":
+            _tc_delete(test_cases)
+        elif action.lower() == "m":
+            _tc_modify(test_cases)
+        else:
+            typer.echo("  无效输入，请输入 a / d / m / b")
+
+
+def _tc_add(test_cases: list[TestCase]) -> None:
+    """Add test cases interactively, supports batch adding."""
+    typer.echo("")
+    typer.echo("  ── 添加新用例（添加完一个后可继续添加）──")
+    while True:
+        tc_id = typer.prompt("  用例 ID（如 TC-NEW-001）")
+        title = typer.prompt("  用例标题")
+        priority = typer.prompt("  优先级", default="P1")
+        is_core = typer.confirm("  是否为核心用例", default=False)
+        requirement_ids_str = typer.prompt("  关联需求 ID（逗号分隔，留空跳过）", default="")
+        requirement_ids = [r.strip() for r in requirement_ids_str.split(",") if r.strip()] if requirement_ids_str else []
+
+        steps: list[TestStep] = []
+        typer.echo("  步骤（action: tap / type / swipe / assert / launch / exec / screenshot / wait，输入空行结束）")
+        step_num = 1
+        while True:
+            action = typer.prompt(f"    步骤{step_num} action", default="")
+            if not action:
+                break
+            target = typer.prompt(f"    步骤{step_num} target", default="")
+            value = typer.prompt(f"    步骤{step_num} value", default="")
+            steps.append(TestStep(step=step_num, action=action, target=target, value=value))
+            step_num += 1
+
+        new_tc = TestCase(
+            id=tc_id,
+            title=title,
+            priority=priority,
+            is_core=is_core,
+            requirement_ids=requirement_ids,
+            steps=steps,
+        )
+        test_cases.append(new_tc)
+        typer.echo(f"  ✅ 已添加: {tc_id} {title}")
+
+        if not typer.confirm("  继续添加下一个用例?", default=False):
+            break
+        typer.echo("")
+
+
+def _tc_delete(test_cases: list[TestCase]) -> None:
+    """Delete test cases by index, supports batch input like '1,3,5'."""
+    if not test_cases:
+        typer.echo("  没有可删除的用例")
+        return
+    typer.echo("")
+    typer.echo("  ── 删除用例 ──")
+    for i, tc in enumerate(test_cases):
+        typer.echo(f"    {i+1}. {tc.id}: {tc.title}")
+    typer.echo("  支持批量删除，用逗号或空格分隔，如: 1,3,5 或 1 3 5")
+    idx_str = typer.prompt("  输入要删除的编号")
+    # Parse: split by comma, space, or both
+    tokens = re.split(r"[,\s]+", idx_str.strip())
+    indices: list[int] = []
+    for t in tokens:
+        try:
+            idx = int(t) - 1
+        except ValueError:
+            typer.echo(f"  无效编号: {t}")
+            return
+        if not (0 <= idx < len(test_cases)):
+            typer.echo(f"  编号 {t} 超出范围")
+            return
+        indices.append(idx)
+    # Delete from highest index to lowest to avoid shifting
+    for idx in sorted(set(indices), reverse=True):
+        removed = test_cases.pop(idx)
+        typer.echo(f"  ✅ 已删除: {removed.id} {removed.title}")
+
+
+def _tc_modify(test_cases: list[TestCase]) -> None:
+    """Modify test cases interactively, supports batch modifying."""
+    if not test_cases:
+        typer.echo("  没有可修改的用例")
+        return
+    typer.echo("")
+    typer.echo("  ── 修改用例（修改完一个后可继续修改下一个）──")
+    while True:
+        for i, tc in enumerate(test_cases):
+            typer.echo(f"    {i+1}. {tc.id}: {tc.title}")
+        idx_str = typer.prompt("  输入要修改的编号（输入 b 返回）", default="b", show_default=False)
+        if idx_str.lower() == "b":
+            return
+        try:
+            idx = int(idx_str) - 1
+        except ValueError:
+            typer.echo("  无效编号")
+            continue
+        if not (0 <= idx < len(test_cases)):
+            typer.echo("  编号超出范围")
+            continue
+
+        tc = test_cases[idx]
+        typer.echo(f"\n  当前: {tc.id} {tc.title} [{tc.priority}] {'[CORE]' if tc.is_core else ''}")
+        typer.echo("  (t) 改标题  (p) 改优先级  (c) 改核心标记  (s) 改步骤  (b) 返回")
+        field = typer.prompt("  选择", default="b", show_default=False)
+
+        if field.lower() == "t":
+            new_title = typer.prompt("  新标题", default=tc.title)
+            tc.title = new_title
+            typer.echo(f"  ✅ 标题已更新: {new_title}")
+        elif field.lower() == "p":
+            new_p = typer.prompt("  新优先级", default=tc.priority)
+            tc.priority = new_p
+            typer.echo(f"  ✅ 优先级已更新: {new_p}")
+        elif field.lower() == "c":
+            tc.is_core = not tc.is_core
+            typer.echo(f"  ✅ 核心标记已更新: {'是' if tc.is_core else '否'}")
+        elif field.lower() == "s":
+            _tc_edit_steps(tc)
+        elif field.lower() == "b":
+            continue
+
+        if not typer.confirm("  继续修改下一个用例?", default=False):
+            return
+        typer.echo("")
+
+
+def _tc_edit_steps(tc: TestCase) -> None:
+    """Edit steps of a test case interactively."""
+    typer.echo(f"\n  当前步骤 ({tc.id}):")
+    if tc.steps:
+        for s in tc.steps:
+            typer.echo(f"    {s.step}. [{s.action}] target={s.target} value={s.value}")
+    else:
+        typer.echo("    （无步骤）")
+
+    typer.echo("")
+    typer.echo("  [a] 添加步骤  [d] 删除步骤  [b] 返回")
+    action = typer.prompt("  请选择", default="b", show_default=False)
+
+    if action.lower() == "a":
+        step_num = len(tc.steps) + 1
+        a = typer.prompt(f"    步骤{step_num} action (tap/type/swipe/assert/launch/exec/screenshot/wait)")
+        target = typer.prompt(f"    步骤{step_num} target", default="")
+        value = typer.prompt(f"    步骤{step_num} value", default="")
+        tc.steps.append(TestStep(step=step_num, action=a, target=target, value=value))
+        typer.echo(f"  ✅ 已添加步骤 {step_num}")
+    elif action.lower() == "d":
+        if not tc.steps:
+            typer.echo("  没有可删除的步骤")
+            return
+        idx_str = typer.prompt("  输入要删除的步骤编号")
+        try:
+            idx = int(idx_str) - 1
+        except ValueError:
+            typer.echo("  无效编号")
+            return
+        if 0 <= idx < len(tc.steps):
+            removed = tc.steps.pop(idx)
+            # 重新编号
+            for i, s in enumerate(tc.steps):
+                s.step = i + 1
+            typer.echo(f"  ✅ 已删除步骤 {removed.step}: [{removed.action}] {removed.target}")
+        else:
+            typer.echo("  编号超出范围")
 
 
 # ── main orchestration ───────────────────────────────────────────────────────
