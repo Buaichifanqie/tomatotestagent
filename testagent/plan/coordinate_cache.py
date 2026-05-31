@@ -1,7 +1,7 @@
 """坐标缓存管理器.
 
 在同一个测试会话中缓存已获取的元素坐标，避免重复的多模态 API 调用。
-缓存键基于页面哈希 + 动作类型 + 目标描述，缓存值包含坐标和执行后的页面哈希。
+缓存键基于动作上下文哈希 + 动作类型 + 目标描述，缓存值包含坐标和执行后的页面哈希。
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class CacheStats:
 class CoordinateCache:
     """坐标缓存管理器.
 
-    提供基于页面哈希的坐标缓存功能，支持：
+    提供基于动作上下文的坐标缓存功能，支持：
     - 缓存读写（get/put）
     - 缓存更新（update，用于回退重试后更新）
     - 统计信息（hits, misses, fallbacks, hit_rate）
@@ -60,9 +60,9 @@ class CoordinateCache:
         self._stats._cache_size = len(self._cache)
         return self._stats
 
-    def get(self, page_hash: str, action: str, target: str) -> CacheEntry | None:
+    def get(self, context_hash: str, action: str, target: str) -> CacheEntry | None:
         """查询缓存."""
-        key = self._make_key(page_hash, action, target)
+        key = self._make_key(context_hash, action, target)
         entry = self._cache.get(key)
         if entry:
             self._stats.hits += 1
@@ -72,7 +72,7 @@ class CoordinateCache:
 
     def put(
         self,
-        page_hash_before: str,
+        context_hash: str,
         action: str,
         target: str,
         coord: dict[str, int],
@@ -81,7 +81,7 @@ class CoordinateCache:
         step: int,
     ) -> None:
         """写入缓存."""
-        key = self._make_key(page_hash_before, action, target)
+        key = self._make_key(context_hash, action, target)
         self._cache[key] = CacheEntry(
             coord=coord,
             page_hash_after=page_hash_after,
@@ -92,7 +92,7 @@ class CoordinateCache:
 
     def update(
         self,
-        page_hash_before: str,
+        context_hash: str,
         action: str,
         target: str,
         coord: dict[str, int],
@@ -102,9 +102,9 @@ class CoordinateCache:
     ) -> None:
         """更新缓存（回退重试时使用）."""
         self._stats.fallbacks += 1
-        self.put(page_hash_before, action, target, coord, page_hash_after, tc_id, step)
+        self.put(context_hash, action, target, coord, page_hash_after, tc_id, step)
 
-    def _make_key(self, page_hash: str, action: str, target: str) -> str:
+    def _make_key(self, context_hash: str, action: str, target: str) -> str:
         """生成缓存键."""
         normalized_target = "".join(target.lower().split())
-        return f"{page_hash}_{action}_{normalized_target}"
+        return f"{context_hash}_{action}_{normalized_target}"

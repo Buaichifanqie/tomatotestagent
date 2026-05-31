@@ -16,33 +16,29 @@ class TestCoordinateCacheIntegration:
         """完整缓存生命周期：写入 -> 命中 -> 更新."""
         cache = CoordinateCache()
 
-        # 模拟页面 XML
-        xml_before = '<hierarchy><node class="Button" resource-id="search" text="搜索"/></hierarchy>'
-        xml_after = '<hierarchy><node class="EditText" resource-id="input" text=""/></hierarchy>'
-
-        hash_before = get_page_hash_from_source(xml_before)
-        hash_after = get_page_hash_from_source(xml_after)
+        # 模拟动作上下文哈希
+        context_hash = "launch_app_abc123"
 
         # 写入缓存
         cache.put(
-            page_hash_before=hash_before,
+            context_hash=context_hash,
             action="tap",
             target="搜索框",
             coord={"x": 540, "y": 1200},
-            page_hash_after=hash_after,
+            page_hash_after="def456",
             tc_id="TC-001",
             step=3,
         )
 
         # 命中缓存
-        entry = cache.get(hash_before, "tap", "搜索框")
+        entry = cache.get(context_hash, "tap", "搜索框")
         assert entry is not None
         assert entry.coord == {"x": 540, "y": 1200}
-        assert entry.page_hash_after == hash_after
+        assert entry.page_hash_after == "def456"
 
         # 更新缓存（回退重试后）
         cache.update(
-            page_hash_before=hash_before,
+            context_hash=context_hash,
             action="tap",
             target="搜索框",
             coord={"x": 600, "y": 1300},
@@ -51,37 +47,33 @@ class TestCoordinateCacheIntegration:
             step=5,
         )
 
-        entry = cache.get(hash_before, "tap", "搜索框")
+        entry = cache.get(context_hash, "tap", "搜索框")
         assert entry.coord == {"x": 600, "y": 1300}
         assert cache.stats.fallbacks == 1
 
-    def test_different_pages_different_cache(self):
-        """不同页面的相同 target 不会误命中."""
+    def test_different_context_different_cache(self):
+        """不同动作上下文的相同 target 不会误命中."""
         cache = CoordinateCache()
 
-        xml_home = '<hierarchy><node class="Button" resource-id="search" text="搜索"/></hierarchy>'
-        xml_video = '<hierarchy><node class="Button" resource-id="search2" text="搜索"/></hierarchy>'
+        # 冷启动后点击搜索框
+        context1 = "launch_app"
+        cache.put(context1, "tap", "搜索框", {"x": 540, "y": 100}, "hash1", "TC-001", 1)
 
-        hash_home = get_page_hash_from_source(xml_home)
-        hash_video = get_page_hash_from_source(xml_video)
-
-        # 首页搜索框
-        cache.put(hash_home, "tap", "搜索框", {"x": 540, "y": 100}, "hash1", "TC-001", 1)
-
-        # 视频页搜索框应该 miss
-        entry = cache.get(hash_video, "tap", "搜索框")
+        # 从视频详情页返回后点击搜索框（上下文不同）
+        context2 = "tap_video_back"
+        entry = cache.get(context2, "tap", "搜索框")
         assert entry is None
 
     def test_stats_accuracy(self):
         """统计信息准确性."""
         cache = CoordinateCache()
 
-        cache.put("h1", "tap", "btn", {"x": 1, "y": 2}, "h2", "TC-001", 1)
+        cache.put("ctx1", "tap", "btn", {"x": 1, "y": 2}, "h2", "TC-001", 1)
 
         # 2 hits, 1 miss
-        cache.get("h1", "tap", "btn")
-        cache.get("h1", "tap", "btn")
-        cache.get("h2", "tap", "btn")
+        cache.get("ctx1", "tap", "btn")
+        cache.get("ctx1", "tap", "btn")
+        cache.get("ctx2", "tap", "btn")
 
         stats = cache.stats
         assert stats.hits == 2
@@ -93,10 +85,10 @@ class TestCoordinateCacheIntegration:
         cache = CoordinateCache()
 
         # 写入时有空格
-        cache.put("h1", "tap", "搜索 框", {"x": 100, "y": 200}, "h2", "TC-001", 1)
+        cache.put("ctx1", "tap", "搜索 框", {"x": 100, "y": 200}, "h2", "TC-001", 1)
 
         # 查询时无空格也能命中
-        entry = cache.get("h1", "tap", "搜索框")
+        entry = cache.get("ctx1", "tap", "搜索框")
         assert entry is not None
         assert entry.coord == {"x": 100, "y": 200}
 
@@ -104,18 +96,18 @@ class TestCoordinateCacheIntegration:
         """不同 action 不会误命中."""
         cache = CoordinateCache()
 
-        cache.put("h1", "tap", "搜索框", {"x": 100, "y": 200}, "h2", "TC-001", 1)
+        cache.put("ctx1", "tap", "搜索框", {"x": 100, "y": 200}, "h2", "TC-001", 1)
 
         # type action 应该 miss
-        entry = cache.get("h1", "type", "搜索框")
+        entry = cache.get("ctx1", "type", "搜索框")
         assert entry is None
 
     def test_page_hash_after_none_for_input(self):
         """input 动作的 page_hash_after 为 None."""
         cache = CoordinateCache()
 
-        cache.put("h1", "tap", "输入框", {"x": 100, "y": 200}, None, "TC-001", 1)
+        cache.put("ctx1", "tap", "输入框", {"x": 100, "y": 200}, None, "TC-001", 1)
 
-        entry = cache.get("h1", "tap", "输入框")
+        entry = cache.get("ctx1", "tap", "输入框")
         assert entry is not None
         assert entry.page_hash_after is None

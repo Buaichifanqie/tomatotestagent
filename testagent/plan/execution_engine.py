@@ -82,6 +82,8 @@ class ExecutionEngine:
         self._screen_w: int = 0
         self._screen_h: int = 0
         self._coordinate_cache = CoordinateCache()
+        self._action_context_stack: list[str] = []
+        self._context_depth: int = 2
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -110,15 +112,40 @@ class ExecutionEngine:
             last_hash = current_hash
             await asyncio.sleep(interval)
 
+    # ── action context helpers ─────────────────────────────────────────────
+
+    def _normalize_action(self, action: str, target: str) -> str:
+        """归一化动作签名，避免动态参数导致 Hash 爆炸."""
+        if action in ("type", "input"):
+            return f"{action}:<ANY_TEXT>"
+        return f"{action}:{target}"
+
+    def _push_action_context(self, action: str, target: str) -> None:
+        """将实际执行的动作推入上下文栈."""
+        action_sig = self._normalize_action(action, target)
+        self._action_context_stack.append(action_sig)
+        if len(self._action_context_stack) > self._context_depth:
+            self._action_context_stack.pop(0)
+
+    def _get_context_hash(self) -> str:
+        """生成当前动作上下文的哈希值."""
+        import hashlib
+        context_str = "->".join(self._action_context_stack)
+        return hashlib.md5(context_str.encode()).hexdigest()[:12]
+
+    def _clear_action_context(self) -> None:
+        """清空动作上下文栈（每个 TC 开始时调用）."""
+        self._action_context_stack.clear()
+
     async def _execute_tap_with_cache(self, step: TestStep, tc_id: str) -> dict:
         """带缓存的 tap 执行."""
         appium_url = self.session_manager.appium_url
         session_id = self.session_manager.session_id
 
-        page_hash_before = await self._get_current_page_hash()
+        context_hash = self._get_context_hash()
 
-        if page_hash_before and self.config.cache_enabled:
-            cache_entry = self._coordinate_cache.get(page_hash_before, "tap", step.target)
+        if context_hash and self.config.cache_enabled:
+            cache_entry = self._coordinate_cache.get(context_hash, "tap", step.target)
             if cache_entry:
                 self._log(f"  [Cache Hit: '{step.target}' -> ({cache_entry.coord['x']}, {cache_entry.coord['y']})]")
                 res = await app_tap(
@@ -134,13 +161,16 @@ class ExecutionEngine:
                     page_hash_after = await self._get_current_page_hash()
                     if page_hash_after and page_hash_after != cache_entry.page_hash_after:
                         self._log("  [Cache verify failed, falling back to vision]")
-                        return await self._fallback_to_vision(step, tc_id, page_hash_before)
+                        return await self._fallback_to_vision(step, tc_id, context_hash)
                 if not res.get("error"):
+                    res["_source"] = f"cache:{cache_entry.tc_id}/step{cache_entry.step}"
                     return res
+            else:
+                self._log(f"  [Cache Miss: context={context_hash}, target='{step.target}']")
 
-        return await self._execute_tap_and_cache(step, tc_id, page_hash_before)
+        return await self._execute_tap_and_cache(step, tc_id, context_hash)
 
-    async def _execute_tap_and_cache(self, step: TestStep, tc_id: str, page_hash_before: str) -> dict:
+    async def _execute_tap_and_cache(self, step: TestStep, tc_id: str, context_hash: str) -> dict:
         """执行 tap 并缓存结果."""
         appium_url = self.session_manager.appium_url
         session_id = self.session_manager.session_id
@@ -152,7 +182,8 @@ class ExecutionEngine:
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
             if not res.get("error"):
                 self._log(f"  [Vision tap at ({coords['x']}, {coords['y']})]")
-                await self._cache_tap_result(step, tc_id, page_hash_before, coords)
+                await self._cache_tap_result(step, tc_id, context_hash, coords)
+                res["_source"] = ""  # LLM vision识别
                 return res
 
         # Layer 2: LLM-driven execution
@@ -169,7 +200,7 @@ class ExecutionEngine:
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
             if not res.get("error"):
                 self._log(f"  [Vision retry at ({coords['x']}, {coords['y']})]")
-                await self._cache_tap_result(step, tc_id, page_hash_before, coords)
+                await self._cache_tap_result(step, tc_id, context_hash, coords)
                 return res
 
         # Layer 4: Content fallback
@@ -185,15 +216,15 @@ class ExecutionEngine:
         return {"error": f"Element '{step.target}' not found (vision + LLM + vision retry)"}
 
     async def _cache_tap_result(
-        self, step: TestStep, tc_id: str, page_hash_before: str, coords: dict[str, int]
+        self, step: TestStep, tc_id: str, context_hash: str, coords: dict[str, int]
     ) -> None:
         """将 tap 结果写入缓存."""
-        if not self.config.cache_enabled or not page_hash_before:
+        if not self.config.cache_enabled or not context_hash:
             return
         await self._wait_for_ui_stable()
         page_hash_after = await self._get_current_page_hash()
         self._coordinate_cache.put(
-            page_hash_before=page_hash_before,
+            context_hash=context_hash,
             action="tap",
             target=step.target,
             coord=coords,
@@ -201,9 +232,10 @@ class ExecutionEngine:
             tc_id=tc_id,
             step=step.step,
         )
+        self._log(f"  [Cache Write: '{step.target}' -> ({coords['x']}, {coords['y']}), ctx={context_hash}]")
 
     async def _fallback_to_vision(
-        self, step: TestStep, tc_id: str, page_hash_before: str
+        self, step: TestStep, tc_id: str, context_hash: str
     ) -> dict:
         """缓存校验失败时回退到视觉 API."""
         appium_url = self.session_manager.appium_url
@@ -220,7 +252,7 @@ class ExecutionEngine:
         await self._wait_for_ui_stable()
         page_hash_after = await self._get_current_page_hash()
         self._coordinate_cache.update(
-            page_hash_before=page_hash_before,
+            context_hash=context_hash,
             action="tap",
             target=step.target,
             coord=coords,
@@ -228,6 +260,7 @@ class ExecutionEngine:
             tc_id=tc_id,
             step=step.step,
         )
+        res["_source"] = ""  # 视觉识别（缓存校验失败后回退）
         return res
 
     # ── screen size (lazy) ──────────────────────────────────────────────
@@ -461,6 +494,9 @@ class ExecutionEngine:
         # learned in a previous TC doesn't carry over.
         self._suppressed_rules.clear()
 
+        # Clear action context stack for new TC to avoid cross-contamination
+        self._clear_action_context()
+
         if not self._check_precondition(tc):
             tc.execution.status = ExecutionStatus.BLOCKED
             tc.execution.error_message = "Precondition failed"
@@ -523,19 +559,20 @@ class ExecutionEngine:
             if step.action == "tap":
                 return await self._execute_tap_with_cache(step, tc.id)
             elif step.action == "type":
-                page_hash_before = await self._get_current_page_hash()
+                context_hash = self._get_context_hash()
                 cache_entry = None
-                if page_hash_before and self.config.cache_enabled:
-                    cache_entry = self._coordinate_cache.get(page_hash_before, "tap", step.target or "输入框")
+                if context_hash and self.config.cache_enabled:
+                    cache_entry = self._coordinate_cache.get(context_hash, "tap", step.target or "输入框")
 
                 if cache_entry:
                     self._log(f"  [Cache Hit: input field '{step.target}']")
                     coords = cache_entry.coord
+                    _source = f"cache:{cache_entry.tc_id}/step{cache_entry.step}"
                 else:
                     coords = await self._vision_find_element(step.target or "输入框")
-                    if coords and page_hash_before:
+                    if coords and context_hash:
                         self._coordinate_cache.put(
-                            page_hash_before=page_hash_before,
+                            context_hash=context_hash,
                             action="tap",
                             target=step.target or "输入框",
                             coord=coords,
@@ -543,6 +580,7 @@ class ExecutionEngine:
                             tc_id=tc.id,
                             step=step.step,
                         )
+                    _source = ""  # LLM vision识别
 
                 if coords:
                     await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=sid)
@@ -561,6 +599,7 @@ class ExecutionEngine:
                         res = {"error": "No text to type"}
                 else:
                     res = {"error": f"Input field '{step.target}' not found"}
+                res["_source"] = _source
                 return res
             elif step.action == "swipe":
                 parts = step.target.split(",")
@@ -757,8 +796,11 @@ class ExecutionEngine:
             success = False
             failure_type = FailureType.ACTION_FAILED
             error_message = str(e)
+            result = {}  # Ensure result exists for _source extraction
 
         elapsed = int((time.time() - step_start) * 1000)
+        # Extract source info from result (set by cache/vision execution)
+        _source = result.pop("_source", "") if isinstance(result, dict) else ""
         step_exec = StepExecution(
             step=step.step,
             action=step.action,
@@ -767,7 +809,12 @@ class ExecutionEngine:
             failure_type=failure_type,
             error_message=error_message,
             duration_ms=elapsed,
+            source=_source,
         )
+
+        # Push successful action to context stack for cache key generation
+        if success:
+            self._push_action_context(step.action, step.target)
 
         # ── On failure: save screenshot + vision analysis ──────────
         if not success:
@@ -1094,6 +1141,8 @@ class ExecutionEngine:
                             f"Popup dismissed: {rule_name} "
                             f"(tapped '{button_text}')"
                         )
+                        # Push popup dismiss to action context
+                        self._push_action_context("dismiss_popup", rule_name)
                         break
 
                 if not tapped:
@@ -1105,6 +1154,8 @@ class ExecutionEngine:
                     vision_ok = await self._dismiss_with_vision(rule_name)
                     if vision_ok:
                         tapped = True
+                        # Push popup dismiss to action context
+                        self._push_action_context("dismiss_popup", rule_name)
                     else:
                         self._suppressed_rules.add(rule_name)
                         self._log(

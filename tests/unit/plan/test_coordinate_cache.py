@@ -48,7 +48,7 @@ class TestCoordinateCache:
         """缓存命中返回条目."""
         cache = CoordinateCache()
         cache.put(
-            page_hash_before="abc123",
+            context_hash="abc123",
             action="tap",
             target="搜索框",
             coord={"x": 540, "y": 1200},
@@ -68,8 +68,8 @@ class TestCoordinateCache:
         result = cache.get("abc123", "tap", "搜索框")
         assert result is not None
 
-    def test_cache_miss_different_page_hash(self):
-        """不同页面哈希未命中."""
+    def test_cache_miss_different_context_hash(self):
+        """不同上下文哈希未命中."""
         cache = CoordinateCache()
         cache.put("abc123", "tap", "搜索框", {"x": 540, "y": 1200}, "def456", "TC-001", 3)
         result = cache.get("xyz789", "tap", "搜索框")
