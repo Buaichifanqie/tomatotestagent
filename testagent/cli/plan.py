@@ -790,6 +790,20 @@ async def _plan_command_async(
 
     # ── Persist confirmed cases to App Context Memory ──────────────────
     if memory_app_id:
+        # ── Record app version if available ───────────────────────────
+        try:
+            from testagent.db.engine import get_session
+            from testagent.db.repository import AppVersionRepository
+
+            async with get_session() as session:
+                av_repo = AppVersionRepository(session)
+                existing = await av_repo.get_by_app_id(memory_app_id)
+                if not existing:
+                    await av_repo.upsert(memory_app_id, version="unknown", updated_by="plan_command")
+        except Exception:
+            pass
+
+        # ── RAG write-back ────────────────────────────────────────────
         try:
             from testagent.rag.factories import create_pipeline
 
@@ -808,6 +822,41 @@ async def _plan_command_async(
                 typer.echo(f"  Saved {len(test_cases)} case(s) to App Context Memory.")
         except Exception as exc:
             typer.echo(f"  [App Context Memory write-back skipped: {exc}]")
+
+        # ── Dual-write: SQLite TestCaseRecord ────────────────────────
+        try:
+            from testagent.db.engine import get_session
+            from testagent.db.repository import TestCaseRecordRepository, AppVersionRepository
+            from testagent.models.test_case_record import TestCaseRecord
+
+            # Resolve app version from AppVersion table, fallback to ""
+            app_version = ""
+            try:
+                async with get_session() as session:
+                    av_repo = AppVersionRepository(session)
+                    av_record = await av_repo.get_by_app_id(memory_app_id)
+                    if av_record:
+                        app_version = av_record.current_version or ""
+            except Exception:
+                pass
+
+            async with get_session() as session:
+                tcr_repo = TestCaseRecordRepository(session)
+                for tc in test_cases:
+                    tc_content = serialize_cases_for_storage([tc])
+                    await tcr_repo.create(TestCaseRecord(
+                        app_id=memory_app_id,
+                        app_version=app_version,
+                        case_content=tc_content,
+                        source="generated",
+                        original_case_id=tc.id,
+                        confidence=0.5,
+                        tags=",".join(tc.requirement_ids) if tc.requirement_ids else "",
+                        scope="app_local",
+                    ))
+                typer.echo(f"  Saved {len(test_cases)} case record(s) to SQLite.")
+        except Exception as exc:
+            typer.echo(f"  [TestCaseRecord write skipped: {exc}]")
 
     # ── Phase 4: Execute all TCs ────────────────────────────────────────────
     typer.echo("Executing test cases...")
