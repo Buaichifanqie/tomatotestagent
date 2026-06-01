@@ -16,7 +16,10 @@ from testagent.plan.overall_evaluator import OverallEvaluator
 from testagent.plan.prd_parser import PrdParser
 from testagent.plan.report_generator import ReportGenerator
 from testagent.plan.test_case_generator import TestCaseGenerator
-from testagent.rag.app_memory import format_retrieved_cases_for_prompt
+from testagent.rag.app_memory import (
+    format_retrieved_cases_for_prompt,
+    serialize_cases_for_storage,
+)
 
 
 # ── helper functions ─────────────────────────────────────────────────────────
@@ -660,6 +663,27 @@ async def _plan_command_async(
     if not present_tc_to_user(test_cases, auto_yes=auto_yes):
         typer.echo("Execution cancelled by user.")
         return None
+
+    # ── Persist confirmed cases to App Context Memory ──────────────────
+    if app_package:
+        try:
+            from testagent.rag.factories import create_pipeline
+
+            rag_pipeline = create_pipeline(settings)
+            cases_text = serialize_cases_for_storage(test_cases)
+            if cases_text:
+                await rag_pipeline.write_back(
+                    content=cases_text,
+                    collection="app_test_cases",
+                    metadata={
+                        "app_package": app_package,
+                        "plan_name": name,
+                        "case_count": len(test_cases),
+                    },
+                )
+                typer.echo(f"  Saved {len(test_cases)} case(s) to App Context Memory.")
+        except Exception as exc:
+            typer.echo(f"  [App Context Memory write-back skipped: {exc}]")
 
     # ── Phase 4: Execute all TCs ────────────────────────────────────────────
     typer.echo("Executing test cases...")
