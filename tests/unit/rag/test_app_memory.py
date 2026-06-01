@@ -5,7 +5,7 @@ import json
 import pytest
 
 from testagent.plan.models import TestCase, TestStep
-from testagent.rag.app_memory import serialize_cases_for_storage, format_retrieved_cases_for_prompt
+from testagent.rag.app_memory import serialize_cases_for_storage, format_retrieved_cases_for_prompt, format_learned_patterns_for_prompt
 
 
 class TestSerializeCasesForStorage:
@@ -96,3 +96,37 @@ class TestFormatRetrievedCasesForPrompt:
         assert "历史用例 2" in result
         assert "90%" in result
         assert "80%" in result
+
+
+class TestFormatLearnedPatternsForPrompt:
+    """format_learned_patterns_for_prompt formats RAG results for prompt injection."""
+
+    def test_empty_results_returns_empty_string(self):
+        result = format_learned_patterns_for_prompt([])
+        assert result == ""
+
+    def test_single_pattern_with_confidence_stars(self):
+        from testagent.rag.pipeline import RAGResult
+        results = [
+            RAGResult(
+                doc_id="p1",
+                content="B站搜索页会保留历史搜索词，需先清除",
+                score=0.9,
+                metadata={"pattern_type": "behavior", "confidence": 0.8, "app_version": "7.45.0"},
+            )
+        ]
+        result = format_learned_patterns_for_prompt(results)
+        assert "B站搜索页会保留历史搜索词" in result
+        assert "★★★★" in result or "★★★" in result  # 0.8 confidence -> 4 stars
+        assert "behavior" in result or "行为模式" in result
+
+    def test_multiple_patterns_numbered(self):
+        from testagent.rag.pipeline import RAGResult
+        results = [
+            RAGResult(doc_id="a", content="模式1", score=0.9, metadata={"pattern_type": "behavior", "confidence": 0.9}),
+            RAGResult(doc_id="b", content="模式2", score=0.8, metadata={"pattern_type": "workaround", "confidence": 0.7}),
+        ]
+        result = format_learned_patterns_for_prompt(results)
+        assert "模式1" in result
+        assert "模式2" in result
+        assert "经验 1" in result or "Pattern 1" in result

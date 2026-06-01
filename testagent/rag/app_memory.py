@@ -59,3 +59,32 @@ def format_retrieved_cases_for_prompt(results: list[RAGResult]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def format_learned_patterns_for_prompt(results: list[RAGResult]) -> str:
+    """Format learned pattern RAG results into a prompt-ready context section."""
+    if not results:
+        return ""
+
+    PATTERN_TYPE_LABELS = {
+        "behavior": "行为模式",
+        "workaround": "绕行方案",
+        "anti_pattern": "反面模式",
+        "failure_mode": "失败模式",
+    }
+
+    lines: list[str] = ["以下是该 App 的已学习测试模式（仅供参考）：", ""]
+    for i, r in enumerate(results, 1):
+        meta = r.metadata
+        confidence = meta.get("confidence", 0.5)
+        stars = "★" * round(confidence * 5)
+        pattern_type = PATTERN_TYPE_LABELS.get(meta.get("pattern_type", ""), meta.get("pattern_type", ""))
+        version = meta.get("app_version", "")
+
+        lines.append(f"--- 经验 {i}（{pattern_type}，置信度: {stars}）---")
+        lines.append(r.content)
+        if version:
+            lines.append(f"来源版本: {version}")
+        lines.append("")
+
+    return "\n".join(lines)
