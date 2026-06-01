@@ -8,12 +8,14 @@ from sqlalchemy import Select, case, func, select
 from testagent.common.errors import DatabaseError
 from testagent.common.logging import get_logger
 from testagent.models.base import BaseModel
+from testagent.models.app_version import AppVersion
 from testagent.models.defect import Defect
 from testagent.models.learned_pattern import LearnedPattern
 from testagent.models.plan import TestPlan, TestTask
 from testagent.models.retrieval_trace import RetrievalTrace
 from testagent.models.result import TestResult
 from testagent.models.session import TestSession
+from testagent.models.test_case_record import TestCaseRecord
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -491,3 +493,86 @@ class LearnedPatternRepository(Repository[LearnedPattern]):
                 code="DB_LP_REJECT_FAILED",
                 details={"id": pattern_id, "error": str(exc)},
             ) from exc
+
+
+class AppVersionRepository(Repository[AppVersion]):
+    _model_class = AppVersion
+
+    async def get_by_app_id(self, app_id: str) -> AppVersion | None:
+        """Get the version record for an app."""
+        try:
+            stmt = self._base_query().where(AppVersion.app_id == app_id)
+            result = await self._session.execute(stmt)
+            return result.scalar_one_or_none()
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to get AppVersion for app_id: {app_id}",
+                code="DB_AV_BY_APP_FAILED",
+                details={"app_id": app_id, "error": str(exc)},
+            ) from exc
+
+    async def upsert(self, app_id: str, version: str, updated_by: str = "system") -> AppVersion:
+        """Create or update the version record for an app."""
+        try:
+            existing = await self.get_by_app_id(app_id)
+            if existing:
+                existing.current_version = version
+                existing.updated_by = updated_by
+                await self._session.flush()
+                return existing
+            entity = AppVersion(app_id=app_id, current_version=version, updated_by=updated_by)
+            return await self.create(entity)
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to upsert AppVersion for app_id: {app_id}",
+                code="DB_AV_UPSERT_FAILED",
+                details={"app_id": app_id, "error": str(exc)},
+            ) from exc
+
+
+class TestCaseRecordRepository(Repository[TestCaseRecord]):
+    _model_class = TestCaseRecord
+
+    async def get_by_app_id(self, app_id: str, limit: int = 50) -> list[TestCaseRecord]:
+        """Get case records for an app, ordered by created_at desc."""
+        try:
+            stmt = (
+                self._base_query()
+                .where(TestCaseRecord.app_id == app_id)
+                .order_by(TestCaseRecord.created_at.desc())
+                .limit(limit)
+            )
+            result = await self._session.execute(stmt)
+            return list(result.scalars().all())
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to get TestCaseRecords for app_id: {app_id}",
+                code="DB_TCR_BY_APP_FAILED",
+                details={"app_id": app_id, "error": str(exc)},
+            ) from exc
+
+    async def update_execution_stats(self, record_id: str, passed: bool) -> TestCaseRecord | None:
+        """Increment execution_count and optionally pass_count."""
+        try:
+            record = await self.get_by_id(record_id)
+            if not record:
+                return None
+            record.execution_count += 1
+            if passed:
+                record.pass_count += 1
+            await self._session.flush()
+            return record
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to update execution stats for record_id: {record_id}",
+                code="DB_TCR_EXEC_STATS_FAILED",
+                details={"record_id": record_id, "error": str(exc)},
+            ) from exc
+
+    async def update_validation_version(self, record_id: str, version: str) -> TestCaseRecord | None:
+        """Update last_validated_version."""
+        return await self.update(record_id, {"last_validated_version": version})
