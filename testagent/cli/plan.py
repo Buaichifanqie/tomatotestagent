@@ -617,29 +617,106 @@ async def _plan_command_async(
     # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────
     history_context = ""
     rag_results = []
+    two_stage_results = None
     if memory_app_id:
         try:
             from testagent.rag.factories import create_pipeline
+            from testagent.plan.two_stage_retrieval import run_two_stage_retrieval
+            from testagent.rag.app_memory import format_learned_patterns_for_prompt
 
             rag_pipeline = create_pipeline(settings)
-            rag_results = await rag_pipeline.query(
-                query_text=enhanced_prd,
-                collection="app_test_cases",
-                top_k=5,
-                filters={"app_package": memory_app_id},
+
+            # Two-stage retrieval: broad parallel search + refined dedup query
+            two_stage_results = await run_two_stage_retrieval(
+                rag_pipeline, enhanced_prd, memory_app_id,
             )
-            if rag_results:
-                history_context = format_retrieved_cases_for_prompt(rag_results)
-                typer.echo(f"  Found {len(rag_results)} historical case(s) from App Context Memory.")
+
+            cases = two_stage_results["cases"]
+            patterns = two_stage_results["patterns"]
+
+            if cases or patterns:
+                context_parts = []
+                if cases:
+                    context_parts.append(format_retrieved_cases_for_prompt(cases))
+                    typer.echo(f"  Found {len(cases)} historical case(s) from App Context Memory.")
+                if patterns:
+                    context_parts.append(format_learned_patterns_for_prompt(patterns))
+                    typer.echo(f"  Found {len(patterns)} learned pattern(s) from App Context Memory.")
+                history_context = "\n\n".join(context_parts)
+
+                # Flatten for trace recording
+                rag_results = cases + patterns
+            else:
+                typer.echo("  No historical cases or patterns found from App Context Memory.")
         except Exception as exc:
-            typer.echo(f"  [App Context Memory retrieval skipped: {exc}]")
+            typer.echo(f"  [App Context Memory two-stage retrieval skipped: {exc}]")
+            # Fallback: single-batch retrieval
+            try:
+                if "rag_pipeline" not in dir():
+                    from testagent.rag.factories import create_pipeline
+                    rag_pipeline = create_pipeline(settings)
+                rag_results = await rag_pipeline.query(
+                    query_text=enhanced_prd,
+                    collection="app_test_cases",
+                    top_k=5,
+                    filters={"app_id": memory_app_id},
+                )
+                if rag_results:
+                    history_context = format_retrieved_cases_for_prompt(rag_results)
+                    typer.echo(f"  Found {len(rag_results)} historical case(s) from App Context Memory (fallback).")
+            except Exception as fallback_exc:
+                typer.echo(f"  [App Context Memory fallback retrieval also skipped: {fallback_exc}]")
 
     # Inject history context before the user's requirement
     if history_context:
         enhanced_prd = history_context + "\n\n" + enhanced_prd
 
     # ── Record RetrievalTrace ────────────────────────────────────────────
-    if memory_app_id and rag_results:
+    if memory_app_id and two_stage_results:
+        try:
+            from testagent.db.engine import get_session
+            from testagent.db.repository import RetrievalTraceRepository
+            from testagent.models.retrieval_trace import RetrievalTrace as RetrievalTraceModel
+
+            async with get_session() as session:
+                repo = RetrievalTraceRepository(session)
+                # Record stage 1 trace (cases + patterns before dedup)
+                stage1_cases = two_stage_results.get("cases", [])[:3]
+                stage1_patterns = two_stage_results.get("patterns", [])[:3]
+                stage1_items = [
+                    {"id": r.doc_id, "score": r.score, "content_preview": r.content[:200]}
+                    for r in stage1_cases + stage1_patterns
+                ]
+                await repo.create(RetrievalTraceModel(
+                    app_id=memory_app_id,
+                    query=prd_text[:2000],
+                    query_stage="stage1",
+                    retrieved_items=stage1_items,
+                    generated_case_ids=[],
+                    adoption_score=None,
+                ))
+                # Record stage 2 trace (additional items after dedup)
+                all_cases = two_stage_results.get("cases", [])
+                all_patterns = two_stage_results.get("patterns", [])
+                stage1_ids = set(two_stage_results.get("stage1_doc_ids", []))
+                stage2_items = [
+                    {"id": r.doc_id, "score": r.score, "content_preview": r.content[:200]}
+                    for r in all_cases + all_patterns
+                    if r.doc_id not in stage1_ids
+                ]
+                if stage2_items:
+                    await repo.create(RetrievalTraceModel(
+                        app_id=memory_app_id,
+                        query=prd_text[:2000],
+                        query_stage="stage2",
+                        retrieved_items=stage2_items,
+                        generated_case_ids=[],
+                        adoption_score=None,
+                    ))
+        except Exception as exc:
+            typer.echo(f"  [RetrievalTrace save skipped: {exc}]")
+    elif memory_app_id and rag_results:
+        # Fallback trace for single-batch retrieval
         try:
             from testagent.db.engine import get_session
             from testagent.db.repository import RetrievalTraceRepository
@@ -649,14 +726,14 @@ async def _plan_command_async(
                 repo = RetrievalTraceRepository(session)
                 await repo.create(RetrievalTraceModel(
                     app_id=memory_app_id,
-                    query=prd_text[:2000],  # truncate long queries
+                    query=prd_text[:2000],
                     query_stage="single_batch",
                     retrieved_items=[
                         {"id": r.doc_id, "score": r.score, "content_preview": r.content[:200]}
                         for r in rag_results
                     ],
-                    generated_case_ids=[],  # filled after TC generation
-                    adoption_score=None,  # Phase 3
+                    generated_case_ids=[],
+                    adoption_score=None,
                 ))
         except Exception as exc:
             typer.echo(f"  [RetrievalTrace save skipped: {exc}]")
@@ -723,7 +800,7 @@ async def _plan_command_async(
                     content=cases_text,
                     collection="app_test_cases",
                     metadata={
-                        "app_package": memory_app_id,
+                        "app_id": memory_app_id,
                         "plan_name": name,
                         "case_count": len(test_cases),
                     },
