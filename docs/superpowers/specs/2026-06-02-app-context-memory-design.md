@@ -26,6 +26,21 @@
 
 ## 2. 数据模型
 
+### 2.0 App 标识
+
+`app_id` 是 Per-App 隔离的核心维度，格式为 Android 逆域名（如 `com.bilibili.app`）或 iOS Bundle ID。
+
+**输入途径**（优先级从高到低）：
+
+| 途径 | 示例 | 说明 |
+|------|------|------|
+| CLI 参数 | `testagent app plan "测试搜索" --app-id com.bilibili.app` | 最高优先级 |
+| 配置文件 | 项目根目录 `testagent.yaml` 中 `default_app_id` | 项目级默认值 |
+| 自动检测 | `adb shell pm list packages -3` + LLM 匹配 | 已有实现，复用 |
+| 交互确认 | 首次为某 App 生成 case 时，CLI 提示输入 | fallback |
+
+`app_id` 一旦确定，在同一 plan 流程中贯穿所有存储和检索操作。
+
 ### 2.1 TestCaseRecord — 测试用例记录
 
 ```python
@@ -44,7 +59,7 @@ class TestCaseRecord:
     scope: str                        # "app_local" | "global"，预留跨 App
     created_at: datetime
     updated_at: datetime              # 最后修改时间
-    last_validated_at: datetime | None  # 上次确认可用的版本时间
+    last_validated_version: str | None  # 上次验证通过时的 App 版本，None 表示未验证
     execution_count: int = 0          # 执行次数
     pass_count: int = 0               # 通过次数
 ```
@@ -102,6 +117,17 @@ class LearnedPattern:
 updated_confidence = min(1.0, existing.confidence + 0.05)
 ```
 
+**写入流程**（每次写入新经验前必须执行）：
+
+```
+1. 新经验 embedding
+2. 在 app_learned_patterns 中检索相似经验（similarity > 0.9）
+3. 如果命中 → 叠加 occurrence_count，提升 confidence（不新增）
+4. 如果未命中 → 新增记录
+```
+
+这是写入流程的必要步骤，不是可选优化。成本：一次向量检索 + 一次写入。
+
 ### 2.3 RetrievalTrace — 检索追踪
 
 ```python
@@ -113,9 +139,33 @@ class RetrievalTrace:
     query_stage: str                  # "stage1_app_context" | "stage2_case_context" | "single_batch"
     retrieved_items: list[dict]       # [{id, type, score, version, confidence}]
     generated_case_ids: list[str]     # 最终生成的 case ID 列表
-    adoption_score: float | None      # 生成内容与检索结果的重叠度（后计算）
+    adoption_score: float | None      # 生成内容与检索结果的重叠度（见下方公式）
     created_at: datetime
 ```
+
+**adoption_score 计算方式**：
+
+```python
+def compute_adoption_score(generated_cases: list[str], retrieved_items: list[dict]) -> float:
+    """
+    计算生成内容对检索结果的采纳度。
+    方法：对每条检索结果，检查生成内容是否包含其关键信息（语义相似度 > 阈值）。
+    返回被采纳的检索结果占比。
+    """
+    if not retrieved_items:
+        return 0.0
+
+    adopted = 0
+    generated_text = " ".join(generated_cases)
+    for item in retrieved_items:
+        sim = cosine_similarity(embed(generated_text), embed(item["content"]))
+        if sim > 0.85:  # 阈值可调
+            adopted += 1
+
+    return adopted / len(retrieved_items)
+```
+
+Phase 1 先记 `adoption_score=None`（不计算），Phase 3 补计算逻辑。需要额外 embedding 调用，成本可控。
 
 ### 2.4 AppVersion — 版本注册
 
@@ -251,8 +301,13 @@ app_plan 启动
 ### 5.2 版本衰减
 
 ```python
-def version_weight(current_version: str, item_version: str, base: float) -> float:
-    gap = parse_version_gap(current_version, item_version)
+def get_effective_version(record) -> str:
+    """返回有效版本：验证通过时的版本优先，否则用创建时版本。"""
+    return record.last_validated_version or record.app_version
+
+def version_weight(current_version: str, record, base: float) -> float:
+    effective = get_effective_version(record)
+    gap = parse_version_gap(current_version, effective)
     if gap == 0:
         return 1.0
     return base ** gap
@@ -297,7 +352,8 @@ def time_weight(created_at: datetime, now: datetime,
 当用户在 v7.46 重新跑通了基于 v7.45 的旧 case 时：
 
 ```python
-record.last_validated_at = now  # 版本衰减从 v7.46 重新算
+record.last_validated_version = current_version  # e.g. "7.46.0"
+# version_weight 将用 last_validated_version="7.46.0" 计算差距，而非 app_version="7.45.0"
 ```
 
 ### 5.5 版本更新入口
@@ -394,6 +450,8 @@ def _is_meaningful_target_change(old_target: str, new_target: str) -> bool:
 | 保存 | 写入经验池，review_status="approved" | 正样本 |
 | 修改后保存 | 用户修正后写入，review_status="approved" | 正样本 + 修正信号 |
 | 忽略 | 不写入，但记录忽略原因到 source_case 的元数据 | **负样本** |
+
+**UI 载体**：Phase 2 使用 CLI 交互（`questionary` 库，支持选择列表和文本输入），与现有 `testagent/cli/plan.py` 的编辑器交互风格一致。后续有 Web UI 时再迁移渲染层，逻辑层不变。
 
 ---
 
