@@ -93,7 +93,7 @@ class LearnedPattern:
     app_version: str                  # 经验来源版本
     pattern: str                      # 经验描述（自然语言）
     pattern_type: str                 # "behavior" | "workaround" | "anti_pattern" | "failure_mode"
-    source_case_id: str               # 来源 case ID
+    source_case_id: str | None        # 来源 case ID，manual_entry 时为 None
     source_type: str                  # "modification_delta" | "failure_analysis" | "manual_entry"
     confidence: float                 # 0.0~1.0
     scope: str                        # "app_local" | "global"
@@ -227,14 +227,13 @@ app_plan 启动
     └── DB:  高频场景统计 (SQL)
     │
     ▼
-  后处理：版本衰减 × 时间衰减 × 置信度加权
-    │
-    ▼
-  注入 prompt → 一次性生成所有用例
+  注入 prompt → 一次性生成所有用例（原始相似度排序，不做衰减）
     │
     ▼
   记录 RetrievalTrace
 ```
+
+Phase 1 不做后处理（版本衰减、时间衰减、置信度加权），理由：数据量少时衰减边际收益为零，且无 AppVersion 表无法获取 current_version。后处理统一在 Phase 3 上线。
 
 **Prompt Token 预算**（32K 窗口）：
 
@@ -272,6 +271,8 @@ app_plan 启动
   记录 RetrievalTrace（对比两个 stage 的 adoption_score）
 ```
 
+Phase 2 同样不做后处理，原始相似度排序。后处理在 Phase 3 统一上线后对所有 Phase 生效。
+
 **A → B 升级路径**：Stage 1 逻辑不变，只是把原来混在一起的「历史案例检索」挪到 Stage 2，用更精准的 query 重新检索。拆分 + 加一次调用，不需要重写。
 
 ### 4.3 冲突消解
@@ -296,6 +297,8 @@ app_plan 启动
 
 ```
 最终检索分数 = 原始相似度 × version_weight × time_weight × confidence_weight
+
+confidence_weight = record.confidence  # 直接使用动态置信度，不做非线性映射
 ```
 
 ### 5.2 版本衰减
