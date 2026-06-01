@@ -47,7 +47,7 @@ class TestSerializeCasesForStorage:
         assert "TC-001" in result
         assert "TC-002" in result
         # Cases are separated by a delimiter
-        assert "---" in result or "\n\n" in result
+        assert "---" in result
 
     def test_output_is_valid_text(self):
         """Output should be plain text suitable for RAG chunking, not JSON."""
@@ -80,7 +80,7 @@ class TestFormatRetrievedCasesForPrompt:
         ]
         result = format_retrieved_cases_for_prompt(results)
         assert "TC-001" in result
-        assert "0.92" in result or "92%" in result
+        assert "92%" in result
 
     def test_multiple_results_numbered(self):
         from testagent.rag.pipeline import RAGResult
@@ -92,3 +92,7 @@ class TestFormatRetrievedCasesForPrompt:
         result = format_retrieved_cases_for_prompt(results)
         assert "用例1" in result
         assert "用例2" in result
+        assert "历史用例 1" in result
+        assert "历史用例 2" in result
+        assert "90%" in result
+        assert "80%" in result
