@@ -476,6 +476,7 @@ def plan_command(
     name: str = "",
     app_package: str = "",
     app_activity: str = "",
+    app_id: str = "",
     auto_yes: bool = False,
 ) -> str | None:
     """Main orchestration function — sync entry point for the Typer CLI.
@@ -486,7 +487,7 @@ def plan_command(
     return asyncio.run(_plan_command_async(
         requirement, name=name,
         app_package=app_package, app_activity=app_activity,
-        auto_yes=auto_yes,
+        app_id=app_id, auto_yes=auto_yes,
     ))
 
 
@@ -495,6 +496,7 @@ async def _plan_command_async(
     name: str = "",
     app_package: str = "",
     app_activity: str = "",
+    app_id: str = "",
     auto_yes: bool = False,
 ) -> str | None:
     """Async implementation of the full plan lifecycle.
@@ -559,6 +561,9 @@ async def _plan_command_async(
         if detected:
             app_package = detected
 
+    # ── Derive app identifier for App Context Memory ────────────────────
+    memory_app_id = app_id or app_package  # explicit --app-id takes priority
+
     # ── Set up output directory ─────────────────────────────────────────────
     output_dir = setup_output_dir(name)
     typer.echo(f"Output directory: {output_dir}")
@@ -611,7 +616,7 @@ async def _plan_command_async(
 
     # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────
     history_context = ""
-    if app_package:
+    if memory_app_id:
         try:
             from testagent.rag.factories import create_pipeline
 
@@ -620,7 +625,7 @@ async def _plan_command_async(
                 query_text=enhanced_prd,
                 collection="app_test_cases",
                 top_k=5,
-                filters={"app_package": app_package},
+                filters={"app_package": memory_app_id},
             )
             if rag_results:
                 history_context = format_retrieved_cases_for_prompt(rag_results)
@@ -665,7 +670,7 @@ async def _plan_command_async(
         return None
 
     # ── Persist confirmed cases to App Context Memory ──────────────────
-    if app_package:
+    if memory_app_id:
         try:
             from testagent.rag.factories import create_pipeline
 
@@ -676,7 +681,7 @@ async def _plan_command_async(
                     content=cases_text,
                     collection="app_test_cases",
                     metadata={
-                        "app_package": app_package,
+                        "app_package": memory_app_id,
                         "plan_name": name,
                         "case_count": len(test_cases),
                     },

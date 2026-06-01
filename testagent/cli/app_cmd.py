@@ -13,6 +13,7 @@ def plan(
     name: str = typer.Option("", "--name", "-n", help="自定义计划名称"),
     app_package: str = typer.Option("", "--app-package", "-p", help="App package name"),
     app_activity: str = typer.Option("", "--app-activity", "-a", help="App launch activity"),
+    app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.bilibili.app），默认使用 app-package"),
     auto_yes: bool = typer.Option(
         False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"
     ),
@@ -41,5 +42,6 @@ def plan(
         name=name,
         app_package=app_package,
         app_activity=app_activity,
+        app_id=app_id,
         auto_yes=auto_yes,
     )
