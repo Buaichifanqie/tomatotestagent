@@ -9,6 +9,7 @@ RAG_COLLECTIONS: dict[str, dict[str, Any]] = {
     "test_reports": {"description": "历史测试报告", "access": ["analyzer"]},
     "locator_library": {"description": "UI 定位器库", "access": ["executor"]},
     "failure_patterns": {"description": "失败模式库", "access": ["analyzer"]},
+    "app_test_cases": {"description": "历史测试用例（Per-App 记忆）", "access": ["planner"]},
 }
 
 
