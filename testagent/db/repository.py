@@ -10,6 +10,7 @@ from testagent.common.logging import get_logger
 from testagent.models.base import BaseModel
 from testagent.models.defect import Defect
 from testagent.models.plan import TestPlan, TestTask
+from testagent.models.retrieval_trace import RetrievalTrace
 from testagent.models.result import TestResult
 from testagent.models.session import TestSession
 
@@ -404,4 +405,25 @@ class DefectRepository(Repository[Defect]):
                 f"Failed to get defect trends for days={days}",
                 code="DB_DEFECT_TRENDS_FAILED",
                 details={"days": days, "error": str(exc)},
+            ) from exc
+
+
+class RetrievalTraceRepository(Repository[RetrievalTrace]):
+    _model_class = RetrievalTrace
+
+    async def get_by_app_id(self, app_id: str, limit: int = 20) -> list[RetrievalTrace]:
+        try:
+            stmt = (
+                self._base_query()
+                .where(RetrievalTrace.app_id == app_id)
+                .order_by(RetrievalTrace.created_at.desc())
+                .limit(limit)
+            )
+            result = await self._session.execute(stmt)
+            return list(result.scalars().all())
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to get traces for app_id: {app_id}",
+                code="DB_TRACE_BY_APP_FAILED",
+                details={"app_id": app_id, "error": str(exc)},
             ) from exc

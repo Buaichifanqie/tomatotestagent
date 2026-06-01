@@ -616,6 +616,7 @@ async def _plan_command_async(
 
     # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────
     history_context = ""
+    rag_results = []
     if memory_app_id:
         try:
             from testagent.rag.factories import create_pipeline
@@ -636,6 +637,29 @@ async def _plan_command_async(
     # Inject history context before the user's requirement
     if history_context:
         enhanced_prd = history_context + "\n\n" + enhanced_prd
+
+    # ── Record RetrievalTrace ────────────────────────────────────────────
+    if memory_app_id and rag_results:
+        try:
+            from testagent.db.engine import get_session
+            from testagent.db.repository import RetrievalTraceRepository
+            from testagent.models.retrieval_trace import RetrievalTrace as RetrievalTraceModel
+
+            async with get_session() as session:
+                repo = RetrievalTraceRepository(session)
+                await repo.create(RetrievalTraceModel(
+                    app_id=memory_app_id,
+                    query=prd_text[:2000],  # truncate long queries
+                    query_stage="single_batch",
+                    retrieved_items=[
+                        {"id": r.doc_id, "score": r.score, "content_preview": r.content[:200]}
+                        for r in rag_results
+                    ],
+                    generated_case_ids=[],  # filled after TC generation
+                    adoption_score=None,  # Phase 3
+                ))
+        except Exception as exc:
+            typer.echo(f"  [RetrievalTrace save skipped: {exc}]")
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
     test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)

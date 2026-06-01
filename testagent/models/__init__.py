@@ -13,6 +13,7 @@ from testagent.models.plan import (
 from testagent.models.result import RESULT_STATUSES, TestResult
 from testagent.models.session import SESSION_STATUSES, TRIGGER_TYPES, TestSession
 from testagent.models.skill import SkillDefinition
+from testagent.models.retrieval_trace import RetrievalTrace
 from testagent.models.snapshot import SNAPSHOT_STATUSES, ExecutionSnapshotModel
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "ExecutionSnapshotModel",
     "JSONType",
     "MCPConfig",
+    "RetrievalTrace",
     "SkillDefinition",
     "TestPlan",
     "TestResult",
