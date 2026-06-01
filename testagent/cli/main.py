@@ -27,6 +27,7 @@ _fix_win_console()
 from testagent.cli.app_cmd import app_typer as app_group
 from testagent.cli.config_cmd import config_app
 from testagent.cli.mcp_cmd import mcp_app
+from testagent.cli.memory_cmd import memory_typer as memory_group
 from testagent.cli.output import RichOutput
 from testagent.cli.rag_cmd import rag_index, rag_query
 from testagent.cli.skill_cmd import skill_app
@@ -173,6 +174,7 @@ app.add_typer(config_app)
 app.add_typer(skill_app)
 app.add_typer(mcp_app)
 app.add_typer(app_group)  # testagent app plan, etc.
+app.add_typer(memory_group)  # testagent memory list-patterns, approve, etc.
 
 
 @app.command()
