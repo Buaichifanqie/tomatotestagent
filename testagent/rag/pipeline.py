@@ -323,8 +323,9 @@ class RAGPipeline:
         content: str,
         collection: str,
         metadata: dict[str, Any],
+        chunk_size: int = 512,
     ) -> None:
-        raw_chunks = self._text_chunker.chunk(content)
+        raw_chunks = self._text_chunker.chunk(content, chunk_size=chunk_size)
         doc_id_input = f"{collection}:write_back:{hashlib.sha256(content.encode()).hexdigest()}"
         doc_id = hashlib.sha256(doc_id_input.encode()).hexdigest()[:16]
 
