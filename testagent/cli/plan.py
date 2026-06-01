@@ -16,6 +16,7 @@ from testagent.plan.overall_evaluator import OverallEvaluator
 from testagent.plan.prd_parser import PrdParser
 from testagent.plan.report_generator import ReportGenerator
 from testagent.plan.test_case_generator import TestCaseGenerator
+from testagent.rag.app_memory import format_retrieved_cases_for_prompt
 
 
 # ── helper functions ─────────────────────────────────────────────────────────
@@ -604,6 +605,29 @@ async def _plan_command_async(
         app_info_parts.append(f"Android launch activity: {app_activity}")
     if app_info_parts:
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
+
+    # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────
+    history_context = ""
+    if app_package:
+        try:
+            from testagent.rag.factories import create_pipeline
+
+            rag_pipeline = create_pipeline(settings)
+            rag_results = await rag_pipeline.query(
+                query_text=enhanced_prd,
+                collection="app_test_cases",
+                top_k=5,
+                filters={"app_package": app_package},
+            )
+            if rag_results:
+                history_context = format_retrieved_cases_for_prompt(rag_results)
+                typer.echo(f"  Found {len(rag_results)} historical case(s) from App Context Memory.")
+        except Exception as exc:
+            typer.echo(f"  [App Context Memory retrieval skipped: {exc}]")
+
+    # Inject history context before the user's requirement
+    if history_context:
+        enhanced_prd = history_context + "\n\n" + enhanced_prd
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
     test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
