@@ -689,9 +689,27 @@ async def _plan_command_async(
                             step.value = step.value.replace(wrong, app_package)
 
     # ── Phase 3: Present to user ────────────────────────────────────────────
+    original_steps = {tc.id: [{"step": s.step, "action": s.action, "target": s.target, "value": s.value, "description": s.description} for s in tc.steps] for tc in test_cases}
     if not present_tc_to_user(test_cases, auto_yes=auto_yes):
         typer.echo("Execution cancelled by user.")
         return None
+
+    # ── Phase 3.5: Delta extraction and learning ─────────────────────────
+    if memory_app_id:
+        try:
+            from testagent.plan.delta_extractor import process_deltas_and_confirm
+            from testagent.rag.factories import create_pipeline as _create_pipe
+            _rag_pipe = _create_pipe(settings)
+            await process_deltas_and_confirm(
+                test_cases=test_cases,
+                original_steps=original_steps,
+                app_id=memory_app_id,
+                plan_name=name,
+                llm_callable=_build_llm_callable(),
+                rag_pipeline=_rag_pipe,
+            )
+        except Exception as exc:
+            typer.echo(f"  [Delta extraction skipped: {exc}]")
 
     # ── Persist confirmed cases to App Context Memory ──────────────────
     if memory_app_id:
