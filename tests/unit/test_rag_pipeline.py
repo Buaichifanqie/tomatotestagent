@@ -195,6 +195,7 @@ class TestCollectionManager:
             "test_reports",
             "locator_library",
             "failure_patterns",
+            "app_test_cases",
         }
         assert set(RAG_COLLECTIONS.keys()) == expected_keys
         for _name, info in RAG_COLLECTIONS.items():
