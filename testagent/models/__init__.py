@@ -1,5 +1,6 @@
 from testagent.models.base import Base, BaseModel, DateTimeTZ, JSONType
 from testagent.models.defect import DEFECT_CATEGORIES, DEFECT_SEVERITIES, DEFECT_STATUSES, Defect
+from testagent.models.learned_pattern import LearnedPattern
 from testagent.models.mcp_config import MCPConfig
 from testagent.models.plan import (
     ISOLATION_LEVELS,
@@ -35,6 +36,7 @@ __all__ = [
     "Defect",
     "ExecutionSnapshotModel",
     "JSONType",
+    "LearnedPattern",
     "MCPConfig",
     "RetrievalTrace",
     "SkillDefinition",
