@@ -9,6 +9,7 @@ from testagent.common.errors import DatabaseError
 from testagent.common.logging import get_logger
 from testagent.models.base import BaseModel
 from testagent.models.defect import Defect
+from testagent.models.learned_pattern import LearnedPattern
 from testagent.models.plan import TestPlan, TestTask
 from testagent.models.retrieval_trace import RetrievalTrace
 from testagent.models.result import TestResult
@@ -426,4 +427,67 @@ class RetrievalTraceRepository(Repository[RetrievalTrace]):
                 f"Failed to get traces for app_id: {app_id}",
                 code="DB_TRACE_BY_APP_FAILED",
                 details={"app_id": app_id, "error": str(exc)},
+            ) from exc
+
+
+class LearnedPatternRepository(Repository[LearnedPattern]):
+    _model_class = LearnedPattern
+
+    async def get_by_app_id(
+        self,
+        app_id: str,
+        status_filter: str | None = None,
+        limit: int = 20,
+    ) -> list[LearnedPattern]:
+        try:
+            stmt = (
+                self._base_query()
+                .where(LearnedPattern.app_id == app_id)
+                .order_by(LearnedPattern.created_at.desc())
+                .limit(limit)
+            )
+            if status_filter is not None:
+                stmt = stmt.where(LearnedPattern.review_status == status_filter)
+            result = await self._session.execute(stmt)
+            return list(result.scalars().all())
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to get learned patterns for app_id: {app_id}",
+                code="DB_LP_BY_APP_FAILED",
+                details={"app_id": app_id, "error": str(exc)},
+            ) from exc
+
+    async def approve(self, pattern_id: str) -> LearnedPattern | None:
+        try:
+            pattern = await self.get_by_id(pattern_id)
+            if pattern is None:
+                return None
+            pattern.review_status = "approved"
+            await self._session.flush()
+            return pattern
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to approve learned pattern id={pattern_id}",
+                code="DB_LP_APPROVE_FAILED",
+                details={"id": pattern_id, "error": str(exc)},
+            ) from exc
+
+    async def reject(self, pattern_id: str, reason: str = "") -> LearnedPattern | None:
+        try:
+            pattern = await self.get_by_id(pattern_id)
+            if pattern is None:
+                return None
+            pattern.review_status = "rejected"
+            pattern.review_reason = reason
+            await self._session.flush()
+            return pattern
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            raise DatabaseError(
+                f"Failed to reject learned pattern id={pattern_id}",
+                code="DB_LP_REJECT_FAILED",
+                details={"id": pattern_id, "error": str(exc)},
             ) from exc
