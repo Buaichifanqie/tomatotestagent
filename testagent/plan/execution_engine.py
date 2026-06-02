@@ -150,6 +150,7 @@ class ExecutionEngine:
                     subprocess.run,
                     ["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"],
                     capture_output=True, text=True, timeout=10,
+                    encoding="utf-8", errors="replace",
                 )
                 await asyncio.sleep(1)
                 return {"_source": "adb:KEYCODE_ENTER"}
@@ -395,6 +396,16 @@ class ExecutionEngine:
             f"  [Session creation failed after {max_attempts} attempts, giving up]"
         )
         return None
+
+    async def _recover_session(self) -> None:
+        """Attempt to recover a dead Appium session before taking a failure screenshot."""
+        try:
+            new_sid = self.session_manager.recover_session()
+            if new_sid:
+                self._log(f"  [Session recovered: {new_sid[:12]}...]")
+                await asyncio.sleep(2)
+        except Exception as exc:
+            self._log(f"  [Session recovery failed: {exc}]")
 
     async def execute_all(self, test_cases: list[TestCase]) -> list[TestCase]:
         """Execute all test cases sequentially.
@@ -687,6 +698,7 @@ class ExecutionEngine:
                         subprocess.run,
                         ["adb", "shell", cmd],
                         capture_output=True, text=True, timeout=15,
+                        encoding="utf-8", errors="replace",
                     )
                     return {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
                 except subprocess.TimeoutExpired:

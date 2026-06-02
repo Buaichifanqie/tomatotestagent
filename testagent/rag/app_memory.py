@@ -5,8 +5,132 @@ and formats RAG retrieval results for prompt injection.
 """
 from __future__ import annotations
 
+import re
+
 from testagent.plan.models import TestCase
 from testagent.rag.pipeline import RAGResult
+
+
+# ── Functional relevance filtering ──────────────────────────────────────────
+
+
+def _extract_module_from_id(case_id: str) -> str | None:
+    """TC-VIDEO-007 → VIDEO, TC-SEARCH-016 → SEARCH."""
+    match = re.match(r"TC-(\w+)-\d+", case_id)
+    return match.group(1) if match else None
+
+
+def _extract_function_keywords(user_intent: str) -> list[str]:
+    """Extract functional keywords from user intent.
+
+    "测试哔哩哔哩搜索功能" → ["搜索"]
+    "测试登录和支付" → ["登录", "支付"]
+    """
+    # Strip common prefix
+    cleaned = re.sub(r"^测试|^test|^验证", "", user_intent, flags=re.IGNORECASE).strip()
+    # Strip "功能/feature/functionality" suffix
+    cleaned = re.sub(r"功能$|feature$|functionality$", "", cleaned, flags=re.IGNORECASE).strip()
+    # Split on delimiters
+    parts = re.split(r"[、，,和与及还有]+", cleaned)
+    keywords = [p.strip() for p in parts if p.strip()]
+    return keywords
+
+
+def _is_functionally_relevant(
+    intent_keywords: list[str],
+    case_tags: list[str],
+    case_module: str | None,
+) -> bool:
+    """Determine if a case is functionally relevant to the user intent."""
+    if not case_module and not case_tags:
+        return True
+    if not intent_keywords:
+        return True
+
+    module_lower = (case_module or "").lower()
+
+    for kw in intent_keywords:
+        kw_lower = kw.lower()
+        # Direct substring match (covers English ↔ English)
+        if kw_lower in module_lower or module_lower in kw_lower:
+            return True
+        # Chinese keyword → English module mapping (substring: "哔哩哔哩搜索" contains "搜索")
+        for known_kw, mapped_module in _KEYWORD_TO_MODULE.items():
+            if known_kw in kw_lower and mapped_module == module_lower:
+                return True
+
+    for tag in case_tags:
+        for kw in intent_keywords:
+            if kw.lower() in tag.lower() or tag.lower() in kw.lower():
+                return True
+
+    return False
+
+
+# Chinese functional keyword → English module name mapping
+# TODO: Phase 4 — auto-generate from historical case tags, replacing this hand-written table
+_KEYWORD_TO_MODULE: dict[str, str] = {
+    "搜索": "search",
+    "登录": "login",
+    "注册": "register",
+    "支付": "pay",
+    "视频": "video",
+    "评论": "comment",
+    "弹幕": "danmaku",
+    "收藏": "favorite",
+    "分享": "share",
+    "点赞": "like",
+    "播放": "video",
+    "首页": "home",
+    "设置": "setting",
+    "消息": "message",
+    "通知": "notification",
+    "个人": "profile",
+    "用户": "user",
+    "订单": "order",
+    "购物": "cart",
+    "下载": "download",
+    "上传": "upload",
+    "权限": "permission",
+    "网络": "network",
+}
+
+
+def filter_by_functional_relevance(
+    results: list[RAGResult],
+    user_intent: str,
+) -> list[RAGResult]:
+    """Filter out RAG results that are not functionally relevant to the user intent.
+
+    Keeps:
+    - Cases whose MODULE prefix matches an intent keyword (SEARCH ↔ 搜索)
+    - Non-case results (patterns, docs) — always kept
+    - Cases with no identifiable module — kept as fallback
+
+    Removes:
+    - Cases whose MODULE prefix clearly doesn't match (VIDEO ↔ 搜索)
+    """
+    if not results:
+        return []
+
+    intent_keywords = _extract_function_keywords(user_intent)
+    if not intent_keywords:
+        return results
+
+    filtered: list[RAGResult] = []
+    for r in results:
+        # Non-case results (patterns, docs) are always kept
+        if r.metadata.get("collection") != "app_test_cases":
+            filtered.append(r)
+            continue
+
+        case_tags = r.metadata.get("tags", [])
+        case_module = _extract_module_from_id(r.doc_id)
+
+        if _is_functionally_relevant(intent_keywords, case_tags, case_module):
+            filtered.append(r)
+
+    return filtered
 
 
 def serialize_cases_for_storage(cases: list[TestCase]) -> str:
@@ -51,7 +175,7 @@ def format_retrieved_cases_for_prompt(results: list[RAGResult]) -> str:
     if not results:
         return ""
 
-    lines: list[str] = ["以下是该 App 的历史测试用例（仅供参考，避免重复）：", ""]
+    lines: list[str] = ["以下是该 App 的历史测试用例（仅供参考，用于学习步骤写法和元素定位，不要照搬功能范围）：", ""]
     for i, r in enumerate(results, 1):
         score_pct = f"{r.score * 100:.0f}%"
         lines.append(f"--- 历史用例 {i}（相似度: {score_pct}）---")
@@ -66,7 +190,7 @@ def format_doc_results_for_prompt(results: list[RAGResult]) -> str:
     if not results:
         return ""
 
-    lines: list[str] = ["以下是该 App 的相关文档（仅供参考）：", ""]
+    lines: list[str] = ["以下是该 App 的相关文档（仅供参考，用于了解 App 行为和 UI 元素）：", ""]
     for i, r in enumerate(results, 1):
         score_pct = f"{r.score * 100:.0f}%"
         doc_type = r.metadata.get("doc_type", "文档")
@@ -89,7 +213,7 @@ def format_learned_patterns_for_prompt(results: list[RAGResult]) -> str:
         "failure_mode": "失败模式",
     }
 
-    lines: list[str] = ["以下是该 App 的已学习测试模式（仅供参考）：", ""]
+    lines: list[str] = ["以下是该 App 的已学习测试模式（仅供参考，用于优化步骤写法）：", ""]
     for i, r in enumerate(results, 1):
         meta = r.metadata
         confidence = meta.get("confidence", 0.5)

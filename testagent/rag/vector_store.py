@@ -99,13 +99,17 @@ class ChromaDBVectorStore:
 
         def _query_sync() -> Any:
             where_clause: dict[str, Any] | None = None
-            if filters is not None:
-                where_clause = {}
+            if filters is not None and filters:
+                conditions: list[dict[str, Any]] = []
                 for key, value in filters.items():
                     if isinstance(value, list):
-                        where_clause[key] = {"$in": value}
+                        conditions.append({key: {"$in": value}})
                     else:
-                        where_clause[key] = value
+                        conditions.append({key: value})
+                if len(conditions) == 1:
+                    where_clause = conditions[0]
+                elif len(conditions) > 1:
+                    where_clause = {"$and": conditions}
             return self._collection.query(
                 query_embeddings=[query_vector],
                 n_results=top_k,

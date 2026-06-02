@@ -140,7 +140,7 @@ class ReportGenerator:
                     elif ev.type == "screenshot" and ev_path.exists():
                         rel = ev_path.relative_to(self._output_dir)
                         lines.append(
-                            f"- 🖼️ [截图]({rel.as_posix()})"
+                            f"- 🖼️ <img src=\"{rel.as_posix()}\" width=\"360\">"
                         )
                 lines.append("")
 
@@ -171,7 +171,7 @@ class ReportGenerator:
                         try:
                             rel = scr_path.relative_to(self._output_dir)
                             lines.append("")
-                            lines.append(f"  ![失败截图]({rel.as_posix()})")
+                            lines.append(f'  <img src="{rel.as_posix()}" width="360" alt="失败截图">')
                             lines.append("")
                         except ValueError:
                             pass

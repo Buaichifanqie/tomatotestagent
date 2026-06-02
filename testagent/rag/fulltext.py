@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Protocol, runtime_checkable
 
 from meilisearch_python_async import Client as MeiliClient
@@ -33,6 +34,8 @@ class MeilisearchFullText:
         self._api_key = api_key
         self._index_name = index_name
         self._client: MeiliClient | None = None
+        self._index_ensured = False
+        self._ensure_lock = asyncio.Lock()
 
     async def _get_client(self) -> MeiliClient:
         if self._client is None:
@@ -40,14 +43,24 @@ class MeilisearchFullText:
         return self._client
 
     async def _ensure_index(self) -> None:
-        client = await self._get_client()
-        try:
-            await client.get_index(self._index_name)
-        except Exception:
-            await client.create_index(self._index_name, primary_key="id")
+        if self._index_ensured:
+            return
+        async with self._ensure_lock:
+            if self._index_ensured:
+                return
+            client = await self._get_client()
+            try:
+                await client.get_index(self._index_name)
+            except Exception:
+                await client.create_index(self._index_name, primary_key="id")
 
-        index = client.index(self._index_name)
-        await index.update_filterable_attributes(["collection"])
+            try:
+                index = client.index(self._index_name)
+                await index.update_filterable_attributes(["collection", "app_id"])
+                self._index_ensured = True
+            except Exception:
+                self._index_ensured = False
+                raise
 
     @staticmethod
     def _build_filter_string(filters: dict[str, Any]) -> str:
@@ -114,6 +127,7 @@ class MeilisearchFullText:
         top_k: int = _DEFAULT_TOP_K,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        await self._ensure_index()
         client = await self._get_client()
         index = client.index(self._index_name)
 

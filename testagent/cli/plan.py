@@ -42,6 +42,7 @@ async def _detect_app_package(requirement: str) -> str | None:
         result = subprocess.run(
             ["adb", "devices"],
             capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
         )
         lines = [l.strip() for l in result.stdout.split("\n") if l.strip()]
         # lines[0] is "List of devices attached"; anything after with \t means connected
@@ -61,6 +62,7 @@ async def _detect_app_package(requirement: str) -> str | None:
         result = subprocess.run(
             ["adb", "shell", "pm", "list", "packages", "-3"],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         packages = [
             line.replace("package:", "").strip()
@@ -128,6 +130,7 @@ async def _detect_app_version(package: str) -> str | None:
         result = subprocess.run(
             ["adb", "shell", "dumpsys", "package", package],
             capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
         )
         for line in result.stdout.split("\n"):
             stripped = line.strip()
@@ -747,6 +750,14 @@ async def _plan_command_async(
             cases = two_stage_results["cases"]
             patterns = two_stage_results["patterns"]
             doc_results = two_stage_results.get("docs", [])
+
+            # ── Filter by functional relevance ────────────────────────────
+            from testagent.rag.app_memory import filter_by_functional_relevance
+            before_count = len(cases)
+            cases = filter_by_functional_relevance(cases, user_intent=prd_text)
+            filtered_count = before_count - len(cases)
+            if filtered_count > 0:
+                typer.echo(f"  [Filtered out {filtered_count} functionally irrelevant case(s)]")
 
             # ── Apply decay scoring ──────────────────────────────────────────
             current_version = ""
