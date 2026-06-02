@@ -25,6 +25,7 @@ class RAGResult:
     content: str
     score: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    raw_score: float = 0.0
 
 
 class RAGPipeline:
@@ -314,6 +315,7 @@ class RAGPipeline:
                 content=str(r.get("document", r.get("content", ""))),
                 score=float(r.get("rerank_score", r.get("score", 0.0))),
                 metadata=dict(r.get("metadata", {})),
+                raw_score=float(r.get("rerank_score", r.get("score", 0.0))),
             )
             for r in reranked
         ]

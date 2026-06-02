@@ -153,6 +153,7 @@ class TestCollectionManager:
         assert "req_docs" in accessible
         assert "api_docs" in accessible
         assert "defect_history" in accessible
+        assert "app_documentation" in accessible
         assert "test_reports" not in accessible
         assert "locator_library" not in accessible
         assert "failure_patterns" not in accessible
@@ -197,6 +198,7 @@ class TestCollectionManager:
             "failure_patterns",
             "app_test_cases",
             "app_learned_patterns",
+            "app_documentation",
         }
         assert set(RAG_COLLECTIONS.keys()) == expected_keys
         for _name, info in RAG_COLLECTIONS.items():
@@ -394,6 +396,25 @@ class TestRAGPipeline:
             assert isinstance(r.content, str)
             assert isinstance(r.score, float)
             assert isinstance(r.metadata, dict)
+
+    async def test_query_results_have_raw_score(
+        self,
+        pipeline: RAGPipeline,
+    ) -> None:
+        results = await pipeline.query(
+            query_text="find me",
+            collection="test_coll",
+            top_k=5,
+        )
+
+        assert len(results) > 0
+        for r in results:
+            assert hasattr(r, "raw_score")
+            assert isinstance(r.raw_score, float)
+
+    def test_ragresult_raw_score_default(self) -> None:
+        result = RAGResult(doc_id="x", content="c", score=0.5)
+        assert result.raw_score == 0.0
 
     async def test_query_with_filters(
         self,
