@@ -220,6 +220,129 @@ def search(
     asyncio.run(_run())
 
 
+@memory_typer.command("set-version")
+def set_version(app_id: str, version: str) -> None:
+    """Set the current version for an app."""
+
+    async def _run() -> None:
+        from testagent.db.engine import get_session
+        from testagent.db.repository import AppVersionRepository
+
+        async with get_session() as session:
+            repo = AppVersionRepository(session)
+            old = await repo.get_by_app_id(app_id)
+            await repo.upsert(app_id, version, updated_by="cli")
+            if old:
+                typer.echo(f"  {app_id}: {old.current_version} -> {version}")
+            else:
+                typer.echo(f"  {app_id}: version set to {version}")
+
+    asyncio.run(_run())
+
+
+@memory_typer.command("stats")
+def stats(app_id: str) -> None:
+    """View App Memory statistics."""
+
+    async def _run() -> None:
+        from testagent.db.engine import get_session
+        from testagent.db.repository import (
+            AppVersionRepository,
+            LearnedPatternRepository,
+            RetrievalTraceRepository,
+            TestCaseRecordRepository,
+        )
+
+        async with get_session() as session:
+            # Version
+            av_repo = AppVersionRepository(session)
+            av = await av_repo.get_by_app_id(app_id)
+            version = av.current_version if av else "not set"
+
+            # Case stats
+            tcr_repo = TestCaseRecordRepository(session)
+            records = await tcr_repo.get_by_app_id(app_id, limit=1000)
+            case_count = len(records)
+            avg_confidence = sum(r.confidence for r in records) / case_count if case_count else 0
+
+            # Top tags
+            tag_counts: dict[str, int] = {}
+            for r in records:
+                for tag in r.tags.split(","):
+                    tag = tag.strip()
+                    if tag:
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+            # Pattern stats
+            lp_repo = LearnedPatternRepository(session)
+            patterns = await lp_repo.get_by_app_id(app_id, limit=1000)
+            approved = sum(1 for p in patterns if p.review_status == "approved")
+            pending = sum(1 for p in patterns if p.review_status == "pending")
+            rejected = sum(1 for p in patterns if p.review_status == "rejected")
+
+            # Adoption score (from recent traces)
+            rt_repo = RetrievalTraceRepository(session)
+            traces = await rt_repo.get_by_app_id(app_id, limit=10)
+            scores = [t.adoption_score for t in traces if t.adoption_score is not None]
+            avg_adoption = sum(scores) / len(scores) if scores else 0.0
+
+        # Display
+        typer.echo(f"\nApp Memory Stats: {app_id} (v{version})")
+        typer.echo("-" * 50)
+        typer.echo(f"  Cases:          {case_count}")
+        typer.echo(f"  Avg Confidence: {avg_confidence:.2f}")
+        if top_tags:
+            tag_str = " ".join(f"{t}({c})" for t, c in top_tags)
+            typer.echo(f"  Top Scenarios:  {tag_str}")
+        typer.echo(f"  Patterns:       {approved} approved, {pending} pending, {rejected} rejected")
+        typer.echo(f"  Adoption Score: {avg_adoption:.2f} ({len(scores)} traces)")
+        typer.echo("")
+
+    asyncio.run(_run())
+
+
+@memory_typer.command("upload-doc")
+def upload_doc(
+    app_id: str,
+    file: str = typer.Argument(help="Document file path"),
+    doc_type: str = typer.Option("user_guide", "--doc-type", help="Document type: release_note, user_guide, api_doc"),
+) -> None:
+    """Upload an app document to App Context Memory."""
+
+    async def _run() -> None:
+        from pathlib import Path
+
+        from testagent.config.settings import get_settings
+        from testagent.rag.factories import create_pipeline
+
+        path = Path(file)
+        if not path.exists():
+            typer.echo(f"  File not found: {file}")
+            raise typer.Exit(1)
+
+        content = path.read_text(encoding="utf-8")
+        if not content.strip():
+            typer.echo("  File content is empty")
+            raise typer.Exit(1)
+
+        settings = get_settings()
+        pipeline = create_pipeline(settings)
+        await pipeline.write_back(
+            content=content,
+            collection="app_documentation",
+            metadata={
+                "app_id": app_id,
+                "doc_type": doc_type,
+                "source_file": path.name,
+            },
+            chunk_size=512,
+        )
+        typer.echo(f"  Uploaded: {path.name} -> app_documentation ({doc_type})")
+
+    asyncio.run(_run())
+
+
 @memory_typer.command("trace")
 def trace(
     app_id: str = typer.Argument(help="App identifier"),

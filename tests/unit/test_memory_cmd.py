@@ -424,6 +424,184 @@ class TestMemoryTrace:
 
 
 # ---------------------------------------------------------------------------
+# set-version
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeAppVersion:
+    app_id: str = "com.example.app"
+    current_version: str = "1.0.0"
+    updated_by: str = "system"
+
+
+@dataclass
+class FakeCaseRecord:
+    id: str = "rec-001"
+    app_id: str = "com.example.app"
+    app_version: str = "1.0.0"
+    case_content: str = "test case"
+    source: str = "generated"
+    confidence: float = 0.85
+    tags: str = "login,smoke"
+    scope: str = "app_local"
+
+
+class TestMemorySetVersion:
+    def test_help(self) -> None:
+        result = runner.invoke(app, ["memory", "set-version", "--help"])
+        assert result.exit_code == 0
+        assert "app_id" in result.stdout
+        assert "version" in result.stdout
+
+    def test_set_version_new(self) -> None:
+        mock_repo = MagicMock()
+        mock_repo.get_by_app_id = AsyncMock(return_value=None)
+        mock_repo.upsert = AsyncMock(return_value=FakeAppVersion(current_version="2.0.0"))
+
+        with (
+            patch("testagent.db.engine.get_session", return_value=_make_mock_session_ctx(AsyncMock())),
+            patch("testagent.db.repository.AppVersionRepository", return_value=mock_repo),
+        ):
+            result = runner.invoke(app, ["memory", "set-version", "com.example.app", "2.0.0"])
+            assert result.exit_code == 0
+            assert "version set to" in result.stdout
+            assert "2.0.0" in result.stdout
+
+    def test_set_version_update(self) -> None:
+        mock_repo = MagicMock()
+        mock_repo.get_by_app_id = AsyncMock(return_value=FakeAppVersion(current_version="1.0.0"))
+        mock_repo.upsert = AsyncMock(return_value=FakeAppVersion(current_version="2.0.0"))
+
+        with (
+            patch("testagent.db.engine.get_session", return_value=_make_mock_session_ctx(AsyncMock())),
+            patch("testagent.db.repository.AppVersionRepository", return_value=mock_repo),
+        ):
+            result = runner.invoke(app, ["memory", "set-version", "com.example.app", "2.0.0"])
+            assert result.exit_code == 0
+            assert "1.0.0" in result.stdout
+            assert "2.0.0" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryStats:
+    def test_help(self) -> None:
+        result = runner.invoke(app, ["memory", "stats", "--help"])
+        assert result.exit_code == 0
+        assert "app_id" in result.stdout
+
+    def test_stats_displays(self) -> None:
+        fake_version = FakeAppVersion(current_version="3.0.0")
+        fake_cases = [
+            FakeCaseRecord(id="r1", confidence=0.9, tags="login,smoke"),
+            FakeCaseRecord(id="r2", confidence=0.7, tags="payment"),
+        ]
+        fake_patterns = [
+            FakePattern(id="p1", review_status="approved"),
+            FakePattern(id="p2", review_status="pending"),
+            FakePattern(id="p3", review_status="rejected"),
+        ]
+        fake_traces = [
+            FakeTrace(id="t1", adoption_score=0.8),
+            FakeTrace(id="t2", adoption_score=0.6),
+        ]
+
+        mock_av_repo = MagicMock()
+        mock_av_repo.get_by_app_id = AsyncMock(return_value=fake_version)
+
+        mock_tcr_repo = MagicMock()
+        mock_tcr_repo.get_by_app_id = AsyncMock(return_value=fake_cases)
+
+        mock_lp_repo = MagicMock()
+        mock_lp_repo.get_by_app_id = AsyncMock(return_value=fake_patterns)
+
+        mock_rt_repo = MagicMock()
+        mock_rt_repo.get_by_app_id = AsyncMock(return_value=fake_traces)
+
+        def _repo_factory(session):
+            return mock_av_repo
+
+        with (
+            patch("testagent.db.engine.get_session", return_value=_make_mock_session_ctx(AsyncMock())),
+            patch("testagent.db.repository.AppVersionRepository", return_value=mock_av_repo),
+            patch("testagent.db.repository.TestCaseRecordRepository", return_value=mock_tcr_repo),
+            patch("testagent.db.repository.LearnedPatternRepository", return_value=mock_lp_repo),
+            patch("testagent.db.repository.RetrievalTraceRepository", return_value=mock_rt_repo),
+        ):
+            result = runner.invoke(app, ["memory", "stats", "com.example.app"])
+            assert result.exit_code == 0
+            assert "com.example.app" in result.stdout
+            assert "3.0.0" in result.stdout
+            assert "Cases:" in result.stdout
+            assert "Patterns:" in result.stdout
+            assert "Adoption Score:" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# upload-doc
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryUploadDoc:
+    def test_help(self) -> None:
+        result = runner.invoke(app, ["memory", "upload-doc", "--help"])
+        assert result.exit_code == 0
+        assert "app_id" in result.stdout
+        assert "file" in result.stdout
+        assert "doc-type" in result.stdout
+
+    def test_upload_doc_file_not_found(self) -> None:
+        with (
+            patch("testagent.config.settings.get_settings", return_value=MagicMock()),
+            patch("testagent.rag.factories.create_pipeline", return_value=MagicMock()),
+        ):
+            result = runner.invoke(app, ["memory", "upload-doc", "com.example.app", "/nonexistent/file.txt"])
+            assert result.exit_code == 1
+            assert "not found" in result.stdout.lower()
+
+    def test_upload_doc_success(self) -> None:
+        mock_pipeline = MagicMock()
+        mock_pipeline.write_back = AsyncMock()
+
+        with (
+            patch("testagent.config.settings.get_settings", return_value=MagicMock()),
+            patch("testagent.rag.factories.create_pipeline", return_value=mock_pipeline),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.read_text", return_value="Some document content"),
+        ):
+            result = runner.invoke(app, ["memory", "upload-doc", "com.example.app", "doc.txt"])
+            assert result.exit_code == 0
+            assert "Uploaded" in result.stdout
+            mock_pipeline.write_back.assert_called_once()
+            call_kwargs = mock_pipeline.write_back.call_args
+            assert call_kwargs[1]["collection"] == "app_documentation"
+            assert call_kwargs[1]["chunk_size"] == 512
+            assert call_kwargs[1]["metadata"]["app_id"] == "com.example.app"
+
+    def test_upload_doc_custom_type(self) -> None:
+        mock_pipeline = MagicMock()
+        mock_pipeline.write_back = AsyncMock()
+
+        with (
+            patch("testagent.config.settings.get_settings", return_value=MagicMock()),
+            patch("testagent.rag.factories.create_pipeline", return_value=mock_pipeline),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.read_text", return_value="Release notes content"),
+        ):
+            result = runner.invoke(app, [
+                "memory", "upload-doc", "com.example.app", "notes.txt",
+                "--doc-type", "release_note",
+            ])
+            assert result.exit_code == 0
+            call_kwargs = mock_pipeline.write_back.call_args
+            assert call_kwargs[1]["metadata"]["doc_type"] == "release_note"
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -442,3 +620,6 @@ class TestMemoryRegistration:
         assert "add-pattern" in result.stdout
         assert "search" in result.stdout
         assert "trace" in result.stdout
+        assert "set-version" in result.stdout
+        assert "stats" in result.stdout
+        assert "upload-doc" in result.stdout
