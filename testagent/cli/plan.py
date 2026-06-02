@@ -525,6 +525,9 @@ async def _plan_command_async(
         pipeline was aborted.
     """
     # ── Phase 0: Parse input ────────────────────────────────────────────────
+    from testagent.db.engine import init_db
+    await init_db()
+
     content, is_file = parse_requirement(requirement)
     typer.echo(f"Input: {'file' if is_file else 'raw text'} ({len(content)} chars)")
 
@@ -633,8 +636,47 @@ async def _plan_command_async(
 
             cases = two_stage_results["cases"]
             patterns = two_stage_results["patterns"]
+            doc_results = two_stage_results.get("docs", [])
 
-            if cases or patterns:
+            # ── Apply decay scoring ──────────────────────────────────────────
+            current_version = ""
+            try:
+                from testagent.db.engine import get_session
+                from testagent.db.repository import AppVersionRepository, TestCaseRecordRepository, LearnedPatternRepository
+                async with get_session() as session:
+                    av_repo = AppVersionRepository(session)
+                    av = await av_repo.get_by_app_id(memory_app_id)
+                    if av:
+                        current_version = av.current_version
+            except Exception:
+                pass
+
+            if current_version:
+                try:
+                    from testagent.memory.retrieval_post_processor import apply_decay
+                    from datetime import datetime, UTC
+                    case_records = {}
+                    pattern_records = {}
+                    try:
+                        async with get_session() as session:
+                            tcr_repo = TestCaseRecordRepository(session)
+                            lp_repo = LearnedPatternRepository(session)
+                            all_case_recs = await tcr_repo.get_by_app_id(memory_app_id, limit=100)
+                            case_records = {r.id: r for r in all_case_recs}
+                            all_pattern_recs = await lp_repo.get_by_app_id(memory_app_id, limit=100)
+                            pattern_records = {r.id: r for r in all_pattern_recs}
+                    except Exception:
+                        pass
+                    all_results = cases + patterns + doc_results
+                    all_results = apply_decay(all_results, current_version, datetime.now(UTC), case_records, pattern_records)
+                    # Re-split by collection
+                    cases = [r for r in all_results if r.metadata.get("collection") == "app_test_cases"]
+                    patterns = [r for r in all_results if r.metadata.get("collection") == "app_learned_patterns"]
+                    doc_results = [r for r in all_results if r.metadata.get("collection") == "app_documentation"]
+                except Exception as exc:
+                    typer.echo(f"  [Decay scoring skipped: {exc}]")
+
+            if cases or patterns or doc_results:
                 context_parts = []
                 if cases:
                     context_parts.append(format_retrieved_cases_for_prompt(cases))
@@ -642,12 +684,16 @@ async def _plan_command_async(
                 if patterns:
                     context_parts.append(format_learned_patterns_for_prompt(patterns))
                     typer.echo(f"  Found {len(patterns)} learned pattern(s) from App Context Memory.")
+                if doc_results:
+                    from testagent.rag.app_memory import format_doc_results_for_prompt
+                    context_parts.append(format_doc_results_for_prompt(doc_results))
+                    typer.echo(f"  Found {len(doc_results)} document(s) from App Context Memory.")
                 history_context = "\n\n".join(context_parts)
 
                 # Flatten for trace recording
-                rag_results = cases + patterns
+                rag_results = cases + patterns + doc_results
             else:
-                typer.echo("  No historical cases or patterns found from App Context Memory.")
+                typer.echo("  No historical cases, patterns, or documents found from App Context Memory.")
         except Exception as exc:
             typer.echo(f"  [App Context Memory two-stage retrieval skipped: {exc}]")
             # Fallback: single-batch retrieval
@@ -680,12 +726,13 @@ async def _plan_command_async(
 
             async with get_session() as session:
                 repo = RetrievalTraceRepository(session)
-                # Record stage 1 trace (cases + patterns before dedup)
+                # Record stage 1 trace (cases + patterns + docs before dedup)
                 stage1_cases = two_stage_results.get("cases", [])[:3]
                 stage1_patterns = two_stage_results.get("patterns", [])[:3]
+                stage1_docs = two_stage_results.get("docs", [])[:2]
                 stage1_items = [
                     {"id": r.doc_id, "score": r.score, "content_preview": r.content[:200]}
-                    for r in stage1_cases + stage1_patterns
+                    for r in stage1_cases + stage1_patterns + stage1_docs
                 ]
                 await repo.create(RetrievalTraceModel(
                     app_id=memory_app_id,
@@ -698,10 +745,11 @@ async def _plan_command_async(
                 # Record stage 2 trace (additional items after dedup)
                 all_cases = two_stage_results.get("cases", [])
                 all_patterns = two_stage_results.get("patterns", [])
+                all_docs = two_stage_results.get("docs", [])
                 stage1_ids = set(two_stage_results.get("stage1_doc_ids", []))
                 stage2_items = [
                     {"id": r.doc_id, "score": r.score, "content_preview": r.content[:200]}
-                    for r in all_cases + all_patterns
+                    for r in all_cases + all_patterns + all_docs
                     if r.doc_id not in stage1_ids
                 ]
                 if stage2_items:

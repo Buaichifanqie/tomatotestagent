@@ -11,6 +11,12 @@ from testagent.common.logging import get_logger
 logger = get_logger(__name__)
 _console = Console()
 
+
+async def _ensure_db() -> None:
+    """Create tables if they don't exist (idempotent)."""
+    from testagent.db.engine import init_db
+    await init_db()
+
 memory_typer = typer.Typer(name="memory", help="Manage App Context Memory (learned patterns, search, traces)")
 
 
@@ -23,6 +29,7 @@ def list_patterns(
     """List learned patterns for an app."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.db.engine import get_session
         from testagent.db.repository import LearnedPatternRepository
 
@@ -74,6 +81,7 @@ def approve(
     """Approve a learned pattern."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.db.engine import get_session
         from testagent.db.repository import LearnedPatternRepository
 
@@ -98,6 +106,7 @@ def reject(
     """Reject a learned pattern."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.db.engine import get_session
         from testagent.db.repository import LearnedPatternRepository
 
@@ -123,6 +132,7 @@ def add_pattern(
     """Add a new learned pattern."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.config.settings import get_settings
         from testagent.db.engine import get_session
         from testagent.db.repository import LearnedPatternRepository
@@ -225,6 +235,7 @@ def set_version(app_id: str, version: str) -> None:
     """Set the current version for an app."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.db.engine import get_session
         from testagent.db.repository import AppVersionRepository
 
@@ -245,6 +256,7 @@ def stats(app_id: str) -> None:
     """View App Memory statistics."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.db.engine import get_session
         from testagent.db.repository import (
             AppVersionRepository,
@@ -352,6 +364,7 @@ def trace(
     """Show recent retrieval traces for an app."""
 
     async def _run() -> None:
+        await _ensure_db()
         from testagent.db.engine import get_session
         from testagent.db.repository import RetrievalTraceRepository
 
