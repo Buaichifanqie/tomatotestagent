@@ -788,6 +788,45 @@ async def _plan_command_async(
         except Exception as exc:
             typer.echo(f"  [Delta extraction skipped: {exc}]")
 
+    # ── Compute adoption score ───────────────────────────────────────────
+    if memory_app_id:
+        try:
+            from testagent.memory.adoption_scorer import compute_adoption_score
+            from testagent.rag.factories import create_pipeline as _create_pipe2
+
+            _rag2 = _create_pipe2(settings)
+            confirmed_text = serialize_cases_for_storage(test_cases)
+            # Get retrieved items from the latest trace
+            retrieved = []
+            try:
+                from testagent.db.engine import get_session
+                from testagent.db.repository import RetrievalTraceRepository
+
+                async with get_session() as session:
+                    repo = RetrievalTraceRepository(session)
+                    traces = await repo.get_by_app_id(memory_app_id, limit=1)
+                    if traces and traces[0].retrieved_items:
+                        retrieved = traces[0].retrieved_items
+            except Exception:
+                pass
+
+            if retrieved:
+                score = await compute_adoption_score(
+                    [confirmed_text], retrieved, _rag2._embedding_service.embed,
+                )
+                # Backfill the latest trace
+                try:
+                    async with get_session() as session:
+                        repo = RetrievalTraceRepository(session)
+                        traces = await repo.get_by_app_id(memory_app_id, limit=1)
+                        if traces:
+                            await repo.update(traces[0].id, {"adoption_score": score})
+                    typer.echo(f"  Adoption score: {score:.2f}")
+                except Exception:
+                    pass
+        except Exception as exc:
+            typer.echo(f"  [Adoption score skipped: {exc}]")
+
     # ── Persist confirmed cases to App Context Memory ──────────────────
     if memory_app_id:
         # ── Record app version if available ───────────────────────────
