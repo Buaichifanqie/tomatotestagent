@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 FILTER_KEY = "app_id"
 CASES_COLLECTION = "app_test_cases"
 PATTERNS_COLLECTION = "app_learned_patterns"
+DOCS_COLLECTION = "app_documentation"
 
 
 async def _query_collection(
@@ -73,7 +74,7 @@ async def stage1_retrieve(
     prd_text: str,
     app_id: str,
 ) -> dict[str, list[RAGResult]]:
-    """Stage 1: Broad retrieval of cases and patterns in parallel.
+    """Stage 1: Broad retrieval of cases, patterns, and docs in parallel.
 
     Args:
         pipeline: The RAG pipeline instance.
@@ -81,7 +82,7 @@ async def stage1_retrieve(
         app_id: The app identifier for filtering.
 
     Returns:
-        ``{"cases": [...], "patterns": [...]}``
+        ``{"cases": [...], "patterns": [...], "docs": [...]}``
     """
     cases_task = _query_collection(
         pipeline, prd_text, CASES_COLLECTION, top_k=3, app_id=app_id,
@@ -89,18 +90,22 @@ async def stage1_retrieve(
     patterns_task = _query_collection(
         pipeline, prd_text, PATTERNS_COLLECTION, top_k=3, app_id=app_id,
     )
+    docs_task = _query_collection(
+        pipeline, prd_text, DOCS_COLLECTION, top_k=2, app_id=app_id,
+    )
 
-    cases, patterns = await asyncio.gather(cases_task, patterns_task)
+    cases, patterns, docs = await asyncio.gather(cases_task, patterns_task, docs_task)
 
     logger.info(
-        "Stage 1 retrieval for app '%s': %d cases, %d patterns",
+        "Stage 1 retrieval for app '%s': %d cases, %d patterns, %d docs",
         app_id,
         len(cases),
         len(patterns),
-        extra={"extra_data": {"app_id": app_id, "cases": len(cases), "patterns": len(patterns)}},
+        len(docs),
+        extra={"extra_data": {"app_id": app_id, "cases": len(cases), "patterns": len(patterns), "docs": len(docs)}},
     )
 
-    return {"cases": cases, "patterns": patterns}
+    return {"cases": cases, "patterns": patterns, "docs": docs}
 
 
 async def stage2_retrieve(
@@ -118,7 +123,7 @@ async def stage2_retrieve(
         stage1_doc_ids: Doc IDs from stage 1 to exclude from results.
 
     Returns:
-        ``{"cases": [...], "patterns": [...]}``
+        ``{"cases": [...], "patterns": [...], "docs": [...]}``
     """
     dedup_set = set(stage1_doc_ids)
 
@@ -128,19 +133,25 @@ async def stage2_retrieve(
     patterns_task = _query_collection(
         pipeline, initial_tc_text, PATTERNS_COLLECTION, top_k=3, app_id=app_id,
     )
+    docs_task = _query_collection(
+        pipeline, initial_tc_text, DOCS_COLLECTION, top_k=2, app_id=app_id,
+    )
 
-    raw_cases, raw_patterns = await asyncio.gather(cases_task, patterns_task)
+    raw_cases, raw_patterns, raw_docs = await asyncio.gather(cases_task, patterns_task, docs_task)
 
     deduped_cases = [r for r in raw_cases if r.doc_id not in dedup_set]
     deduped_patterns = [r for r in raw_patterns if r.doc_id not in dedup_set]
+    deduped_docs = [r for r in raw_docs if r.doc_id not in dedup_set]
 
     logger.info(
-        "Stage 2 retrieval for app '%s': %d cases (%d after dedup), %d patterns (%d after dedup)",
+        "Stage 2 retrieval for app '%s': %d cases (%d after dedup), %d patterns (%d after dedup), %d docs (%d after dedup)",
         app_id,
         len(raw_cases),
         len(deduped_cases),
         len(raw_patterns),
         len(deduped_patterns),
+        len(raw_docs),
+        len(deduped_docs),
         extra={
             "extra_data": {
                 "app_id": app_id,
@@ -148,11 +159,13 @@ async def stage2_retrieve(
                 "deduped_cases": len(deduped_cases),
                 "raw_patterns": len(raw_patterns),
                 "deduped_patterns": len(deduped_patterns),
+                "raw_docs": len(raw_docs),
+                "deduped_docs": len(deduped_docs),
             }
         },
     )
 
-    return {"cases": deduped_cases, "patterns": deduped_patterns}
+    return {"cases": deduped_cases, "patterns": deduped_patterns, "docs": deduped_docs}
 
 
 async def run_two_stage_retrieval(
@@ -162,7 +175,7 @@ async def run_two_stage_retrieval(
 ) -> dict[str, Any]:
     """Orchestrate two-stage retrieval.
 
-    Stage 1 performs a broad parallel search across cases and patterns.
+    Stage 1 performs a broad parallel search across cases, patterns, and docs.
     Stage 2 refines the query using stage 1 context and deduplicates.
 
     Args:
@@ -171,7 +184,7 @@ async def run_two_stage_retrieval(
         app_id: The app identifier for filtering.
 
     Returns:
-        ``{"cases": [...], "patterns": [...], "stage1_doc_ids": [...]}``
+        ``{"cases": [...], "patterns": [...], "docs": [...], "stage1_doc_ids": [...]}``
     """
     # ── Stage 1 ─────────────────────────────────────────────────────────────
     stage1 = await stage1_retrieve(pipeline, prd_text, app_id)
@@ -180,6 +193,8 @@ async def run_two_stage_retrieval(
         r.doc_id for r in stage1["cases"]
     ] + [
         r.doc_id for r in stage1["patterns"]
+    ] + [
+        r.doc_id for r in stage1["docs"]
     ]
 
     # ── Stage 2 ─────────────────────────────────────────────────────────────
@@ -189,17 +204,20 @@ async def run_two_stage_retrieval(
     # ── Combine ─────────────────────────────────────────────────────────────
     all_cases = stage1["cases"] + stage2["cases"]
     all_patterns = stage1["patterns"] + stage2["patterns"]
+    all_docs = stage1["docs"] + stage2.get("docs", [])
 
     logger.info(
-        "Two-stage retrieval complete for app '%s': %d total cases, %d total patterns",
+        "Two-stage retrieval complete for app '%s': %d total cases, %d total patterns, %d total docs",
         app_id,
         len(all_cases),
         len(all_patterns),
+        len(all_docs),
         extra={
             "extra_data": {
                 "app_id": app_id,
                 "total_cases": len(all_cases),
                 "total_patterns": len(all_patterns),
+                "total_docs": len(all_docs),
                 "stage1_doc_ids": stage1_doc_ids,
             }
         },
@@ -208,5 +226,6 @@ async def run_two_stage_retrieval(
     return {
         "cases": all_cases,
         "patterns": all_patterns,
+        "docs": all_docs,
         "stage1_doc_ids": stage1_doc_ids,
     }

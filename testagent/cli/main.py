@@ -24,6 +24,15 @@ def _fix_win_console() -> None:
 
 _fix_win_console()
 
+# Load ALL .env vars into os.environ (pydantic-settings only reads TESTAGENT_ prefixed ones)
+from dotenv import load_dotenv
+load_dotenv()
+
+# HuggingFace mirror for China network access
+import os as _os
+if "HF_ENDPOINT" not in _os.environ:
+    _os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 from testagent.cli.app_cmd import app_typer as app_group
 from testagent.cli.config_cmd import config_app
 from testagent.cli.mcp_cmd import mcp_app

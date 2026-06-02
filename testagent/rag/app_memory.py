@@ -61,6 +61,22 @@ def format_retrieved_cases_for_prompt(results: list[RAGResult]) -> str:
     return "\n".join(lines)
 
 
+def format_doc_results_for_prompt(results: list[RAGResult]) -> str:
+    """Format documentation RAG results into a prompt-ready context section."""
+    if not results:
+        return ""
+
+    lines: list[str] = ["以下是该 App 的相关文档（仅供参考）：", ""]
+    for i, r in enumerate(results, 1):
+        score_pct = f"{r.score * 100:.0f}%"
+        doc_type = r.metadata.get("doc_type", "文档")
+        lines.append(f"--- 文档 {i}（{doc_type}，相关度: {score_pct}）---")
+        lines.append(r.content)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def format_learned_patterns_for_prompt(results: list[RAGResult]) -> str:
     """Format learned pattern RAG results into a prompt-ready context section."""
     if not results:

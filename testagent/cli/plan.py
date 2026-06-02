@@ -113,6 +113,33 @@ async def _detect_app_package(requirement: str) -> str | None:
     return None
 
 
+async def _detect_app_version(package: str) -> str | None:
+    """Auto-detect app version from connected Android device.
+
+    Uses ``adb shell dumpsys package`` to extract the versionName of the
+    given package.
+
+    Returns:
+        The version string (e.g. "8.95.0"), or ``None`` if detection fails.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["adb", "shell", "dumpsys", "package", package],
+            capture_output=True, text=True, timeout=15,
+        )
+        for line in result.stdout.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("versionName="):
+                version = stripped.split("=", 1)[1].strip()
+                if version:
+                    return version
+    except Exception:
+        pass
+    return None
+
+
 def parse_requirement(requirement: str) -> tuple[str, bool]:
     """Determine if input is a file path or raw text.
 
@@ -255,12 +282,14 @@ def format_tc_summary(test_cases: list[TestCase]) -> str:
     return "\n".join(lines)
 
 
-def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool) -> bool:
+def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider: Any = None, app_package: str = "") -> bool:
     """Present test cases to the user for confirmation and optional editing.
 
     Args:
         test_cases: The list of generated ``TestCase`` objects (modified in-place).
         auto_yes: When ``True``, always return ``True`` without prompting.
+        llm_provider: Optional LLM provider for auto-generating steps.
+        app_package: App package name for step generation context.
 
     Returns:
         ``True`` when the user confirms (or ``auto_yes`` is set), ``False``
@@ -285,12 +314,12 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool) -> bool:
         if choice.lower() == "n":
             return False
         if choice.lower() == "e":
-            _tc_editor(test_cases)
+            _tc_editor(test_cases, llm_provider=llm_provider, app_package=app_package)
             continue
         typer.echo("  无效输入，请输入 y / e / n")
 
 
-def _tc_editor(test_cases: list[TestCase]) -> None:
+def _tc_editor(test_cases: list[TestCase], llm_provider: Any = None, app_package: str = "") -> None:
     """Interactive sub-editor for add / delete / modify test cases."""
     while True:
         typer.echo("")
@@ -301,7 +330,7 @@ def _tc_editor(test_cases: list[TestCase]) -> None:
         if action.lower() == "b":
             return
         if action.lower() == "a":
-            _tc_add(test_cases)
+            _tc_add(test_cases, llm_provider=llm_provider, app_package=app_package)
         elif action.lower() == "d":
             _tc_delete(test_cases)
         elif action.lower() == "m":
@@ -310,8 +339,10 @@ def _tc_editor(test_cases: list[TestCase]) -> None:
             typer.echo("  无效输入，请输入 a / d / m / b")
 
 
-def _tc_add(test_cases: list[TestCase]) -> None:
-    """Add test cases interactively, supports batch adding."""
+def _tc_add(test_cases: list[TestCase], llm_provider: Any = None, app_package: str = "") -> None:
+    """Add test cases interactively with AI-generated steps."""
+    import asyncio
+
     typer.echo("")
     typer.echo("  ── 添加新用例（添加完一个后可继续添加）──")
     while True:
@@ -322,17 +353,35 @@ def _tc_add(test_cases: list[TestCase]) -> None:
         requirement_ids_str = typer.prompt("  关联需求 ID（逗号分隔，留空跳过）", default="")
         requirement_ids = [r.strip() for r in requirement_ids_str.split(",") if r.strip()] if requirement_ids_str else []
 
+        # ── AI-generate steps from title ──────────────────────────────
         steps: list[TestStep] = []
-        typer.echo("  步骤（action: tap / type / swipe / assert / launch / exec / screenshot / wait，输入空行结束）")
-        step_num = 1
-        while True:
-            action = typer.prompt(f"    步骤{step_num} action", default="")
-            if not action:
-                break
-            target = typer.prompt(f"    步骤{step_num} target", default="")
-            value = typer.prompt(f"    步骤{step_num} value", default="")
-            steps.append(TestStep(step=step_num, action=action, target=target, value=value))
-            step_num += 1
+        if llm_provider:
+            typer.echo("  正在用 AI 生成测试步骤...")
+            try:
+                steps = asyncio.run(_generate_steps_for_title(llm_provider, title, app_package))
+            except Exception as exc:
+                typer.echo(f"  [AI 生成失败: {exc}，将手动输入步骤]")
+
+        if steps:
+            typer.echo("  AI 生成的步骤:")
+            for s in steps:
+                typer.echo(f"    {s.step}. [{s.action}] target={s.target}  value={s.value}")
+            use_ai = typer.confirm("  使用这些步骤?", default=True)
+            if not use_ai:
+                steps = []
+
+        # ── Manual step input fallback ────────────────────────────────
+        if not steps:
+            typer.echo("  步骤（action: tap / type / swipe / assert / launch / exec / screenshot / wait，输入空行结束）")
+            step_num = 1
+            while True:
+                action = typer.prompt(f"    步骤{step_num} action", default="")
+                if not action:
+                    break
+                target = typer.prompt(f"    步骤{step_num} target", default="")
+                value = typer.prompt(f"    步骤{step_num} value", default="")
+                steps.append(TestStep(step=step_num, action=action, target=target, value=value))
+                step_num += 1
 
         new_tc = TestCase(
             id=tc_id,
@@ -348,6 +397,60 @@ def _tc_add(test_cases: list[TestCase]) -> None:
         if not typer.confirm("  继续添加下一个用例?", default=False):
             break
         typer.echo("")
+
+
+async def _generate_steps_for_title(
+    llm_provider: Any,
+    title: str,
+    app_package: str = "",
+) -> list[TestStep]:
+    """Use LLM to generate test steps for a given test case title."""
+    pkg_info = f"\nApp 包名: {app_package}" if app_package else ""
+    prompt = f"""根据以下测试用例标题，生成具体的 Android App 测试步骤。
+
+用例标题: {title}{pkg_info}
+
+要求:
+- 每个步骤必须有 action、target、value（可为空字符串）
+- action 只能是: tap, type, swipe, assert, launch, exec, screenshot, wait
+- 第一步通常是 launch（启动 App）
+- target 用中文描述 UI 元素，如"搜索框"、"确认按钮"
+- assert 步骤的 target 描述预期结果
+- 步骤数量 3-8 个
+
+请直接输出 JSON 数组，不要其他文字。格式:
+[{{"step": 1, "action": "launch", "target": "", "value": ""}}, ...]"""
+
+    response = await llm_provider.chat(
+        system="你是一个 Android 测试工程师，擅长编写 App 自动化测试步骤。只输出 JSON，不要其他文字。",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+
+    import json
+    import re
+
+    text = ""
+    for block in response.content:
+        if block.get("type") == "text":
+            text = block.get("text", "")
+            break
+
+    # Extract JSON array from response
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if not match:
+        return []
+
+    raw_steps = json.loads(match.group())
+    steps: list[TestStep] = []
+    for i, s in enumerate(raw_steps, 1):
+        steps.append(TestStep(
+            step=s.get("step", i),
+            action=s.get("action", "tap"),
+            target=s.get("target", ""),
+            value=s.get("value", ""),
+        ))
+    return steps
 
 
 def _tc_delete(test_cases: list[TestCase]) -> None:
@@ -566,6 +669,13 @@ async def _plan_command_async(
 
     # ── Derive app identifier for App Context Memory ────────────────────
     memory_app_id = app_id or app_package  # explicit --app-id takes priority
+
+    # ── Auto-detect app version from device ─────────────────────────────
+    detected_version: str | None = None
+    if app_package:
+        detected_version = await _detect_app_version(app_package)
+        if detected_version:
+            typer.echo(f"  [auto-detected app version: {detected_version}]")
 
     # ── Set up output directory ─────────────────────────────────────────────
     output_dir = setup_output_dir(name)
@@ -814,8 +924,8 @@ async def _plan_command_async(
                             step.value = step.value.replace(wrong, app_package)
 
     # ── Phase 3: Present to user ────────────────────────────────────────────
-    original_steps = {tc.id: [{"step": s.step, "action": s.action, "target": s.target, "value": s.value, "description": s.description} for s in tc.steps] for tc in test_cases}
-    if not present_tc_to_user(test_cases, auto_yes=auto_yes):
+    original_steps = {tc.id: [{"step": s.step, "action": s.action, "target": s.target, "value": s.value} for s in tc.steps] for tc in test_cases}
+    if not present_tc_to_user(test_cases, auto_yes=auto_yes, llm_provider=llm_provider, app_package=app_package or ""):
         typer.echo("Execution cancelled by user.")
         return None
 
@@ -886,7 +996,11 @@ async def _plan_command_async(
                 av_repo = AppVersionRepository(session)
                 existing = await av_repo.get_by_app_id(memory_app_id)
                 if not existing:
-                    await av_repo.upsert(memory_app_id, version="unknown", updated_by="plan_command")
+                    version = detected_version or "unknown"
+                    await av_repo.upsert(memory_app_id, version=version, updated_by="plan_command")
+                elif detected_version and existing.current_version != detected_version:
+                    await av_repo.upsert(memory_app_id, version=detected_version, updated_by="auto_detect")
+                    typer.echo(f"  [app version updated: {existing.current_version} -> {detected_version}]")
         except Exception:
             pass
 
@@ -957,6 +1071,13 @@ async def _plan_command_async(
 
     engine = ExecutionEngine(config, llm_provider=llm_provider)
     executed_tcs = await engine.execute_all(test_cases)
+
+    # ── Teardown: kill app and close session after all TCs ───────────────
+    try:
+        await engine._teardown_app()
+        typer.echo("  App stopped and session closed.")
+    except Exception as exc:
+        typer.echo(f"  [Teardown warning: {exc}]")
 
     # ── Phase 5: Per-TC evaluation ──────────────────────────────────────────
     typer.echo("Evaluating test case results...")

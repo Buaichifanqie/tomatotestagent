@@ -79,6 +79,7 @@ class ExecutionEngine:
         self._llm_provider: Any = llm_provider
         self._suppressed_rules: set[str] = set()
         self._current_recording_tc: str = ""
+        self._current_recording_session_id: str = ""
         self._screen_w: int = 0
         self._screen_h: int = 0
         self._coordinate_cache = CoordinateCache()
@@ -836,6 +837,10 @@ class ExecutionEngine:
         # ── On failure: save screenshot + vision analysis ──────────
         if not success:
             try:
+                # Recover session if dead before taking screenshot
+                if not self.session_manager.is_connected():
+                    await self._recover_session()
+
                 # Save screenshot to disk
                 scr_result = await app_screenshot(
                     appium_url=self.session_manager.appium_url,
@@ -855,13 +860,17 @@ class ExecutionEngine:
                         tc.execution.evidence.append(
                             EvidenceItem(type="screenshot", path=str(scr_path))
                         )
+                    else:
+                        self._log(f"  [Screenshot data empty for {tc.id} step {step.step}]")
+                else:
+                    self._log(f"  [Screenshot failed for {tc.id} step {step.step}: {scr_result.get('error', 'unknown')}]")
 
                 # Vision analysis
                 vision_note = await self._analyze_failure_with_vision(step)
                 if vision_note:
                     step_exec.vision_analysis = vision_note
-            except Exception:
-                pass  # Both are best-effort
+            except Exception as exc:
+                self._log(f"  [Failure capture error for {tc.id} step {step.step}: {exc}]")
 
         return step_exec
 
@@ -1002,6 +1011,7 @@ class ExecutionEngine:
             )
             if not result.get("error"):
                 self._current_recording_tc = tc.id
+                self._current_recording_session_id = session_id
                 self._log(f"[Recording started for {tc.id}]")
             else:
                 self._log(f"  [Recording start failed for {tc.id}: {result['error'][:80]}]")
@@ -1011,8 +1021,9 @@ class ExecutionEngine:
     async def _stop_recording(self, tc: TestCase | None = None) -> None:
         """Stop screen recording, save the video, and add as evidence."""
         tc_id = self._current_recording_tc
+        session_id = self._current_recording_session_id or self.session_manager.session_id
         self._current_recording_tc = ""
-        session_id = self.session_manager.session_id
+        self._current_recording_session_id = ""
         if not session_id:
             if tc_id:
                 self._log(f"  [Cannot stop recording for {tc_id}: no session]")
@@ -1025,7 +1036,7 @@ class ExecutionEngine:
                     appium_url=self.session_manager.appium_url,
                     session_id=session_id,
                 ),
-                timeout=15,
+                timeout=60,
             )
             video_b64 = result.get("video_base64", "")
             if not video_b64:

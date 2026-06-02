@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# HuggingFace mirror for China network access
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
