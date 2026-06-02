@@ -233,7 +233,7 @@ async def process_deltas_and_confirm(
                         pattern_type="behavior",
                         source_case_id=case_id,
                         source_type="modification_delta",
-                        confidence=0.7,
+                        confidence=0.80,
                         scope="app_local",
                         review_status="pending",
                     )
@@ -262,9 +262,10 @@ async def _check_and_increment_duplicate(
             if existing_id:
                 existing = await pattern_repo.get_by_id(existing_id)
                 if existing is not None:
+                    new_confidence = min(1.0, existing.confidence + 0.05)
                     await pattern_repo.update(
                         existing_id,
-                        {"occurrence_count": existing.occurrence_count + 1},
+                        {"occurrence_count": existing.occurrence_count + 1, "confidence": new_confidence},
                     )
                     logger.info(
                         "Incremented occurrence_count for existing pattern %s", existing_id

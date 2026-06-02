@@ -327,6 +327,7 @@ class TestProcessDeltasAndConfirm:
         existing_pattern = MagicMock()
         existing_pattern.id = "existing-pattern-id"
         existing_pattern.occurrence_count = 1
+        existing_pattern.confidence = 0.80
         pattern_repo.get_by_id = AsyncMock(return_value=existing_pattern)
         pattern_repo.update = AsyncMock(return_value=existing_pattern)
 
@@ -345,6 +346,7 @@ class TestProcessDeltasAndConfirm:
 
             # Should NOT write_back since we're just incrementing
             rag_pipeline.write_back.assert_not_called()
-            pattern_repo.update.assert_called_once_with(
-                "existing-pattern-id", {"occurrence_count": 2}
-            )
+            update_call = pattern_repo.update.call_args
+            assert update_call[0][0] == "existing-pattern-id"
+            assert update_call[0][1]["occurrence_count"] == 2
+            assert update_call[0][1]["confidence"] == pytest.approx(0.85)

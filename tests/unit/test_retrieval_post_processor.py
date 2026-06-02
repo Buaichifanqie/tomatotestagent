@@ -29,7 +29,8 @@ def test_parse_version_gap_multiple_minor():
 
 def test_parse_version_gap_major():
     from testagent.memory.retrieval_post_processor import parse_version_gap
-    assert parse_version_gap("7.0", "8.0") == 10
+    # Spec: only minor version matters; major gap yields 0 (handled by document hard-cut)
+    assert parse_version_gap("7.0", "8.0") == 0
 
 
 def test_parse_version_gap_empty():
@@ -50,12 +51,31 @@ def test_version_weight_same_version():
 
 def test_version_weight_cross_one():
     from testagent.memory.retrieval_post_processor import version_weight
-    assert version_weight("7.45", "7.46") == pytest.approx(0.8)
+    # Default source=ai_generated, base=0.6
+    assert version_weight("7.45", "7.46") == pytest.approx(0.6)
 
 
 def test_version_weight_cross_two():
     from testagent.memory.retrieval_post_processor import version_weight
-    assert version_weight("7.45", "7.47") == pytest.approx(0.64)
+    # Default source=ai_generated, base=0.6, gap=2 → 0.36
+    assert version_weight("7.45", "7.47") == pytest.approx(0.36)
+
+
+def test_version_weight_user_modified_cross_one():
+    from testagent.memory.retrieval_post_processor import version_weight
+    assert version_weight("7.45", "7.46", source="user_modified") == pytest.approx(0.8)
+
+
+def test_version_weight_ai_generated_base():
+    from testagent.memory.retrieval_post_processor import version_weight
+    # ai_generated base=0.6, gap=1 → 0.6
+    assert version_weight("7.45", "7.46", source="ai_generated") == pytest.approx(0.6)
+
+
+def test_version_weight_learned_pattern_base():
+    from testagent.memory.retrieval_post_processor import version_weight
+    # learned_pattern base=0.7, gap=1 → 0.7
+    assert version_weight("7.45", "7.46", source="learned_pattern") == pytest.approx(0.7)
 
 
 def test_version_weight_document_hard_cut():
@@ -120,6 +140,58 @@ def test_confidence_weight_clamped():
 
 
 # ---------------------------------------------------------------------------
+# update_confidence
+# ---------------------------------------------------------------------------
+
+
+def test_update_confidence_zero_executions():
+    from testagent.memory.retrieval_post_processor import update_confidence
+    # No executions → returns source-dependent initial value
+    assert update_confidence(0.5, 0, 0, source="ai_generated") == pytest.approx(0.60)
+
+
+def test_update_confidence_with_executions():
+    from testagent.memory.retrieval_post_processor import update_confidence
+    # 10 executions, 8 passes, ai_generated initial=0.60
+    # decay_factor = 1/(1+0.1*10) = 0.5
+    # blend = 0.60*0.5 + 0.8*0.5 = 0.70
+    result = update_confidence(0.60, 10, 8, source="ai_generated")
+    assert result == pytest.approx(0.70)
+
+
+def test_update_confidence_manual_source():
+    from testagent.memory.retrieval_post_processor import update_confidence
+    # manual initial=0.95, 5 executions, 4 passes
+    # decay = 1/(1+0.5) ≈ 0.667
+    # blend = 0.95*0.667 + 0.8*0.333 ≈ 0.90
+    result = update_confidence(0.95, 5, 4, source="manual")
+    assert result > 0.85
+    assert result < 0.95
+
+
+# ---------------------------------------------------------------------------
+# time_weight with per-type params
+# ---------------------------------------------------------------------------
+
+
+def test_time_weight_learned_pattern_slower_decay():
+    from testagent.memory.retrieval_post_processor import time_weight
+    now = datetime(2026, 6, 1)
+    created = datetime(2025, 12, 1)  # 6 months ago
+    # learned_pattern: monthly_decay=0.01, floor=0.7
+    w = time_weight(created, now, monthly_decay=0.01, floor=0.7)
+    assert w == pytest.approx(0.94, abs=0.02)
+
+
+def test_time_weight_learned_pattern_floor():
+    from testagent.memory.retrieval_post_processor import time_weight
+    now = datetime(2026, 6, 1)
+    created = datetime(2020, 1, 1)  # very old
+    w = time_weight(created, now, monthly_decay=0.01, floor=0.7)
+    assert w == 0.7
+
+
+# ---------------------------------------------------------------------------
 # apply_decay
 # ---------------------------------------------------------------------------
 
@@ -150,10 +222,12 @@ def test_apply_decay_reorders_results():
         "case-1": SimpleNamespace(
             last_validated_version="7.45", app_version="7.45",
             confidence=0.5, execution_count=10, pass_count=9,
+            source="ai_generated", created_at=datetime(2026, 5, 1),
         ),
         "case-2": SimpleNamespace(
             last_validated_version="7.42", app_version="7.42",
             confidence=0.5, execution_count=10, pass_count=9,
+            source="ai_generated", created_at=datetime(2026, 5, 1),
         ),
     }
 
