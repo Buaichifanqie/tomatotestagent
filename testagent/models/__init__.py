@@ -1,3 +1,4 @@
+from testagent.models.app_version import AppVersion
 from testagent.models.base import Base, BaseModel, DateTimeTZ, JSONType
 from testagent.models.defect import DEFECT_CATEGORIES, DEFECT_SEVERITIES, DEFECT_STATUSES, Defect
 from testagent.models.learned_pattern import LearnedPattern
@@ -16,6 +17,7 @@ from testagent.models.session import SESSION_STATUSES, TRIGGER_TYPES, TestSessio
 from testagent.models.skill import SkillDefinition
 from testagent.models.retrieval_trace import RetrievalTrace
 from testagent.models.snapshot import SNAPSHOT_STATUSES, ExecutionSnapshotModel
+from testagent.models.test_case_record import TestCaseRecord
 
 __all__ = [
     "DEFECT_CATEGORIES",
@@ -30,6 +32,7 @@ __all__ = [
     "TASK_STATUSES",
     "TASK_TYPES",
     "TRIGGER_TYPES",
+    "AppVersion",
     "Base",
     "BaseModel",
     "DateTimeTZ",
@@ -40,6 +43,7 @@ __all__ = [
     "MCPConfig",
     "RetrievalTrace",
     "SkillDefinition",
+    "TestCaseRecord",
     "TestPlan",
     "TestResult",
     "TestSession",
