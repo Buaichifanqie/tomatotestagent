@@ -52,6 +52,7 @@
   "title": "简洁的用例名称",
   "priority": "P0",
   "is_core": true,
+  "required_state": ["logged_in"],
   "steps": [
     {"step": 1, "action": "launch", "target": "tv.danmaku.bili", "value": ""},
     {"step": 2, "action": "assert", "target": "推荐Tab可见", "value": ""},
@@ -59,6 +60,18 @@
   ]
 }
 ```
+
+## required_state 说明
+
+每个用例必须标注执行前需要的设备/App 状态数组（用于优化执行顺序，减少不必要的状态切换）。
+一个用例可以同时需要多个状态，例如 `["logged_in", "network_off"]` 表示需要登录且断网。
+无特殊要求时使用空数组 `[]`。
+
+可选值：
+- `"logged_in"` — 需要用户已登录
+- `"logged_out"` — 需要用户未登录（游客状态）
+- `"network_off"` — 需要断网状态
+- `"network_on"` — 需要联网状态
 
 ## 覆盖率要求（重点关注）
 

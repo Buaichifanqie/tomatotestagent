@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from testagent.common.appium_manager import ensure_appium_running
+from testagent.plan.scheduler import _has_state_conflict, _infer_state
 from testagent.mcp_servers.appium_server.tools import (
     app_assert_element,
     app_exec,
@@ -432,15 +433,28 @@ class ExecutionEngine:
                       "check that Appium server is running and a device is connected]")
             return test_cases
 
+        # ── State-aware execution ────────────────────────────────────────
+        current_app_state: set[str] = set()
+
         for tc in test_cases:
             if self.should_abort():
                 self._mark_aborted(tc, "Abort condition met")
                 continue
 
+            # ── Determine if teardown is needed ─────────────────────────
+            tc_needed = _infer_state(tc)
+            tc_missing = tc_needed - current_app_state
+
+            needs_teardown = (
+                tc != test_cases[0]
+                and (bool(tc_missing) or _has_state_conflict(current_app_state, tc_needed))
+            )
+
             # ── Environment reset before each TC ──────────────────────────
-            if tc != test_cases[0]:
+            if needs_teardown:
                 self._log("Resetting device environment...")
                 await self._teardown_app()
+                current_app_state = set()
 
                 # ── Appium server health check — restart if process died ──
                 if not await ensure_appium_running():
@@ -497,6 +511,14 @@ class ExecutionEngine:
                 print(f" {status}")
 
             self._update_consecutive_blocked(tc)
+
+            # ── Update state tracking (only on success) ─────────────
+            if tc.execution.status in (ExecutionStatus.EXECUTED,):
+                if tc_needed:
+                    current_app_state = tc_needed
+            else:
+                # TC failed/blocked — state is uncertain, force teardown next
+                current_app_state = set()
 
             # ── Pause between TCs for visual pacing ───────────────────────
             await asyncio.sleep(2)

@@ -142,6 +142,7 @@ class TestCase(BaseModel):
     priority: str = "P1"
     is_core: bool = False
     requirement_ids: list[str] = Field(default_factory=list)
+    required_state: list[str] = Field(default_factory=list)
     precondition: Precondition | None = None
     teardown: list[TestStep] = Field(default_factory=list)
     steps: list[TestStep] = Field(default_factory=list)
