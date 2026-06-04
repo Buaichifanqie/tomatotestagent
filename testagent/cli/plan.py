@@ -1083,10 +1083,10 @@ async def _plan_command_async(
         typer.echo("❌ Appium server is not available. Please start Appium manually.")
         raise typer.Exit(1)
 
-    # Re-sort after possible edits in Phase 3
+    # ── Optimize execution order ────────────────────────────────────────
     from testagent.plan.scheduler import reorder_for_execution
     test_cases = reorder_for_execution(test_cases)
-    typer.echo(f"  Executing {len(test_cases)} cases (order optimized)")
+    typer.echo(f"  Execution order optimized ({len(test_cases)} cases)")
 
     engine = ExecutionEngine(config, llm_provider=llm_provider)
     executed_tcs = await engine.execute_all(test_cases)
