@@ -935,6 +935,9 @@ async def _plan_command_async(
                             step.value = step.value.replace(wrong, app_package)
 
     # ── Phase 3: Present to user ────────────────────────────────────────────
+    from testagent.plan.scheduler import reorder_for_execution
+    test_cases = reorder_for_execution(test_cases)
+
     original_steps = {tc.id: [{"step": s.step, "action": s.action, "target": s.target, "value": s.value} for s in tc.steps] for tc in test_cases}
     if not present_tc_to_user(test_cases, auto_yes=auto_yes, llm_provider=llm_provider, app_package=app_package or ""):
         typer.echo("Execution cancelled by user.")
@@ -1080,6 +1083,11 @@ async def _plan_command_async(
         typer.echo("❌ Appium server is not available. Please start Appium manually.")
         raise typer.Exit(1)
 
+    # Re-sort after possible edits in Phase 3
+    from testagent.plan.scheduler import reorder_for_execution
+    test_cases = reorder_for_execution(test_cases)
+    typer.echo(f"  Executing {len(test_cases)} cases (order optimized)")
+
     engine = ExecutionEngine(config, llm_provider=llm_provider)
     executed_tcs = await engine.execute_all(test_cases)
 
@@ -1108,4 +1116,26 @@ async def _plan_command_async(
     report_path = report_gen.generate(name, executed_tcs, overall, config)
 
     typer.echo(f"Report generated: {report_path}")
+
+    # ── Phase 6b: Auto-capture failed cases for replay ──────────────────
+    try:
+        import uuid as _uuid
+        from testagent.db.engine import get_session
+        from testagent.db.repository import FailedReplayRepository
+        from testagent.plan.replay_manager import capture_failures
+
+        run_id = _uuid.uuid4().hex[:12]
+        async with get_session() as session:
+            replay_repo = FailedReplayRepository(session)
+            await capture_failures(
+                executed_tcs=executed_tcs,
+                run_id=run_id,
+                app_id=app_id or "unknown",
+                report_path=str(report_path),
+                repository=replay_repo,
+            )
+            typer.echo(f"  Failed cases captured for replay (run_id={run_id})")
+    except Exception as exc:
+        typer.echo(f"  [Replay capture warning: {exc}]")
+
     return report_path

@@ -239,5 +239,6 @@ class TestCaseGenerator:
             priority=item.get("priority", "P1"),
             is_core=item.get("is_core", False),
             requirement_ids=item.get("requirement_ids", []),
+            required_state=item.get("required_state", []),
             steps=steps,
         )

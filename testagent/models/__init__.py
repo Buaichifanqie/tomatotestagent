@@ -1,5 +1,6 @@
 from testagent.models.app_version import AppVersion
 from testagent.models.base import Base, BaseModel, DateTimeTZ, JSONType
+from testagent.models.failed_replay import REPLAY_STATUSES, FailedCaseReplay
 from testagent.models.defect import DEFECT_CATEGORIES, DEFECT_SEVERITIES, DEFECT_STATUSES, Defect
 from testagent.models.learned_pattern import LearnedPattern
 from testagent.models.mcp_config import MCPConfig
@@ -25,6 +26,7 @@ __all__ = [
     "DEFECT_STATUSES",
     "ISOLATION_LEVELS",
     "PLAN_STATUSES",
+    "REPLAY_STATUSES",
     "RESULT_STATUSES",
     "SESSION_STATUSES",
     "SNAPSHOT_STATUSES",
@@ -38,6 +40,7 @@ __all__ = [
     "DateTimeTZ",
     "Defect",
     "ExecutionSnapshotModel",
+    "FailedCaseReplay",
     "JSONType",
     "LearnedPattern",
     "MCPConfig",

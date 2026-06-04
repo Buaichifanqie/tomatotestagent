@@ -16,6 +16,7 @@ from testagent.models.retrieval_trace import RetrievalTrace
 from testagent.models.result import TestResult
 from testagent.models.session import TestSession
 from testagent.models.test_case_record import TestCaseRecord
+from testagent.models.failed_replay import FailedCaseReplay
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -576,3 +577,95 @@ class TestCaseRecordRepository(Repository[TestCaseRecord]):
     async def update_validation_version(self, record_id: str, version: str) -> TestCaseRecord | None:
         """Update last_validated_version."""
         return await self.update(record_id, {"last_validated_version": version})
+
+
+class FailedReplayRepository(Repository[FailedCaseReplay]):
+    _model_class = FailedCaseReplay
+
+    async def get_pending(
+        self, app_id: str, include_blocked: bool = False,
+    ) -> list[FailedCaseReplay]:
+        """Get unresolved FAIL records for an app."""
+        try:
+            stmt = (
+                self._base_query()
+                .where(FailedCaseReplay.app_id == app_id)
+                .where(FailedCaseReplay.resolved == 0)
+                .where(FailedCaseReplay.original_status == "FAILED")
+                .order_by(FailedCaseReplay.created_at.desc())
+            )
+            if not include_blocked:
+                stmt = stmt.where(FailedCaseReplay.last_replay_status != "BLOCKED")
+            result = await self._session.execute(stmt)
+            return list(result.scalars().all())
+        except Exception as exc:
+            raise DatabaseError(
+                "Failed to get pending replays",
+                code="GET_PENDING_FAILED",
+                details={"app_id": app_id, "error": str(exc)},
+            ) from exc
+
+    async def get_by_app_and_case_id(
+        self, app_id: str, test_case_id: str,
+    ) -> FailedCaseReplay | None:
+        """Find unresolved record by (app_id, test_case_id)."""
+        try:
+            stmt = (
+                self._base_query()
+                .where(FailedCaseReplay.app_id == app_id)
+                .where(FailedCaseReplay.test_case_id == test_case_id)
+                .where(FailedCaseReplay.resolved == 0)
+            )
+            result = await self._session.execute(stmt)
+            return result.scalars().first()
+        except Exception as exc:
+            raise DatabaseError(
+                "Failed to get replay by app and case id",
+                code="GET_BY_APP_CASE_FAILED",
+                details={"app_id": app_id, "test_case_id": test_case_id, "error": str(exc)},
+            ) from exc
+
+    async def upsert(self, entity: FailedCaseReplay) -> FailedCaseReplay:
+        """Insert or update: if an unresolved record exists for the same
+        (app_id, test_case_id), update it in-place; otherwise create new."""
+        existing = await self.get_by_app_and_case_id(entity.app_id, entity.test_case_id)
+        if existing is not None:
+            update_data = {
+                "run_id": entity.run_id,
+                "test_case_name": entity.test_case_name,
+                "original_status": entity.original_status,
+                "original_error_message": entity.original_error_message,
+                "original_failed_step": entity.original_failed_step,
+                "original_screenshot_path": entity.original_screenshot_path,
+                "original_report_path": entity.original_report_path,
+                "test_case_data": entity.test_case_data,
+                "prerequisite_case_ids": entity.prerequisite_case_ids,
+                "prerequisite_case_data": entity.prerequisite_case_data,
+                "original_run_timestamp": entity.original_run_timestamp,
+                "last_replay_status": "PENDING",
+            }
+            return await self.update(existing.id, update_data)  # type: ignore[return-value]
+        return await self.create(entity)
+
+    async def cleanup_resolved(self, app_id: str, days: int = 30) -> int:
+        """Delete resolved records older than N days. Returns count deleted."""
+        try:
+            cutoff = datetime.now(UTC) - timedelta(days=days)
+            stmt = (
+                self._base_query()
+                .where(FailedCaseReplay.app_id == app_id)
+                .where(FailedCaseReplay.resolved == 1)
+                .where(FailedCaseReplay.resolved_at < cutoff)
+            )
+            result = await self._session.execute(stmt)
+            records = list(result.scalars().all())
+            for rec in records:
+                await self._session.delete(rec)
+            await self._session.flush()
+            return len(records)
+        except Exception as exc:
+            raise DatabaseError(
+                "Failed to cleanup resolved replays",
+                code="CLEANUP_FAILED",
+                details={"app_id": app_id, "days": days, "error": str(exc)},
+            ) from exc

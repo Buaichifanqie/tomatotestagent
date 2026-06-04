@@ -27,6 +27,7 @@ from testagent.db.migrations import (
 )
 from testagent.db.repository import (
     DefectRepository,
+    FailedReplayRepository,
     Repository,
     SessionRepository,
     TaskRepository,
@@ -34,6 +35,7 @@ from testagent.db.repository import (
 
 __all__ = [
     "DefectRepository",
+    "FailedReplayRepository",
     "MigrationStats",
     "Repository",
     "SessionRepository",
