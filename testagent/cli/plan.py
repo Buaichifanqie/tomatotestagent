@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from datetime import datetime
@@ -742,8 +743,7 @@ async def _plan_command_async(
                         from testagent.mcp_servers.appium_server.tools import app_launch, app_get_source
                         await app_launch(package=app_package, activity=app_activity or "",
                                          appium_url=sm_temp.appium_url, session_id=sid)
-                        import asyncio as _aio
-                        await _aio.sleep(3)
+                        await asyncio.sleep(3)
                         src = await app_get_source(appium_url=sm_temp.appium_url, session_id=sid)
                         from testagent.exploration.ui_tree_parser import parse_ui_tree
                         from testagent.exploration.ui_context_map import ElementInfo as EI
@@ -758,6 +758,7 @@ async def _plan_command_async(
                         sm_temp.close_session()
                 else:
                     typer.echo("  Cannot create session for cache validation, will re-explore")
+                    sm_temp.close_session()
 
             # Explore if no valid cache
             if ui_context_map is None:
@@ -783,11 +784,9 @@ async def _plan_command_async(
                 ui_context_string = ui_context_map.to_context_string()
 
                 # Save to output_dir for debugging
-                import json as _json
-                from pathlib import Path as _Path
-                map_path = _Path(output_dir) / "ui_context_map.json"
+                map_path = Path(output_dir) / "ui_context_map.json"
                 map_path.write_text(
-                    _json.dumps(ui_context_map.to_dict(), ensure_ascii=False, indent=2),
+                    json.dumps(ui_context_map.to_dict(), ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
 

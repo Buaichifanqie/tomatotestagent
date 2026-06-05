@@ -96,7 +96,7 @@ class AppExplorer:
             return context_map
 
         # 2. Create session
-        session_id = await self._session_manager.create_session()
+        session_id = self._session_manager.create_session()
         if session_id is None:
             _log.warning("Failed to create Appium session")
             return context_map
@@ -149,7 +149,7 @@ class AppExplorer:
             await self._navigate_to_home()
 
         finally:
-            await self._session_manager.close_session()
+            self._session_manager.close_session()
 
         return context_map
 
@@ -221,8 +221,15 @@ class AppExplorer:
             return "error" not in result
 
         if action.type == "type":
-            from testagent.mcp_servers.appium_server.tools import app_type_text
+            from testagent.mcp_servers.appium_server.tools import app_tap, app_type_text
 
+            # Focus the target element first
+            await app_tap(
+                x=target_el.center_x,
+                y=target_el.center_y,
+                appium_url=self._appium_url,
+                session_id=self._session_manager.session_id,
+            )
             result = await app_type_text(
                 text=action.input_value,
                 appium_url=self._appium_url,

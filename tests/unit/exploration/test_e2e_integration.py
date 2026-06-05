@@ -214,9 +214,9 @@ class TestPlannerToExplorerFlow:
 
         # 3. Create a mock SessionManager
         mock_session = MagicMock()
-        mock_session.create_session = AsyncMock(return_value="sess-1")
+        mock_session.create_session = MagicMock(return_value="sess-1")
         mock_session.session_id = "sess-1"
-        mock_session.close_session = AsyncMock()
+        mock_session.close_session = MagicMock()
 
         # 4. Mock all Appium tools
         mock_launch.return_value = {"result": "ok"}
