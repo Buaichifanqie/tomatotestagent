@@ -10,6 +10,7 @@ from typing import Any
 import typer
 
 from testagent.plan.execution_engine import ExecutionEngine
+from testagent.plan.session_manager import SessionManager
 from testagent.plan.evaluator import PerTCEvaluator
 from testagent.plan.models import PlanConfig, TestCase, TestStep
 from testagent.plan.overall_evaluator import OverallEvaluator
@@ -692,10 +693,7 @@ async def _plan_command_async(
         auto_yes=auto_yes,
     )
 
-    # ── Phase 2: Generate test cases ────────────────────────────────────────
-    typer.echo("Generating test cases...")
-
-    # Create LLM provider once — shared between TC generation and execution
+    # Create LLM provider once — shared between exploration, TC generation and execution
     from testagent.config.settings import get_settings
     from testagent.llm.local_provider import LLMProviderFactory
 
@@ -703,7 +701,7 @@ async def _plan_command_async(
     llm_provider = LLMProviderFactory.create(settings)
 
     def _build_llm_callable() -> Any:
-        """Build a callable (async) that wraps the shared LLM provider for TC generation."""
+        """Build a callable (async) that wraps the shared LLM provider."""
         from testagent.plan.test_case_generator import TC_GENERATION_SYSTEM_PROMPT
 
         async def _call(text: str) -> str:
@@ -720,6 +718,88 @@ async def _plan_command_async(
 
         return _call  # return async callable directly (no asyncio.run wrapper)
 
+    # ── Phase 1.5: App UI Exploration ────────────────────────────────────
+    ui_context_map = None
+    ui_context_string = ""
+    if app_package:
+        typer.echo("[Phase 1.5] Exploring App UI...")
+        try:
+            from testagent.exploration.app_explorer import AppExplorer
+            from testagent.exploration.map_cache import MapCache
+            from testagent.exploration.ui_context_map import UIContextMap
+
+            cache = MapCache(cache_dir=output_dir)
+
+            # Try to use cached map
+            cached_map = cache.load(app_package, detected_version or "unknown")
+            if cached_map:
+                typer.echo("  Found cached UI context map, validating...")
+                # Quick validation: create session, get home elements, compare
+                sm_temp = SessionManager()
+                sid = sm_temp.create_session()
+                if sid:
+                    try:
+                        from testagent.mcp_servers.appium_server.tools import app_launch, app_get_source
+                        await app_launch(package=app_package, activity=app_activity or "",
+                                         appium_url=sm_temp.appium_url, session_id=sid)
+                        import asyncio as _aio
+                        await _aio.sleep(3)
+                        src = await app_get_source(appium_url=sm_temp.appium_url, session_id=sid)
+                        from testagent.exploration.ui_tree_parser import parse_ui_tree
+                        from testagent.exploration.ui_context_map import ElementInfo as EI
+                        home_elements = parse_ui_tree(src.get("source", ""))
+                        current_eis = [EI.from_ui_element(e) for e in home_elements]
+                        if cache.validate(app_package, detected_version or "unknown", current_eis):
+                            ui_context_map = cached_map
+                            typer.echo("  Cache validated, using cached UI context map")
+                        else:
+                            typer.echo("  Cache validation failed, will re-explore")
+                    finally:
+                        sm_temp.close_session()
+                else:
+                    typer.echo("  Cannot create session for cache validation, will re-explore")
+
+            # Explore if no valid cache
+            if ui_context_map is None:
+                sm = SessionManager()
+                explorer = AppExplorer(
+                    session_manager=sm,
+                    llm_callable=_build_llm_callable(),
+                    appium_url=sm.appium_url,
+                )
+                ui_context_map = await explorer.explore(
+                    prd_text=prd_text,
+                    app_package=app_package,
+                    app_activity=app_activity or "",
+                )
+
+                if ui_context_map.pages:
+                    cache.save(app_package, detected_version or "unknown", ui_context_map)
+                    typer.echo(f"  Explored {len(ui_context_map.pages)} pages, {ui_context_map.element_count} elements")
+                else:
+                    typer.echo("  No pages explored, continuing without UI context")
+
+            if ui_context_map and ui_context_map.pages:
+                ui_context_string = ui_context_map.to_context_string()
+
+                # Save to output_dir for debugging
+                import json as _json
+                from pathlib import Path as _Path
+                map_path = _Path(output_dir) / "ui_context_map.json"
+                map_path.write_text(
+                    _json.dumps(ui_context_map.to_dict(), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+        except Exception as e:
+            typer.echo(f"  [WARNING] App exploration failed: {e}")
+            typer.echo("  Continuing without UI context (TC quality may be lower)")
+            ui_context_map = None
+            ui_context_string = ""
+
+    # ── Phase 2: Generate test cases ────────────────────────────────────────
+    typer.echo("Generating test cases...")
+
     # ── Inject app info into TC generation prompt ──────────────────────
     enhanced_prd = prd_text
     app_info_parts = []
@@ -729,6 +809,9 @@ async def _plan_command_async(
         app_info_parts.append(f"Android launch activity: {app_activity}")
     if app_info_parts:
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
+
+    if ui_context_string:
+        enhanced_prd += "\n\n## App 界面信息\n\n以下是通过自动化探索获取的 App 实际界面信息，包括各页面的可交互元素和导航路径。请基于这些真实信息生成测试用例步骤，不要猜测元素名称。\n\n" + ui_context_string
 
     # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────
     history_context = ""
