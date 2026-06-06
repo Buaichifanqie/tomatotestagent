@@ -13,7 +13,7 @@ DEFAULT_API_URL = "https://ark.cn-beijing.volces.com/api/v3"
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 DEFAULT_MODEL = "doubao-seed-2-0-lite-260428"
 DEFAULT_TIMEOUT = 60
-DEFAULT_MAX_RETRIES = 3
+DEFAULT_MAX_RETRIES = 2
 
 _VISION_SYSTEM_PROMPT = """你是一个手机界面分析专家。你的任务是分析手机截图，找出用户指定的 UI 元素。
 
@@ -168,9 +168,11 @@ class VolcanoVisionClient:
                     break
                 except Exception as e:
                     last_exception = e
+                    error_detail = str(e) or repr(e) or type(e).__name__
                     logger.error(
-                        "Vision API unexpected error",
-                        extra={"extra_data": {"error": str(e)}},
+                        "Vision API unexpected error: %s",
+                        error_detail,
+                        extra={"extra_data": {"error": error_detail, "type": type(e).__name__}},
                     )
                     break
 

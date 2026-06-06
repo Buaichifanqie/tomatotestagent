@@ -61,7 +61,17 @@ class TestCaseGenerator:
     # ── response parsing ─────────────────────────────────────────────────────
 
     def _parse_response(self, raw: str) -> list[TestCase]:
-        """Parse the LLM response into a list of TestCase objects."""
+        """Parse the LLM response into a list of TestCase objects.
+
+        Supports two top-level shapes from the LLM:
+          1. ``{"_meta": {...}, "cases": [ {...}, ... ]}``  (new schema)
+          2. ``[ {...}, ... ]``                              (legacy schema)
+        """
+        # ── Try 0: top-level object with a "cases" array (new schema) ──
+        items_from_object = self._extract_cases_from_object(raw)
+        if items_from_object is not None:
+            return [self._dict_to_tc(item) for item in items_from_object if isinstance(item, dict)]
+
         extracted = self._extract_json(raw)
 
         # ── Try 1: full JSON array from extracted block ──────────────
@@ -97,6 +107,49 @@ class TestCaseGenerator:
             raw[:300],
         )
         return []
+
+    def _extract_cases_from_object(self, raw: str) -> list[dict] | None:
+        """If the LLM returned ``{"_meta":..., "cases":[...]}``, return the cases list.
+
+        Returns None when the response is not a top-level object with ``cases``,
+        so callers can fall back to legacy array parsing.
+        """
+        text = raw.strip()
+        # Strip markdown fences if present
+        fence_match = re.search(r"```(?:json)?\s*\n?(.+?)\n?```", text, re.DOTALL)
+        if fence_match:
+            text = fence_match.group(1).strip()
+
+        # Find the outermost {...}
+        start = text.find("{")
+        if start < 0:
+            return None
+        depth = 0
+        end = -1
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end < 0:
+            return None
+
+        candidate = text[start:end + 1]
+        candidate = re.sub(r",\s*([\]}])", r"\1", candidate)
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        cases = obj.get("cases")
+        if not isinstance(cases, list):
+            return None
+        return cases
 
     def _fallback_parse(self, text: str) -> list[TestCase]:
         """Fallback: extract individual JSON objects and reconstruct a valid array.
@@ -240,12 +293,39 @@ class TestCaseGenerator:
         steps_data = item.get("steps", [])
         steps = [TestStep(**self._normalize_step(s)) for s in steps_data] if steps_data else []
 
+        # The v2 prompt uses a unified ``preconditions`` array with ``state:*``
+        # prefixes for mechanism-level states (e.g. ``state:logged_in``) and
+        # ``biz:*`` / ``data:*`` for business-level prerequisites.
+        # We split them into the legacy ``required_state`` (strip prefix) and
+        # the new ``prerequisites`` (keep as-is).
+        raw_preconditions = item.get("preconditions", [])
+        required_state: list[str] = []
+        prerequisites: list[str] = []
+        if isinstance(raw_preconditions, list):
+            for p in raw_preconditions:
+                p_str = str(p)
+                if p_str.startswith("state:"):
+                    required_state.append(p_str.removeprefix("state:"))
+                else:
+                    prerequisites.append(p_str)
+
+        # If the caller provided the old ``required_state`` directly, use it
+        # (fall back to what we just derived from preconditions).
+        legacy_required_state = item.get("required_state", [])
+        if not legacy_required_state and required_state:
+            legacy_required_state = required_state
+
         return TestCase(
             id=item.get("id", "TC-UNKNOWN-001"),
             title=item.get("title", ""),
             priority=item.get("priority", "P1"),
             is_core=item.get("is_core", False),
+            feature_id=item.get("feature_id", ""),
+            coverage_dimension=item.get("coverage_dimension", ""),
+            scenario_question=item.get("scenario_question", ""),
+            prerequisites=prerequisites,
+            expected_outcome=item.get("expected_outcome", ""),
             requirement_ids=item.get("requirement_ids", []),
-            required_state=item.get("required_state", []),
+            required_state=legacy_required_state,
             steps=steps,
         )

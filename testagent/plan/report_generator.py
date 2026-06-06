@@ -95,24 +95,48 @@ class ReportGenerator:
             lines.append(f"| 回退重试次数 | {cache_stats.fallbacks} |")
             lines.append("")
 
+        # ── 重试统计 ────────────────────────────────────────────────────────
+        retried_tcs = [tc for tc in test_cases if tc.execution.retries > 0]
+        if retried_tcs:
+            lines.append("## 重试统计")
+            lines.append("")
+            lines.append(f"共有 **{len(retried_tcs)}** 个用例经过重试：")
+            lines.append("")
+            lines.append("| ID | 标题 | 重试次数 | 首次失败原因 | 重试结果 |")
+            lines.append("|---|---|---|---|---|")
+            for tc in retried_tcs:
+                first_err = ""
+                if tc.execution.previous_attempts:
+                    first_err = str(tc.execution.previous_attempts[0].get("error_message", ""))
+                    if len(first_err) > 60:
+                        first_err = first_err[:57] + "..."
+                retry_verdict = tc.execution.verdict.value if tc.execution.verdict else ""
+                retry_mark = "✅ 通过" if retry_verdict == "PASS" else "❌ 仍失败"
+                lines.append(
+                    f"| {tc.id} | {tc.title} | {tc.execution.retries} "
+                    f"| {first_err} | {retry_mark} |"
+                )
+            lines.append("")
+
         # ── 测试结果汇总 ────────────────────────────────────────────────────
         lines.append("## 测试结果汇总")
         lines.append("")
         lines.append(
-            "| ID | 标题 | 优先级 | 核心用例 | 状态 | 判定 | 耗时(ms) | 错误信息 |"
+            "| ID | 标题 | 优先级 | 核心用例 | 状态 | 判定 | 重试 | 耗时(ms) | 错误信息 |"
         )
         lines.append(
-            "|---|---|---|---|---|---|---|---|"
+            "|---|---|---|---|---|---|---|---|---|"
         )
         for tc in test_cases:
             core_mark = "✓" if tc.is_core else ""
             verdict_str = tc.execution.verdict.value if tc.execution.verdict else ""
             duration = tc.execution.duration_ms
             error = tc.execution.error_message or ""
+            retry_mark = f"🔄 ×{tc.execution.retries}" if tc.execution.retries > 0 else ""
             lines.append(
                 f"| {tc.id} | {tc.title} | {tc.priority} "
                 f"| {core_mark} | {tc.execution.status.value} "
-                f"| {verdict_str} | {duration} | {error} |"
+                f"| {verdict_str} | {retry_mark} | {duration} | {error} |"
             )
         lines.append("")
 
@@ -123,7 +147,16 @@ class ReportGenerator:
             verdict_emoji = self._VERDICT_EMOJI.get(
                 tc.execution.verdict, ""
             ) if tc.execution.verdict else ""
-            lines.append(f"### {tc.id}: {tc.title} {verdict_emoji}")
+            retry_label = ""
+            if tc.execution.retries > 0:
+                retry_label = f" 🔄 重试×{tc.execution.retries}"
+                if tc.execution.previous_attempts:
+                    first_verdict = str(tc.execution.previous_attempts[0].get("verdict", ""))
+                    first_err = str(tc.execution.previous_attempts[0].get("error_message", ""))
+                    if first_err and len(first_err) > 80:
+                        first_err = first_err[:77] + "..."
+                    retry_label += f"（首次: {first_verdict}{' — ' + first_err if first_err else ''}）"
+            lines.append(f"### {tc.id}: {tc.title} {verdict_emoji}{retry_label}")
             lines.append("")
 
             # ── Evidence (recording, screenshots) ────────────────────
@@ -154,6 +187,8 @@ class ReportGenerator:
                 )
                 for s in steps:
                     result_mark = "✅" if s.success else "❌"
+                    if s.success and s.warning:
+                        result_mark = "⚠️"
                     err = s.error_message or ""
                     dur = s.duration_ms if s.duration_ms is not None else ""
                     source = s.source or ""
@@ -165,6 +200,11 @@ class ReportGenerator:
                         f"| {s.step} | {s.action} | {s.target} "
                         f"| {source_mark} | {result_mark} | {dur} | {err} |"
                     )
+                    # Assert warning detail
+                    if s.warning:
+                        lines.append("")
+                        lines.append(f"  > ⚠️ **断言警告:** {s.warning}")
+                        lines.append("")
                     # Screenshot for failed steps
                     if not s.success and s.screenshot_after:
                         scr_path = Path(s.screenshot_after)

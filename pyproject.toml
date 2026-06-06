@@ -41,6 +41,7 @@ dependencies = [
     "meilisearch-python-async>=1.5",
     "openai>=1.10",
     "pyyaml>=6.0",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

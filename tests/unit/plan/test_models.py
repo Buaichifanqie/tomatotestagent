@@ -537,7 +537,7 @@ class TestAbortPolicy:
         ap = AbortPolicy()
         assert ap.max_consecutive_blocked == 3
         assert ap.max_session_recreate == 2
-        assert ap.max_total_duration_ms == 1_800_000
+        assert ap.max_total_duration_ms == 18_000_000
         assert ap.abort_on == ["SESSION_LOST", "ENVIRONMENT_ERROR"]
 
     def test_custom_values(self) -> None:

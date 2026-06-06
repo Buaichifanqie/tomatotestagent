@@ -1182,10 +1182,10 @@ async def _plan_command_async(
         typer.echo("❌ Appium server is not available. Please start Appium manually.")
         raise typer.Exit(1)
 
-    # ── Optimize execution order ────────────────────────────────────────
+    # ── Infer states for execution (order preserved as generated) ───────
     from testagent.plan.scheduler import reorder_for_execution
     test_cases = reorder_for_execution(test_cases)
-    typer.echo(f"  Execution order optimized ({len(test_cases)} cases)")
+    typer.echo(f"  Execution order: {len(test_cases)} cases (original order)")
 
     engine = ExecutionEngine(config, llm_provider=llm_provider)
     executed_tcs = await engine.execute_all(test_cases)
@@ -1212,6 +1212,17 @@ async def _plan_command_async(
         typer.echo(f"  Retrying {len(failed_tcs)} failed case(s)...")
         retry_engine = ExecutionEngine(config, llm_provider=llm_provider)
         for tc in failed_tcs:
+            # Save first attempt data before clearing
+            first_attempt = {
+                "verdict": tc.execution.verdict.value if tc.execution.verdict else "FAIL",
+                "error_message": tc.execution.error_message or "",
+                "failed_step": tc.execution.failed_step,
+                "failure_type": tc.execution.failure_type.value if tc.execution.failure_type else None,
+                "steps_count": len(tc.execution.steps),
+                "duration_ms": tc.execution.duration_ms,
+            }
+            tc.execution.previous_attempts.append(first_attempt)
+
             # Reset execution state for retry
             tc.execution.status = "PENDING"
             tc.execution.verdict = None

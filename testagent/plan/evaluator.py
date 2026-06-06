@@ -68,6 +68,16 @@ class PerTCEvaluator:
             )
 
         if status == ExecutionStatus.EXECUTED:
+            # Check for assert warnings — downgrade to NEED_REVIEW if present
+            if tc.execution.assert_warnings:
+                warn_summary = "; ".join(tc.execution.assert_warnings[:3])
+                return EvaluationOutput(
+                    verdict=ExecutionVerdict.NEED_REVIEW,
+                    confidence=0.5,
+                    reason=f"All steps executed but {len(tc.execution.assert_warnings)} assert warning(s): {warn_summary}",
+                    evidence=list(tc.execution.evidence),
+                    evidence_missing=missing,
+                )
             if missing:
                 return EvaluationOutput(
                     verdict=ExecutionVerdict.PASS,

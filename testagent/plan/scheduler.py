@@ -154,48 +154,13 @@ def _get_primary_group(states: set[str]) -> str:
 
 
 def reorder_for_execution(test_cases: list[TestCase]) -> list[TestCase]:
-    """Reorder test cases to minimize state transitions.
+    """Infer required_state for each TC but preserve the original execution order.
 
-    Strategy:
-    1. Infer required_state for each TC (LLM labels -> keyword fallback)
-    2. Group by primary state (logged_in, logged_out, network_off, etc.)
-    3. Order groups: logged_in → network_off → network_on → logged_out
-    4. Within each group: P0 core first, then P0, P1 core, P1, P2, P3
-    5. Within same priority: fewer states first (simpler cases before complex)
-    6. Default cases (no specific state) are appended at the end
+    States are inferred so the execution engine can manage device state
+    transitions, but the order is kept exactly as generated/presented to
+    the user.
     """
-    if len(test_cases) <= 1:
-        return list(test_cases)
-
-    # Step 1: infer states and group
-    groups: dict[str, list[tuple[int, TestCase, set[str]]]] = {}
-    for i, tc in enumerate(test_cases):
-        states = _infer_state(tc)
-        group = _get_primary_group(states)
-        groups.setdefault(group, []).append((i, tc, states))
-
-    # Step 2: sort within each group by priority, core, then state count
-    for group in groups:
-        groups[group].sort(key=lambda item: (
-            _PRIORITY_ORDER.get(item[1].priority, 9),
-            0 if item[1].is_core else 1,
-            len(item[2]),  # fewer states first
-        ))
-
-    # Step 3: order groups and flatten
-    # logged_in first, then other non-default states, then logged_out, then default
-    non_default_groups = [g for g in groups if g != "default" and g != "logged_out"]
-    non_default_groups.sort(key=lambda g: _GROUP_ORDER.get(g, 50))
-
-    ordered_groups = non_default_groups
-    if "logged_out" in groups:
-        ordered_groups = ordered_groups + ["logged_out"]
-    if "default" in groups:
-        ordered_groups = ordered_groups + ["default"]
-
-    result: list[TestCase] = []
-    for group in ordered_groups:
-        for _, tc, _ in groups[group]:
-            result.append(tc)
-
-    return result
+    for tc in test_cases:
+        if not tc.required_state:
+            tc.required_state = sorted(_infer_state(tc))
+    return list(test_cases)

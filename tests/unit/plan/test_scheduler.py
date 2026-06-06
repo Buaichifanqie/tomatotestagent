@@ -165,8 +165,8 @@ class TestReorderForExecution:
         reorder_for_execution(tcs)
         assert [tc.id for tc in tcs] == original_ids
 
-    def test_same_state_grouped_together(self):
-        """Cases with the same state should be adjacent."""
+    def test_same_state_preserves_order(self):
+        """Original order must be preserved — no reordering by state group."""
         tcs = [
             TestCase(id="TC-001", title="未登录搜索", priority="P1"),
             TestCase(id="TC-002", title="登录点赞", priority="P1"),
@@ -174,16 +174,10 @@ class TestReorderForExecution:
             TestCase(id="TC-004", title="登录评论", priority="P1"),
         ]
         result = reorder_for_execution(tcs)
-        states = [_infer_state(tc) for tc in result]
-        logged_in_indices = [i for i, s in enumerate(states) if "logged_in" in s]
-        logged_out_indices = [i for i, s in enumerate(states) if "logged_out" in s]
-        if len(logged_in_indices) > 1:
-            assert max(logged_in_indices) - min(logged_in_indices) == len(logged_in_indices) - 1
-        if len(logged_out_indices) > 1:
-            assert max(logged_out_indices) - min(logged_out_indices) == len(logged_out_indices) - 1
+        assert [tc.id for tc in result] == ["TC-001", "TC-002", "TC-003", "TC-004"]
 
-    def test_priority_tiebreak(self):
-        """Same state distance -> higher priority first."""
+    def test_priority_preserves_order(self):
+        """Original order preserved regardless of priority."""
         tcs = [
             TestCase(id="TC-001", title="登录P2", priority="P2"),
             TestCase(id="TC-002", title="登录P0", priority="P0"),
@@ -191,61 +185,52 @@ class TestReorderForExecution:
         ]
         result = reorder_for_execution(tcs)
         ids = [tc.id for tc in result]
-        assert ids == ["TC-002", "TC-003", "TC-001"]
+        assert ids == ["TC-001", "TC-002", "TC-003"]
 
-    def test_core_before_non_core_same_priority(self):
+    def test_core_preserves_order(self):
+        """Original order preserved — core flag does not affect ordering."""
         tcs = [
             TestCase(id="TC-001", title="登录P1普通", priority="P1", is_core=False),
             TestCase(id="TC-002", title="登录P1核心", priority="P1", is_core=True),
         ]
         result = reorder_for_execution(tcs)
         ids = [tc.id for tc in result]
-        assert ids == ["TC-002", "TC-001"]
+        assert ids == ["TC-001", "TC-002"]
 
-    def test_default_does_not_break_state_continuity(self):
-        """Default cases (empty state) should not reset current_state.
-        Two logged_in cases must remain adjacent even with a default in between."""
+    def test_states_inferred_without_reordering(self):
+        """States are inferred on TCs but order stays the same."""
         tcs = [
             TestCase(id="TC-001", title="登录搜索", priority="P1"),
-            TestCase(id="TC-002", title="通用操作", priority="P1"),  # default
+            TestCase(id="TC-002", title="通用操作", priority="P1"),
             TestCase(id="TC-003", title="登录评论", priority="P1"),
         ]
         result = reorder_for_execution(tcs)
         ids = [tc.id for tc in result]
-        idx_001 = ids.index("TC-001")
-        idx_003 = ids.index("TC-003")
-        # The two logged_in cases must be adjacent (no logged_out between them)
-        assert abs(idx_001 - idx_003) == 1, f"Logged-in cases should be adjacent, got: {ids}"
+        assert ids == ["TC-001", "TC-002", "TC-003"]
+        # States should be inferred
+        assert "logged_in" in _infer_state(result[0])
+        assert "logged_in" in _infer_state(result[2])
 
-    def test_default_preserves_current_state_for_distance(self):
-        """After a default case, current_state should still reflect the last
-        non-default case, so same-state cases remain adjacent."""
+    def test_mixed_states_preserves_order(self):
+        """Mixed states — order is still preserved."""
         tcs = [
-            TestCase(id="TC-001", title="登录搜索", priority="P1"),  # logged_in
-            TestCase(id="TC-002", title="通用操作", priority="P2"),  # default
-            TestCase(id="TC-003", title="登录评论", priority="P1"),  # logged_in
-            TestCase(id="TC-004", title="未登录浏览", priority="P0"),  # logged_out
+            TestCase(id="TC-001", title="断网提示", priority="P1"),
+            TestCase(id="TC-002", title="登录搜索", priority="P1"),
+            TestCase(id="TC-003", title="未登录浏览", priority="P1"),
         ]
         result = reorder_for_execution(tcs)
-        ids = [tc.id for tc in result]
-        # Two logged_in cases must be adjacent regardless of default/outlier placement
-        idx_001 = ids.index("TC-001")
-        idx_003 = ids.index("TC-003")
-        assert abs(idx_001 - idx_003) == 1, f"Logged-in cases should be adjacent: {ids}"
-        # Default case (distance 0) can go anywhere — verify it's present
-        assert "TC-002" in ids
+        assert [tc.id for tc in result] == ["TC-001", "TC-002", "TC-003"]
 
-    def test_multi_state_cases(self):
-        """Cases with multiple states handled correctly."""
+    def test_multi_state_preserves_order(self):
+        """Multi-state cases — order preserved."""
         tcs = [
-            TestCase(id="TC-001", title="普通搜索", priority="P1"),  # {}
+            TestCase(id="TC-001", title="普通搜索", priority="P1"),
             TestCase(id="TC-002", title="登录且断网测试", priority="P1", required_state=["logged_in", "network_off"]),
-            TestCase(id="TC-003", title="登录搜索", priority="P1"),  # {logged_in}
+            TestCase(id="TC-003", title="登录搜索", priority="P1"),
         ]
         result = reorder_for_execution(tcs)
         ids = [tc.id for tc in result]
-        # TC-003 (logged_in) should come before TC-002 (logged_in + network_off)
-        assert ids.index("TC-003") < ids.index("TC-002")
+        assert ids == ["TC-001", "TC-002", "TC-003"]
 
     def test_mixed_states_sorted_correctly(self):
         tcs = [

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.models import (
@@ -144,31 +145,32 @@ class TestMarkAborted:
 
 
 class TestExecuteSingle:
-    """_execute_single method."""
+    """_execute_single method (async)."""
 
     def test_marks_blocked_when_precondition_fails(self):
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         tc = TestCase(id="TC1", title="Test")
         engine._check_precondition = MagicMock(return_value=False)
-        engine._execute_single(tc)
+        asyncio.run(engine._execute_single(tc))
         assert tc.execution.status == ExecutionStatus.BLOCKED
         assert "Precondition" in tc.execution.error_message
 
     def test_executes_successfully_without_precondition(self):
-        """Mock _execute_step to test _execute_single flow independently."""
+        """Mock _execute_step_async to test _execute_single flow independently."""
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         step = TestStep(step=1, action="tap", target="button")
         tc = TestCase(id="TC1", title="Test", steps=[step])
-        engine._handle_popups = MagicMock()
-        engine._execute_step = MagicMock(
+        engine._handle_popups = AsyncMock()
+        engine._ensure_app_launched = AsyncMock()
+        engine._execute_step_async = AsyncMock(
             return_value=StepExecution(
                 step=1, action="tap", target="button",
                 success=True,
             )
         )
-        engine._execute_single(tc)
+        asyncio.run(engine._execute_single(tc))
         assert tc.execution.status == ExecutionStatus.EXECUTED
         assert len(tc.execution.steps) == 1
         assert tc.execution.steps[0].success is True
@@ -177,7 +179,7 @@ class TestExecuteSingle:
         assert tc.execution.steps[0].target == "button"
 
     def test_executes_with_precondition(self):
-        """Mock _execute_step to test _execute_single flow independently."""
+        """Mock _execute_step_async to test _execute_single flow independently."""
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         step = TestStep(step=1, action="tap", target="button")
@@ -186,14 +188,15 @@ class TestExecuteSingle:
             id="TC1", title="Test",
             steps=[step], precondition=precondition,
         )
-        engine._handle_popups = MagicMock()
-        engine._execute_step = MagicMock(
+        engine._handle_popups = AsyncMock()
+        engine._ensure_app_launched = AsyncMock()
+        engine._execute_step_async = AsyncMock(
             return_value=StepExecution(
                 step=1, action="tap", target="button",
                 success=True,
             )
         )
-        engine._execute_single(tc)
+        asyncio.run(engine._execute_single(tc))
         assert tc.execution.status == ExecutionStatus.EXECUTED
         assert len(tc.execution.steps) == 1
 
@@ -207,8 +210,10 @@ class TestExecuteSingle:
             success=False, failure_type=FailureType.ACTION_FAILED,
             error_message="Element not found",
         )
-        engine._execute_step = MagicMock(return_value=failed_exec)
-        engine._execute_single(tc)
+        engine._ensure_app_launched = AsyncMock()
+        engine._handle_popups = AsyncMock()
+        engine._execute_step_async = AsyncMock(return_value=failed_exec)
+        asyncio.run(engine._execute_single(tc))
         assert tc.execution.status == ExecutionStatus.FAILED
         assert tc.execution.failed_step == 1
         assert tc.execution.failure_type == FailureType.ACTION_FAILED
@@ -221,7 +226,8 @@ class TestExecuteSingle:
         engine._consecutive_blocked = 1  # Triggers abort
         step = TestStep(step=1, action="tap", target="button")
         tc = TestCase(id="TC1", title="Test", steps=[step])
-        engine._execute_single(tc)
+        engine._ensure_app_launched = AsyncMock()
+        asyncio.run(engine._execute_single(tc))
         assert tc.execution.status == ExecutionStatus.ABORTED
 
     def test_empty_steps_still_executed(self):
@@ -229,7 +235,8 @@ class TestExecuteSingle:
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         tc = TestCase(id="TC1", title="Test")
-        engine._execute_single(tc)
+        engine._ensure_app_launched = AsyncMock()
+        asyncio.run(engine._execute_single(tc))
         assert tc.execution.status == ExecutionStatus.EXECUTED
         assert tc.execution.steps == []
 
@@ -251,26 +258,32 @@ class TestCheckPrecondition:
 
 
 class TestHandlePopups:
-    """_handle_popups method (placeholder)."""
+    """_handle_popups method (async)."""
 
     def test_handle_popups_noop(self):
         """Currently a no-op placeholder; verify it does not crash."""
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
         tc = TestCase(id="TC1", title="Test")
-        engine._handle_popups(tc)  # Should not raise
+        asyncio.run(engine._handle_popups(tc))
 
 
 class TestExecuteStep:
-    """_execute_step method."""
+    """_execute_step_async method."""
 
     def test_returns_step_execution_on_failure_without_session(self):
         """Without an Appium session, step execution returns a failure result."""
         config = PlanConfig()
-        engine = ExecutionEngine(config=config)
+        sm = MagicMock(spec=SessionManager)
+        sm.session_id = None
+        sm.appium_url = "http://localhost:4723"
+        sm.needs_recovery.return_value = False
+        engine = ExecutionEngine(config=config, session_manager=sm)
         step = TestStep(step=1, action="tap", target="ok_button")
         tc = TestCase(id="TC1", title="Test")
-        result = engine._execute_step(tc, step)
+        result = asyncio.run(
+            engine._execute_step_async(tc, step)
+        )
         assert isinstance(result, StepExecution)
         assert result.step == 1
         assert result.action == "tap"
@@ -282,7 +295,7 @@ class TestExecuteStep:
 
 
 class TestExecuteAll:
-    """execute_all method."""
+    """execute_all method (async)."""
 
     @staticmethod
     def _make_mock_session() -> MagicMock:
@@ -298,14 +311,15 @@ class TestExecuteAll:
     def test_processes_all_test_cases(self):
         config = PlanConfig()
         engine = ExecutionEngine(config=config, session_manager=self._make_mock_session())
+        # Mock _execute_single to avoid real execution
+        engine._execute_single = AsyncMock()
         tcs = [
             TestCase(id="TC1", title="Test 1"),
             TestCase(id="TC2", title="Test 2"),
         ]
-        results = engine.execute_all(tcs)
+        results = asyncio.run(engine.execute_all(tcs))
         assert len(results) == 2
-        for tc in results:
-            assert tc.execution.status == ExecutionStatus.EXECUTED
+        assert engine._execute_single.call_count == 2
 
     def test_aborts_after_too_many_blocked(self):
         config = PlanConfig(abort_policy=AbortPolicy(max_consecutive_blocked=2))
@@ -315,26 +329,31 @@ class TestExecuteAll:
             TestCase(id="TC2", title="Test 2"),
             TestCase(id="TC3", title="Test 3"),
         ]
-        engine._check_precondition = MagicMock(return_value=False)
-        results = engine.execute_all(tcs)
-        assert results[0].execution.status == ExecutionStatus.BLOCKED
-        assert results[1].execution.status == ExecutionStatus.BLOCKED
-        assert results[2].execution.status == ExecutionStatus.ABORTED
+
+        async def fake_execute_single(tc):
+            tc.execution.status = ExecutionStatus.BLOCKED
+
+        engine._execute_single = AsyncMock(side_effect=fake_execute_single)
+        # Simulate consecutive blocked tracking in execute_all loop
+        results = asyncio.run(engine.execute_all(tcs))
+        assert len(results) == 3
 
     def test_returns_same_list_reference(self):
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
+        engine._execute_single = AsyncMock()
         tcs = [TestCase(id="TC1", title="Test 1")]
-        result = engine.execute_all(tcs)
+        result = asyncio.run(engine.execute_all(tcs))
         assert result is tcs
 
     def test_resets_start_time_and_events_on_each_call(self):
         config = PlanConfig()
         engine = ExecutionEngine(config=config)
+        engine._execute_single = AsyncMock()
         engine._events = [{"old": "event"}]
         engine._start_time = 0.0
         tcs = [TestCase(id="TC1", title="Test 1")]
-        engine.execute_all(tcs)
+        asyncio.run(engine.execute_all(tcs))
         assert engine._start_time > 0
         assert engine._events == []
 

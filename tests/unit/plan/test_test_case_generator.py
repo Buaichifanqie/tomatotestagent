@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -65,8 +66,10 @@ class TestGenerate:
         gen = TestCaseGenerator(llm_provider=dummy_provider)
         sample_json = _valid_tc_json()
 
-        with patch.object(gen, "_call_llm", return_value=sample_json) as mock_call:
-            result = gen.generate("some PRD text", plan_name="Test Plan")
+        with patch.object(gen, "_call_llm", new_callable=AsyncMock, return_value=sample_json) as mock_call:
+            result = asyncio.run(
+                gen.generate("some PRD text", plan_name="Test Plan")
+            )
 
         mock_call.assert_called_once_with("some PRD text")
         assert len(result) == 1
@@ -83,7 +86,9 @@ class TestGenerate:
     def test_generate_no_provider_parses_directly(self):
         """When llm_provider is None, prd_text is parsed directly as JSON."""
         gen = TestCaseGenerator()
-        result = gen.generate(_valid_tc_json())
+        result = asyncio.run(
+            gen.generate(_valid_tc_json())
+        )
         assert len(result) == 1
         assert result[0].id == "TC-001"
 

@@ -114,6 +114,7 @@ class StepExecution(BaseModel):
     page_source_after: str = ""
     vision_analysis: str = ""  # Multimodal model's analysis of the screen on failure
     source: str = ""  # 来源标识："" 表示 LLM 视觉识别，"cache:TC-xxx/stepN" 表示缓存命中
+    warning: str = ""  # Assert warning message (when assert downgraded to warning)
 
 
 class EvidenceItem(BaseModel):
@@ -134,6 +135,8 @@ class TCExecution(BaseModel):
     steps: list[StepExecution] = Field(default_factory=list)
     duration_ms: int = 0
     reason: str = ""
+    previous_attempts: list[dict[str, object]] = Field(default_factory=list)
+    assert_warnings: list[str] = Field(default_factory=list)
 
 
 class TestCase(BaseModel):
@@ -142,6 +145,11 @@ class TestCase(BaseModel):
     title: str
     priority: str = "P1"
     is_core: bool = False
+    feature_id: str = ""
+    coverage_dimension: str = ""
+    scenario_question: str = ""
+    prerequisites: list[str] = Field(default_factory=list)
+    expected_outcome: str = ""
     requirement_ids: list[str] = Field(default_factory=list)
     required_state: list[str] = Field(default_factory=list)
     precondition: Precondition | None = None

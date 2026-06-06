@@ -69,7 +69,7 @@ class TestAgentSettings(BaseSettings):
     vision_api_url: str = ""
     vision_model: str = ""
     vision_timeout: int = 60
-    vision_max_retries: int = 3
+    vision_max_retries: int = 2
 
     # 坐标缓存配置
     cache_enabled: bool = True

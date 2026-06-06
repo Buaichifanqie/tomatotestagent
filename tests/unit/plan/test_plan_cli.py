@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import typer
 
@@ -138,25 +138,25 @@ class TestPresentTcToUser:
         """Empty TC list with auto_yes=False returns False."""
         assert present_tc_to_user([], auto_yes=False) is False
 
-    @patch("testagent.cli.plan.typer.confirm")
+    @patch("testagent.cli.plan.typer.prompt")
     @patch("testagent.cli.plan.typer.echo")
     def test_present_tc_to_user_confirmed(
-        self, mock_echo: MagicMock, mock_confirm: MagicMock
+        self, mock_echo: MagicMock, mock_prompt: MagicMock
     ) -> None:
         """With TCs and auto_yes=False, prompts user and returns their choice."""
-        mock_confirm.return_value = True
+        mock_prompt.return_value = "y"
         tcs = [_make_tc("TC-001", "Login test")]
         result = present_tc_to_user(tcs, auto_yes=False)
         assert result is True
-        mock_confirm.assert_called_once_with("Proceed with execution?")
+        mock_prompt.assert_called_once()
 
-    @patch("testagent.cli.plan.typer.confirm")
+    @patch("testagent.cli.plan.typer.prompt")
     @patch("testagent.cli.plan.typer.echo")
     def test_present_tc_to_user_rejected(
-        self, mock_echo: MagicMock, mock_confirm: MagicMock
+        self, mock_echo: MagicMock, mock_prompt: MagicMock
     ) -> None:
         """User rejects the prompt."""
-        mock_confirm.return_value = False
+        mock_prompt.return_value = "n"
         tcs = [_make_tc("TC-001", "Login test")]
         result = present_tc_to_user(tcs, auto_yes=False)
         assert result is False
@@ -172,10 +172,12 @@ class TestPlanCommand:
     @patch("testagent.cli.plan.ExecutionEngine")
     @patch("testagent.cli.plan.TestCaseGenerator")
     @patch("testagent.cli.plan.PrdParser")
+    @patch("testagent.cli.plan.SessionManager")
     @patch("testagent.cli.plan.typer.echo")
     def test_plan_command_raw_text_flow(
         self,
         mock_echo: MagicMock,
+        mock_sm_cls: MagicMock,
         mock_prd_parser: MagicMock,
         mock_tc_gen_cls: MagicMock,
         mock_engine_cls: MagicMock,
@@ -188,13 +190,18 @@ class TestPlanCommand:
         base_dir = tmp_path / "reports"
         report_path = str(base_dir / "20250101-120000-myplan" / "plan-report.md")
 
+        # Mock SessionManager to prevent real Appium calls
+        mock_sm = MagicMock()
+        mock_sm_cls.return_value = mock_sm
+        mock_sm.create_session.return_value = None  # No session → skip exploration
+
         # Mock TestCaseGenerator
         mock_generator = MagicMock()
         mock_tc_gen_cls.return_value = mock_generator
-        mock_generator.generate.return_value = [
+        mock_generator.generate = AsyncMock(return_value=[
             _make_tc("TC-001", "Login test"),
             _make_tc("TC-002", "Logout test"),
-        ]
+        ])
 
         # Mock ExecutionEngine
         mock_engine = MagicMock()
@@ -203,7 +210,7 @@ class TestPlanCommand:
             _make_tc("TC-001", "Login test"),
             _make_tc("TC-002", "Logout test"),
         ]
-        mock_engine.execute_all.return_value = executed_tcs
+        mock_engine.execute_all = AsyncMock(return_value=executed_tcs)
 
         # Mock PerTCEvaluator
         mock_evaluator = MagicMock()
@@ -235,8 +242,15 @@ class TestPlanCommand:
         mock_report_cls.return_value = mock_report
         mock_report.generate.return_value = report_path
 
-        with patch("testagent.cli.plan.datetime") as mock_dt:
+        with (
+            patch("testagent.cli.plan.datetime") as mock_dt,
+            patch("testagent.db.engine.init_db", new_callable=AsyncMock),
+            patch("testagent.config.settings.get_settings") as mock_settings,
+            patch("testagent.llm.local_provider.LLMProviderFactory.create") as mock_llm_factory,
+        ):
             mock_dt.now.return_value.strftime.return_value = "20250101-120000"
+            mock_settings.return_value = MagicMock()
+            mock_llm_factory.return_value = MagicMock()
             result = plan_command(
                 requirement="I want a login feature",
                 name="myplan",
@@ -281,13 +295,20 @@ class TestPlanCommand:
         """No generated TCs aborts early."""
         mock_generator = MagicMock()
         mock_tc_gen_cls.return_value = mock_generator
-        mock_generator.generate.return_value = []
+        mock_generator.generate = AsyncMock(return_value=[])
 
-        result = plan_command(
-            requirement="some text",
-            name="test",
-            auto_yes=True,
-        )
+        with (
+            patch("testagent.db.engine.init_db", new_callable=AsyncMock),
+            patch("testagent.config.settings.get_settings") as mock_settings,
+            patch("testagent.llm.local_provider.LLMProviderFactory.create") as mock_llm_factory,
+        ):
+            mock_settings.return_value = MagicMock()
+            mock_llm_factory.return_value = MagicMock()
+            result = plan_command(
+                requirement="some text",
+                name="test",
+                auto_yes=True,
+            )
 
         assert result is None
 
@@ -305,16 +326,23 @@ class TestPlanCommand:
         """User cancellation aborts before execution."""
         mock_generator = MagicMock()
         mock_tc_gen_cls.return_value = mock_generator
-        mock_generator.generate.return_value = [_make_tc("TC-001", "Test")]
+        mock_generator.generate = AsyncMock(return_value=[_make_tc("TC-001", "Test")])
 
         mock_setup_dir.return_value = "/tmp/reports/x"
         mock_present.return_value = False
 
-        result = plan_command(
-            requirement="some text",
-            name="test",
-            auto_yes=False,
-        )
+        with (
+            patch("testagent.db.engine.init_db", new_callable=AsyncMock),
+            patch("testagent.config.settings.get_settings") as mock_settings,
+            patch("testagent.llm.local_provider.LLMProviderFactory.create") as mock_llm_factory,
+        ):
+            mock_settings.return_value = MagicMock()
+            mock_llm_factory.return_value = MagicMock()
+            result = plan_command(
+                requirement="some text",
+                name="test",
+                auto_yes=False,
+            )
 
         assert result is None
 
@@ -354,12 +382,12 @@ class TestPlanCommand:
         # Mock TestCaseGenerator
         mock_generator = MagicMock()
         mock_tc_gen_cls.return_value = mock_generator
-        mock_generator.generate.return_value = [_make_tc("TC-001", "Test")]
+        mock_generator.generate = AsyncMock(return_value=[_make_tc("TC-001", "Test")])
 
         # Mock execution engine
         mock_engine = MagicMock()
         mock_engine_cls.return_value = mock_engine
-        mock_engine.execute_all.return_value = [_make_tc("TC-001", "Test")]
+        mock_engine.execute_all = AsyncMock(return_value=[_make_tc("TC-001", "Test")])
 
         # Mock evaluators
         mock_evaluator = MagicMock()
@@ -381,8 +409,15 @@ class TestPlanCommand:
         mock_report_cls.return_value = mock_report
         mock_report.generate.return_value = report_path
 
-        with patch("testagent.cli.plan.datetime") as mock_dt:
+        with (
+            patch("testagent.cli.plan.datetime") as mock_dt,
+            patch("testagent.db.engine.init_db", new_callable=AsyncMock),
+            patch("testagent.config.settings.get_settings") as mock_settings,
+            patch("testagent.llm.local_provider.LLMProviderFactory.create") as mock_llm_factory,
+        ):
             mock_dt.now.return_value.strftime.return_value = "20250101-120000"
+            mock_settings.return_value = MagicMock()
+            mock_llm_factory.return_value = MagicMock()
             result = plan_command(
                 requirement=str(file_path),
                 name="req-plan",

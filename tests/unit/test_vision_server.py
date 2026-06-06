@@ -174,7 +174,7 @@ class TestVolcanoVisionClient:
         assert client.is_configured is True
         assert client._model == "doubao-seed-2-0-lite-260428"
         assert client._timeout == 60
-        assert client._max_retries == 3
+        assert client._max_retries == 2
 
     def test_is_configured_false(self) -> None:
         client = VolcanoVisionClient(api_key="")

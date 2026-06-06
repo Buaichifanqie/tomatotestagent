@@ -123,7 +123,7 @@ class TestHandle:
     def test_handle_multiple_times(self):
         handler = PopupHandler()
         handler.handle("请允许应用获取权限")
-        handler.handle("有新版本更新")
+        handler.handle("发现新版本，请立即更新")
         handler.handle("nothing")
         assert handler.handled_count == 2
 
