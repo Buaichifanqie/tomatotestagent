@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -117,10 +118,37 @@ class ExplorationPlanner:
             if text.rstrip().endswith("```"):
                 text = text.rstrip()[: -len("```")].rstrip()
 
+        # Try parsing as-is first
+        data = None
         try:
             data = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            _log.warning("Failed to parse LLM response as JSON", exc_info=True)
+            pass
+
+        # If that failed, try to extract a JSON array from the text
+        if data is None:
+            # Find the first [ and last ]
+            start = text.find("[")
+            end = text.rfind("]")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(text[start:end + 1])
+                except (json.JSONDecodeError, ValueError):
+                    # Try fixing common LLM JSON issues
+                    candidate = text[start:end + 1]
+                    # Remove trailing commas before ] or }
+                    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+                    try:
+                        data = json.loads(candidate)
+                    except (json.JSONDecodeError, ValueError):
+                        _log.warning(
+                            "Failed to parse LLM response as JSON",
+                            exc_info=True,
+                        )
+                        return []
+
+        if data is None:
+            _log.warning("Failed to parse LLM response as JSON")
             return []
 
         if not isinstance(data, list):

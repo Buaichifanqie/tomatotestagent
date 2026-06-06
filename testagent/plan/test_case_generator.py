@@ -192,6 +192,11 @@ class TestCaseGenerator:
         return ""
 
     _KNOWN_ACTIONS = frozenset({"exec", "launch", "assert", "tap", "type", "swipe", "screenshot", "wait"})
+    _KNOWN_STEP_FIELDS = frozenset({
+        "step", "action", "target", "value", "expected",
+        "timeout_ms", "poll_interval_ms", "wait_after",
+        "success_condition", "screenshot", "is_manual", "instruction",
+    })
 
     def _normalize_step(self, s: dict) -> dict:
         """Normalize a raw step dict.
@@ -199,6 +204,7 @@ class TestCaseGenerator:
         Handles common LLM quirks:
         - LLM puts command in action field (e.g. action: 'cmd connectivity airplane-mode disable')
         - LLM uses non-standard action names
+        - LLM includes unknown fields (filtered out to prevent Pydantic errors)
         """
         s = dict(s)  # copy
         action = (s.get("action") or "").strip()
@@ -226,7 +232,8 @@ class TestCaseGenerator:
         if not s.get("target", ""):
             s["target"] = "unknown"
 
-        return s
+        # Filter unknown fields to prevent Pydantic validation errors
+        return {k: v for k, v in s.items() if k in self._KNOWN_STEP_FIELDS}
 
     def _dict_to_tc(self, item: dict) -> TestCase:
         """Convert a raw dict to a TestCase."""

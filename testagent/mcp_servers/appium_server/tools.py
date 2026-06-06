@@ -176,10 +176,28 @@ async def app_swipe(
     start_y: int,
     end_x: int,
     end_y: int,
-    duration: int = 500,
+    duration: int = 800,
     appium_url: str = "http://localhost:4723",
     session_id: str | None = None,
 ) -> dict[str, Any]:
+    # Ensure minimum swipe distance to avoid being interpreted as a tap
+    dx = abs(end_x - start_x)
+    dy = abs(end_y - start_y)
+    min_dist = 100
+    if dx < min_dist and dy < min_dist:
+        # Scale up to minimum distance while preserving direction
+        if dx == 0 and dy == 0:
+            return {"error": "Swipe start and end are the same point"}
+        scale = min_dist / max(dx, dy)
+        if end_x > start_x:
+            end_x = start_x + int(dx * scale)
+        elif end_x < start_x:
+            end_x = start_x - int(dx * scale)
+        if end_y > start_y:
+            end_y = start_y + int(dy * scale)
+        elif end_y < start_y:
+            end_y = start_y - int(dy * scale)
+
     payload: dict[str, object] = {
         "actions": [
             {
@@ -189,7 +207,7 @@ async def app_swipe(
                 "actions": [
                     {"type": "pointerMove", "duration": 0, "x": start_x, "y": start_y},
                     {"type": "pointerDown", "button": 0},
-                    {"type": "pause", "duration": duration},
+                    {"type": "pause", "duration": 50},
                     {"type": "pointerMove", "duration": duration, "x": end_x, "y": end_y},
                     {"type": "pointerUp", "button": 0},
                 ],
@@ -402,7 +420,7 @@ async def app_launch(
             appium_url,
             "/session/:sessionId/execute/sync",
             payload,
-            timeout=15,
+            timeout=30,
             session_id=session_id,
         )
         if result["status_code"] == 200:

@@ -83,6 +83,7 @@ class TestStep(BaseModel):
     action: str
     target: str
     value: str = ""
+    expected: str = ""
     timeout_ms: int = Field(default=10000, ge=0)
     poll_interval_ms: int = Field(default=500, ge=0)
     wait_after: WaitCondition | None = None

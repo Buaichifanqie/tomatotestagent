@@ -250,10 +250,10 @@ class RAGPipeline:
                 },
             )
         except Exception as exc:
+            # Log error message only (no traceback) to keep CLI output clean
             logger.warning(
-                "Fulltext search failed: %s",
-                exc,
-                exc_info=exc,
+                "Fulltext search unavailable: %s",
+                type(exc).__name__,
                 extra={"extra_data": {"collection": collection}},
             )
 

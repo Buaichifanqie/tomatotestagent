@@ -1,7 +1,7 @@
 """Test case execution order optimizer.
 
-Uses a greedy minimum-switch algorithm to order test cases so that
-state transitions between consecutive cases are minimized.
+Groups test cases by required_state to minimize state transitions,
+then sorts within each group by priority.
 """
 from __future__ import annotations
 
@@ -37,6 +37,16 @@ _STEP_PATTERNS = [
     (r"登出|退出登录|logout|sign.?out", "logged_out"),
     (r"登录|登入|login|sign.?in", "logged_in"),
 ]
+
+# Group ordering: logged_in first, logged_out last, others in middle
+_GROUP_ORDER = {
+    "logged_in": 0,
+    "network_off": 10,
+    "network_on": 11,
+    "logged_out": 99,
+}
+
+_PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 
 def _infer_state(tc: TestCase) -> set[str]:
@@ -136,40 +146,56 @@ def _has_state_conflict(current: set[str], needed: set[str]) -> bool:
     return False
 
 
+def _get_primary_group(states: set[str]) -> str:
+    """Get the primary group name for sorting. Returns the state with lowest group order."""
+    if not states:
+        return "default"
+    return min(states, key=lambda s: _GROUP_ORDER.get(s, 50))
+
+
 def reorder_for_execution(test_cases: list[TestCase]) -> list[TestCase]:
-    """Reorder test cases to minimize state transitions using greedy algorithm.
+    """Reorder test cases to minimize state transitions.
 
     Strategy:
     1. Infer required_state for each TC (LLM labels -> keyword fallback)
-    2. Greedy selection: always pick the next TC with minimum state distance
-    3. Tie-break by priority (P0 < P1 < P2 < P3), then core before non-core
-    4. Default cases (empty state) don't reset current_state — they fit anywhere
+    2. Group by primary state (logged_in, logged_out, network_off, etc.)
+    3. Order groups: logged_in → network_off → network_on → logged_out
+    4. Within each group: P0 core first, then P0, P1 core, P1, P2, P3
+    5. Within same priority: fewer states first (simpler cases before complex)
+    6. Default cases (no specific state) are appended at the end
     """
     if len(test_cases) <= 1:
         return list(test_cases)
 
-    # Step 1: infer states (don't mutate originals)
-    inferred = [_infer_state(tc) for tc in test_cases]
+    # Step 1: infer states and group
+    groups: dict[str, list[tuple[int, TestCase, set[str]]]] = {}
+    for i, tc in enumerate(test_cases):
+        states = _infer_state(tc)
+        group = _get_primary_group(states)
+        groups.setdefault(group, []).append((i, tc, states))
 
-    _PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    # Step 2: sort within each group by priority, core, then state count
+    for group in groups:
+        groups[group].sort(key=lambda item: (
+            _PRIORITY_ORDER.get(item[1].priority, 9),
+            0 if item[1].is_core else 1,
+            len(item[2]),  # fewer states first
+        ))
 
-    def _sort_key(i: int, dist: int) -> tuple[int, int, int, int]:
-        prio = _PRIORITY_ORDER.get(test_cases[i].priority, 9)
-        core = 0 if test_cases[i].is_core else 1
-        has_state = 0 if inferred[i] else 1  # prefer non-empty state when tied
-        return (dist, prio, core, has_state)
+    # Step 3: order groups and flatten
+    # logged_in first, then other non-default states, then logged_out, then default
+    non_default_groups = [g for g in groups if g != "default" and g != "logged_out"]
+    non_default_groups.sort(key=lambda g: _GROUP_ORDER.get(g, 50))
 
-    # Step 2: greedy selection
-    remaining = list(range(len(test_cases)))
+    ordered_groups = non_default_groups
+    if "logged_out" in groups:
+        ordered_groups = ordered_groups + ["logged_out"]
+    if "default" in groups:
+        ordered_groups = ordered_groups + ["default"]
+
     result: list[TestCase] = []
-    current_state: set[str] = set()
-
-    while remaining:
-        best_idx = min(remaining, key=lambda i: _sort_key(i, _state_distance(current_state, inferred[i])))
-        remaining.remove(best_idx)
-        result.append(test_cases[best_idx])
-        # Default cases (empty set) don't change app state — preserve current_state
-        if inferred[best_idx]:
-            current_state = inferred[best_idx]
+    for group in ordered_groups:
+        for _, tc, _ in groups[group]:
+            result.append(tc)
 
     return result

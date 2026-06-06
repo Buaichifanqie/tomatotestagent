@@ -686,6 +686,11 @@ async def _plan_command_async(
     output_dir = setup_output_dir(name)
     typer.echo(f"Output directory: {output_dir}")
 
+    # ── Set up file logging ────────────────────────────────────────────────
+    from testagent.common.logging import setup_file_logging
+    log_path = setup_file_logging(output_dir)
+    typer.echo(f"  Log file: {log_path}")
+
     config = PlanConfig(
         name=name,
         app_package=app_package,
@@ -808,6 +813,18 @@ async def _plan_command_async(
         app_info_parts.append(f"Android launch activity: {app_activity}")
     if app_info_parts:
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
+
+    # ── Inject login hint if app has account config ───────────────────
+    if app_package:
+        from testagent.plan.app_accounts import has_login_config
+        if has_login_config(app_package):
+            enhanced_prd += (
+                "\n\n## 登录信息\n\n"
+                "此 App 已配置登录账号。登录由框架自动处理，**不要在测试步骤中编写登录/登出操作**。\n"
+                "需要登录态的用例，设置 `required_state` 包含 `\"logged_in\"`。\n"
+                "需要登录态的用例，第一步应从 App 首页开始（假设已完成登录）。\n"
+                "不需要登录态的用例，`required_state` 设为空数组 `[]`。"
+            )
 
     if ui_context_string:
         enhanced_prd += "\n\n## App 界面信息\n\n以下是通过自动化探索获取的 App 实际界面信息，包括各页面的可交互元素和导航路径。请基于这些真实信息生成测试用例步骤，不要猜测元素名称。\n\n" + ui_context_string
@@ -1188,6 +1205,39 @@ async def _plan_command_async(
         tc.execution.verdict = evaluation.verdict
         tc.execution.confidence = evaluation.confidence
         tc.execution.reason = evaluation.reason
+
+    # ── Phase 5.5: Retry failed cases ──────────────────────────────────────
+    failed_tcs = [tc for tc in executed_tcs if tc.execution.verdict == "FAIL"]
+    if failed_tcs:
+        typer.echo(f"  Retrying {len(failed_tcs)} failed case(s)...")
+        retry_engine = ExecutionEngine(config, llm_provider=llm_provider)
+        for tc in failed_tcs:
+            # Reset execution state for retry
+            tc.execution.status = "PENDING"
+            tc.execution.verdict = None
+            tc.execution.steps = []
+            tc.execution.error_message = ""
+            tc.execution.retries += 1
+
+        retried_tcs = await retry_engine.execute_all(failed_tcs)
+
+        # Re-evaluate retried cases
+        for tc in retried_tcs:
+            evaluation = evaluator.evaluate(tc)
+            tc.execution.verdict = evaluation.verdict
+            tc.execution.confidence = evaluation.confidence
+            tc.execution.reason = evaluation.reason
+
+        # Count results
+        retry_passed = sum(1 for tc in retried_tcs if tc.execution.verdict == "PASS")
+        retry_failed = len(retried_tcs) - retry_passed
+        typer.echo(f"  Retry results: {retry_passed} passed, {retry_failed} still failed")
+
+        # Teardown retry engine
+        try:
+            await retry_engine._teardown_app()
+        except Exception:
+            pass
 
     # ── Phase 6: Overall evaluation + report generation ─────────────────────
     typer.echo("Generating overall evaluation and report...")

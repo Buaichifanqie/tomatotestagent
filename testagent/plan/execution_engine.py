@@ -197,8 +197,20 @@ class ExecutionEngine:
 
         # Layer 1: Direct vision element search
         self._log(f"  [Vision: looking for '{step.target}']")
-        coords = await self._vision_find_element(step.target)
-        if coords:
+        vision_result = await self._vision_find_element(step.target)
+
+        # Handle swipe suggestion from vision
+        if vision_result and "suggestion" in vision_result:
+            suggestion = vision_result["suggestion"]
+            self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
+            swipe_ok = await self._execute_vision_swipe(suggestion)
+            if swipe_ok:
+                # After swipe, wait for UI to settle and retry vision
+                await asyncio.sleep(1.5)
+                vision_result = await self._vision_find_element(step.target)
+
+        if vision_result and "x" in vision_result and "y" in vision_result:
+            coords = vision_result
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
             if not res.get("error"):
                 self._log(f"  [Vision tap at ({coords['x']}, {coords['y']})]")
@@ -215,8 +227,19 @@ class ExecutionEngine:
 
         # Layer 3: Wait for UI to settle, then retry vision
         await asyncio.sleep(2)
-        coords = await self._vision_find_element(step.target)
-        if coords:
+        vision_result = await self._vision_find_element(step.target)
+
+        # Handle swipe suggestion from vision retry
+        if vision_result and "suggestion" in vision_result:
+            suggestion = vision_result["suggestion"]
+            self._log(f"  [Vision retry suggests {suggestion}, executing swipe...]")
+            swipe_ok = await self._execute_vision_swipe(suggestion)
+            if swipe_ok:
+                await asyncio.sleep(1.5)
+                vision_result = await self._vision_find_element(step.target)
+
+        if vision_result and "x" in vision_result and "y" in vision_result:
+            coords = vision_result
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
             if not res.get("error"):
                 self._log(f"  [Vision retry at ({coords['x']}, {coords['y']})]")
@@ -254,6 +277,50 @@ class ExecutionEngine:
         )
         self._log(f"  [Cache Write: '{step.target}' -> ({coords['x']}, {coords['y']}), ctx={context_hash}]")
 
+    async def _execute_vision_swipe(self, suggestion: str) -> bool:
+        """Execute a swipe based on vision model's suggestion.
+
+        Args:
+            suggestion: Swipe direction string like "swipe_up", "swipe_down", etc.
+
+        Returns:
+            True if swipe succeeded, False otherwise.
+        """
+        dw, dh = await self._get_screen_size()
+        cx, cy = dw // 2, dh // 2
+
+        # Calculate swipe coordinates based on direction
+        swipe_map = {
+            "swipe_up": (cx, int(dh * 0.7), cx, int(dh * 0.3)),
+            "swipe_down": (cx, int(dh * 0.3), cx, int(dh * 0.7)),
+            "swipe_left": (int(dw * 0.8), cy, int(dw * 0.2), cy),
+            "swipe_right": (int(dw * 0.2), cy, int(dw * 0.8), cy),
+            "scroll_down": (cx, int(dh * 0.7), cx, int(dh * 0.3)),
+            "scroll_up": (cx, int(dh * 0.3), cx, int(dh * 0.7)),
+        }
+
+        coords = swipe_map.get(suggestion)
+        if not coords:
+            self._log(f"  [Unknown swipe suggestion: {suggestion}]")
+            return False
+
+        start_x, start_y, end_x, end_y = coords
+        self._log(f"  [Executing {suggestion}: ({start_x},{start_y}) -> ({end_x},{end_y})]")
+
+        result = await app_swipe(
+            start_x=start_x, start_y=start_y,
+            end_x=end_x, end_y=end_y,
+            duration=800,  # Longer duration for more reliable swipe
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+
+        if result.get("error"):
+            self._log(f"  [Swipe failed: {result['error'][:80]}]")
+            return False
+
+        return True
+
     async def _fallback_to_vision(
         self, step: TestStep, tc_id: str, context_hash: str
     ) -> dict:
@@ -261,10 +328,21 @@ class ExecutionEngine:
         appium_url = self.session_manager.appium_url
         session_id = self.session_manager.session_id
 
-        coords = await self._vision_find_element(step.target)
-        if not coords:
+        vision_result = await self._vision_find_element(step.target)
+
+        # Handle swipe suggestion
+        if vision_result and "suggestion" in vision_result:
+            suggestion = vision_result["suggestion"]
+            self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
+            swipe_ok = await self._execute_vision_swipe(suggestion)
+            if swipe_ok:
+                await asyncio.sleep(1.5)
+                vision_result = await self._vision_find_element(step.target)
+
+        if not vision_result or "x" not in vision_result or "y" not in vision_result:
             return {"error": f"Element '{step.target}' not found after cache fallback"}
 
+        coords = vision_result
         res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
         if res.get("error"):
             return res
@@ -487,6 +565,12 @@ class ExecutionEngine:
                         self._mark_aborted(tc, "Failed to recreate session after teardown")
                         continue
 
+            # ── State preparation (login/logout) ──────────────────────
+            if tc_needed and tc_needed != current_app_state:
+                state_ok = await self._ensure_states(tc_needed, tc)
+                if not state_ok:
+                    continue  # TC was marked as SKIPPED inside _ensure_states
+
             self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
             self._logcat_start(tc.id)
 
@@ -620,7 +704,16 @@ class ExecutionEngine:
                     coords = cache_entry.coord
                     _source = f"cache:{cache_entry.tc_id}/step{cache_entry.step}"
                 else:
-                    coords = await self._vision_find_element(step.target or "输入框")
+                    vision_result = await self._vision_find_element(step.target or "输入框")
+                    # Handle swipe suggestion
+                    if vision_result and "suggestion" in vision_result:
+                        suggestion = vision_result["suggestion"]
+                        self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
+                        swipe_ok = await self._execute_vision_swipe(suggestion)
+                        if swipe_ok:
+                            await asyncio.sleep(1.5)
+                            vision_result = await self._vision_find_element(step.target or "输入框")
+                    coords = vision_result if (vision_result and "x" in vision_result and "y" in vision_result) else None
                     if coords and context_hash:
                         self._coordinate_cache.put(
                             context_hash=context_hash,
@@ -1019,6 +1112,323 @@ class ExecutionEngine:
                 )
             except Exception:
                 pass
+
+    # ── state preparation (login / logout) ────────────────────────────────
+
+    async def _ensure_states(self, needed: set[str], tc: TestCase) -> bool:
+        """Ensure all required states are active before executing a TC.
+
+        Returns True if all states are ready, False if TC was skipped.
+        """
+        if "logged_in" in needed:
+            if not await self._ensure_logged_in(tc):
+                return False
+        if "logged_out" in needed:
+            if not await self._ensure_logged_out(tc):
+                return False
+        return True
+
+    async def _ensure_logged_in(self, tc: TestCase) -> bool:
+        """Ensure the user is logged in.
+
+        Returns True if logged in (or already was), False if login failed
+        (TC will be marked as SKIPPED).
+        """
+        from testagent.plan.app_accounts import get_login_config
+
+        pkg = self.config.app_package or ""
+        login_cfg = get_login_config(pkg)
+        if not login_cfg:
+            self._log(f"  [No login config for {pkg}, marking {tc.id} as SKIPPED]")
+            tc.execution.status = ExecutionStatus.EXECUTED
+            tc.execution.verdict = "SKIP"
+            tc.execution.error_message = f"No login config for {pkg}"
+            return False
+
+        # Check if already logged in by looking at the current screen
+        already_logged = await self._check_logged_in()
+        if already_logged:
+            self._log("  [Already logged in]")
+            return True
+
+        # Launch app first
+        self._log(f"  [Logging in to {login_cfg['name']}...]")
+        await app_launch(
+            package=pkg,
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        await asyncio.sleep(3)
+
+        # Navigate to login entry if specified
+        entry = login_cfg.get("entry", "")
+        if entry:
+            nav_ok = await self._navigate_to_login(entry)
+            if not nav_ok:
+                self._log(f"  [Failed to navigate to login page, marking {tc.id} as SKIPPED]")
+                tc.execution.status = ExecutionStatus.EXECUTED
+                tc.execution.verdict = "SKIP"
+                tc.execution.error_message = "Failed to navigate to login page"
+                return False
+
+        # Input credentials
+        account = login_cfg["account"]
+        password = login_cfg["password"]
+        login_ok = await self._perform_login(account, password)
+        if not login_ok:
+            self._log(f"  [Login failed, marking {tc.id} as SKIPPED]")
+            tc.execution.status = ExecutionStatus.EXECUTED
+            tc.execution.verdict = "SKIP"
+            tc.execution.error_message = "Login failed"
+            return False
+
+        self._log("  [Login successful]")
+        return True
+
+    async def _ensure_logged_out(self, tc: TestCase) -> bool:
+        """Ensure the user is logged out.
+
+        Returns True if logged out (or already was), False if logout failed.
+        """
+        already_out = await self._check_logged_out()
+        if already_out:
+            self._log("  [Already logged out]")
+            return True
+
+        # Try to log out via exec (clear app data)
+        pkg = self.config.app_package or ""
+        if pkg:
+            self._log("  [Logging out by clearing app data...]")
+            await app_exec(
+                command=f"pm clear {pkg}",
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            await asyncio.sleep(2)
+            return True
+
+        return False
+
+    async def _check_logged_in(self) -> bool:
+        """Use vision to check if the user is currently logged in."""
+        client = self._init_vision_client()
+        if not client:
+            return False
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return False
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return False
+
+        dw, dh = await self._get_screen_size()
+        prompt = (
+            "请判断当前屏幕是否显示用户已登录状态。\n"
+            "已登录的标志：页面中可见用户头像、昵称、个人信息，或显示\"我的\"页面内容（非登录按钮）。\n"
+            "未登录的标志：显示\"登录\"按钮、\"注册\"按钮、或空白的个人页面。\n\n"
+            '用以下 JSON 格式回复（只输出 JSON）：{{"logged_in": true/false, "reason": "一句话依据"}}'
+        )
+
+        try:
+            result = await client.analyze(b64, prompt, device_width=dw, device_height=dh)
+        except Exception:
+            return False
+
+        content = result.get("content", "")
+        try:
+            import json as _json
+            start = content.find("{")
+            end = content.rfind("}")
+            if start >= 0 and end > start:
+                parsed = _json.loads(content[start:end + 1])
+                return bool(parsed.get("logged_in", False))
+        except Exception:
+            pass
+        return False
+
+    async def _check_logged_out(self) -> bool:
+        """Use vision to check if the user is currently logged out."""
+        return not await self._check_logged_in()
+
+    async def _navigate_to_login(self, entry: str) -> bool:
+        """Navigate to the login page using the entry description.
+
+        The entry string is a "→"-separated path like "我的Tab → 点击登录按钮".
+        Each segment is a UI element to tap, found via vision.
+        """
+        steps = [s.strip() for s in entry.split("→") if s.strip()]
+        for desc in steps:
+            self._log(f"    Navigating: {desc}")
+            # Use vision to find and tap the element
+            tap_result = await self._vision_tap_element(desc)
+            if not tap_result:
+                self._log(f"    [Failed to find: {desc}]")
+                return False
+            await asyncio.sleep(2)
+        return True
+
+    async def _vision_tap_element(self, description: str) -> bool:
+        """Use vision to find and tap a UI element by description."""
+        client = self._init_vision_client()
+        if not client:
+            return False
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return False
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return False
+
+        dw, dh = await self._get_screen_size()
+        prompt = (
+            f"请在当前屏幕截图中找到 \"{description}\" 这个元素。\n"
+            f"如果找到，返回其点击坐标；如果未找到，返回 suggestion=\"swipe_up\" 建议滑动查找。\n\n"
+            '用以下 JSON 格式回复：{{"x": 数字, "y": 数字}} 或 {{"suggestion": "swipe_up"}}'
+        )
+
+        try:
+            result = await client.analyze(b64, prompt, device_width=dw, device_height=dh)
+        except Exception:
+            return False
+
+        content = result.get("content", "")
+        try:
+            import json as _json
+            start = content.find("{")
+            end = content.rfind("}")
+            if start >= 0 and end > start:
+                parsed = _json.loads(content[start:end + 1])
+                if "x" in parsed and "y" in parsed:
+                    await app_tap(
+                        x=int(parsed["x"]),
+                        y=int(parsed["y"]),
+                        appium_url=self.session_manager.appium_url,
+                        session_id=self.session_manager.session_id,
+                    )
+                    return True
+                # Handle swipe suggestion
+                if parsed.get("suggestion", "").startswith("swipe"):
+                    await self._execute_vision_swipe(parsed["suggestion"])
+                    await asyncio.sleep(1)
+                    # Retry after swipe
+                    return await self._vision_tap_element(description)
+        except Exception:
+            pass
+        return False
+
+    async def _perform_login(self, account: str, password: str) -> bool:
+        """Input account and password, then tap login button.
+
+        Uses vision to find input fields and login button.
+        """
+        # Find and fill account field
+        self._log("    Entering account...")
+        account_filled = await self._vision_type_in_field("账号输入框", account)
+        if not account_filled:
+            # Try alternative descriptions
+            account_filled = await self._vision_type_in_field("手机号/邮箱输入框", account)
+        if not account_filled:
+            self._log("    [Could not find account input field]")
+            return False
+
+        await asyncio.sleep(1)
+
+        # Find and fill password field
+        self._log("    Entering password...")
+        pwd_filled = await self._vision_type_in_field("密码输入框", password)
+        if not pwd_filled:
+            pwd_filled = await self._vision_type_in_field("密码", password)
+        if not pwd_filled:
+            self._log("    [Could not find password input field]")
+            return False
+
+        await asyncio.sleep(1)
+
+        # Tap login button
+        self._log("    Tapping login button...")
+        login_tapped = await self._vision_tap_element("登录")
+        if not login_tapped:
+            login_tapped = await self._vision_tap_element("登录按钮")
+        if not login_tapped:
+            self._log("    [Could not find login button]")
+            return False
+
+        await asyncio.sleep(3)
+
+        # Verify login success
+        return await self._check_logged_in()
+
+    async def _vision_type_in_field(self, field_desc: str, text: str) -> bool:
+        """Use vision to find an input field and type text into it."""
+        client = self._init_vision_client()
+        if not client:
+            return False
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return False
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return False
+
+        dw, dh = await self._get_screen_size()
+        prompt = (
+            f"请在当前屏幕截图中找到 \"{field_desc}\" 这个输入框。\n"
+            f"返回其点击坐标。\n\n"
+            '用以下 JSON 格式回复：{{"x": 数字, "y": 数字}}'
+        )
+
+        try:
+            result = await client.analyze(b64, prompt, device_width=dw, device_height=dh)
+        except Exception:
+            return False
+
+        content = result.get("content", "")
+        try:
+            import json as _json
+            start = content.find("{")
+            end = content.rfind("}")
+            if start >= 0 and end > start:
+                parsed = _json.loads(content[start:end + 1])
+                if "x" in parsed and "y" in parsed:
+                    # Tap the field first to focus it
+                    await app_tap(
+                        x=int(parsed["x"]),
+                        y=int(parsed["y"]),
+                        appium_url=self.session_manager.appium_url,
+                        session_id=self.session_manager.session_id,
+                    )
+                    await asyncio.sleep(0.5)
+                    # Type the text
+                    await app_type_text(
+                        text=text,
+                        appium_url=self.session_manager.appium_url,
+                        session_id=self.session_manager.session_id,
+                    )
+                    return True
+        except Exception:
+            pass
+        return False
 
     # ── screen recording ───────────────────────────────────────────────────
 
@@ -1530,10 +1940,18 @@ class ExecutionEngine:
             if not tap_res.get("error"):
                 await asyncio.sleep(2)
                 # Retry the original step via vision
-                coords = await self._vision_find_element(step.target)
-                if coords:
+                vision_result = await self._vision_find_element(step.target)
+                # Handle swipe suggestion
+                if vision_result and "suggestion" in vision_result:
+                    suggestion = vision_result["suggestion"]
+                    self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
+                    swipe_ok = await self._execute_vision_swipe(suggestion)
+                    if swipe_ok:
+                        await asyncio.sleep(1.5)
+                        vision_result = await self._vision_find_element(step.target)
+                if vision_result and "x" in vision_result and "y" in vision_result:
                     return await app_tap(
-                        x=coords["x"], y=coords["y"],
+                        x=vision_result["x"], y=vision_result["y"],
                         appium_url=self.session_manager.appium_url, session_id=sid,
                     )
 
@@ -1541,7 +1959,7 @@ class ExecutionEngine:
 
     async def _vision_find_element(
         self, target: str, context: str = ""
-    ) -> dict[str, int] | None:
+    ) -> dict[str, Any] | None:
         """Use vision model to find an element on screen and return its center coords.
 
         Takes a screenshot, sends it to the vision model with the target
@@ -1549,7 +1967,9 @@ class ExecutionEngine:
         device-pixel coordinates.
 
         Returns:
-            Dict with 'x' and 'y' keys, or None if not found / error.
+            Dict with 'x' and 'y' keys if found,
+            Dict with 'suggestion' key if swipe suggested,
+            None if not found / error.
         """
         client = self._init_vision_client()
         if not client:
@@ -1576,6 +1996,11 @@ class ExecutionEngine:
 
         prompt = (
             f"请在截图中找到以下目标：{target}\n\n"
+            "## 重要提示\n"
+            "- 当目标中包含\"Tab\"时，指的是底部或顶部的导航标签/选项卡（如\"首页\"、\"我的\"、\"用户\"等），"
+            "不是寻找字面文字\"Tab\"\n"
+            "- 导航栏通常在屏幕底部（底部Tab栏）或顶部（顶部Tab栏）\n"
+            "- 如果目标在底部导航栏中可见，直接返回其坐标即可，不要建议滑动\n\n"
             "请分析：\n"
             "1. 目标是否在当前屏幕中可见？\n"
             "2. 如果可见，返回元素的百分比坐标（中心点和边界框）\n"
@@ -1618,20 +2043,30 @@ class ExecutionEngine:
         from testagent.mcp_servers.vision_server.tools import (
             _parse_found_status,
             _parse_percentage_coordinates,
+            _parse_suggestion,
         )
 
         coords = _parse_percentage_coordinates(content, dw, dh)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
-        if not found or not coords.get("center"):
-            self._log(
-                f"  [Vision: target='{target}' — "
-                f"found={found}, has_center={bool(coords.get('center'))}, "
-                f"response={content[:200]}]"
-            )
-            return None
+        if found and coords.get("center"):
+            return coords["center"]
 
-        return coords["center"]
+        # Element not found — check for swipe suggestion
+        suggestion = _parse_suggestion(content)
+        if suggestion:
+            self._log(
+                f"  [Vision: target='{target}' — not found, "
+                f"suggestion={suggestion}, response={content[:150]}]"
+            )
+            return {"suggestion": suggestion}
+
+        self._log(
+            f"  [Vision: target='{target}' — "
+            f"found={found}, has_center={bool(coords.get('center'))}, "
+            f"response={content[:200]}]"
+        )
+        return None
 
     async def _vision_find_any_content(self) -> dict[str, int] | None:
         """Fallback: ask vision to find the first clickable content item on screen.
@@ -1746,13 +2181,18 @@ class ExecutionEngine:
             context_parts.append(f"当前测试用例: {tc.id} {tc.title}")
         if step:
             context_parts.append(f"当前步骤: 第{step.step}步 — [{step.action}] {step.target}")
+            if step.expected:
+                context_parts.append(f"预期结果: {step.expected}")
         context_str = "\n".join(context_parts)
+
+        # Use expected as the assertion condition if available, otherwise fall back to target
+        assert_condition = step.expected if (step and step.expected) else target
 
         dw, dh = await self._get_screen_size()
         prompt = (
             f"{context_str}\n\n" if context_str else ""
         ) + (
-            f"请判断当前屏幕截图是否满足以下条件：{target}\n\n"
+            f"请判断当前屏幕截图是否满足以下条件：{assert_condition}\n\n"
             "注意：\n"
             "- 判断时请结合测试用例的上下文。例如上一步刚点了搜索框，那么搜索页已打开是合理的\n"
             "- 搜索页可能是 overlay 弹层而不是完整页面，键盘弹起遮挡部分是正常的\n"
