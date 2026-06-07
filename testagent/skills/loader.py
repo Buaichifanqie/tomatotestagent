@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 _logger = get_logger(__name__)
 
-SKILL_FILE_GLOB = "*/SKILL.md"
+SKILL_FILE_GLOB = "**/SKILL.md"
 
 
 @dataclass

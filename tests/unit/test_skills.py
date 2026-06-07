@@ -743,3 +743,32 @@ class TestSkillMatcher:
         result = matcher.match("smoke test", skills)
         assert result is not None
         assert result.name == "pattern_and_keyword"
+
+
+class TestSkillLoaderAppsSubdirectory:
+    """测试 SkillLoader 能否正确扫描 skills/apps/ 子目录下的 App Skill"""
+
+    def test_scan_includes_apps_subdirectory(self, tmp_path: Path) -> None:
+        """scan() 应包含 apps/ 子目录下的 SKILL.md 文件"""
+        # 创建通用 Skill
+        generic_dir = tmp_path / "api_smoke_test"
+        generic_dir.mkdir()
+        (generic_dir / "SKILL.md").write_text(
+            "---\nname: api_smoke_test\nversion: \"1.0.0\"\ndescription: API smoke test\ntrigger: api\nrequired_mcp_servers: []\nrequired_rag_collections: []\n---\n\nBody",
+            encoding="utf-8",
+        )
+
+        # 创建 App Skill
+        app_dir = tmp_path / "apps" / "bilibili"
+        app_dir.mkdir(parents=True)
+        (app_dir / "SKILL.md").write_text(
+            "---\nname: bilibili\nversion: \"1.0.0\"\ndescription: Bilibili app test\ntrigger: bilibili\nrequired_mcp_servers: []\nrequired_rag_collections: []\n---\n\nBody",
+            encoding="utf-8",
+        )
+
+        loader = SkillLoader(skills_dir=tmp_path)
+        paths = loader.scan()
+        path_strs = [str(p) for p in paths]
+
+        assert any("api_smoke_test" in p for p in path_strs)
+        assert any("bilibili" in p for p in path_strs)
