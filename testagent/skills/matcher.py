@@ -8,6 +8,7 @@ from testagent.common import get_logger
 
 if TYPE_CHECKING:
     from testagent.models.skill import SkillDefinition
+    from testagent.skills.app_identifier import AppIdentifier
 
 _logger = get_logger(__name__)
 
@@ -18,6 +19,16 @@ _KEYWORD_MATCH_WEIGHT = 1.0
 @dataclass
 class _ScoredMatch:
     skill: SkillDefinition
+    score: float = 0.0
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AppAwareMatch:
+    """包含 App 识别信息的匹配结果。"""
+    skill: SkillDefinition
+    app_name: str = ""
+    app_confidence: float = 0.0
     score: float = 0.0
     reasons: list[str] = field(default_factory=list)
 
@@ -75,3 +86,26 @@ class SkillMatcher:
         )
 
         return [s.skill for s in scored]
+
+    def match_with_app(
+        self,
+        text: str,
+        skills: list[SkillDefinition],
+        app_identifier: AppIdentifier,
+    ) -> AppAwareMatch | None:
+        """匹配 Skill 并同时识别目标 App。"""
+        # 先匹配通用 Skill
+        generic_match = self.match(text, skills)
+        if generic_match is None:
+            return None
+
+        # 再识别 App
+        id_result = app_identifier.identify_with_action(text)
+
+        return AppAwareMatch(
+            skill=generic_match,
+            app_name=id_result.app_name,
+            app_confidence=id_result.confidence,
+            score=0.0,
+            reasons=[],
+        )

@@ -772,3 +772,56 @@ class TestSkillLoaderAppsSubdirectory:
 
         assert any("api_smoke_test" in p for p in path_strs)
         assert any("bilibili" in p for p in path_strs)
+
+
+class TestSkillMatcherWithAppIdentifier:
+    """测试 SkillMatcher 集成 AppIdentifier 后的匹配行为"""
+
+    def test_match_returns_app_info(self, tmp_path: Path) -> None:
+        """match_with_app() 应返回包含 App 识别信息的结果"""
+        from testagent.skills.app_identifier import AppIdentifier
+
+        # 创建 App Skill 目录
+        app_dir = tmp_path / "apps" / "bilibili"
+        app_dir.mkdir(parents=True)
+        (app_dir / "SKILL.md").write_text(
+            """---
+name: bilibili
+version: "1.0.0"
+description: Bilibili app test
+app_info:
+  package_name: "tv.danmaku.bili"
+triggers:
+  - "bilibili"
+  - "B站"
+dependencies:
+  skills: [app_smoke_test]
+  mcp_servers: [appium, vision]
+tags: [video]
+---
+
+Body
+""",
+            encoding="utf-8",
+        )
+
+        identifier = AppIdentifier(skills_dir=tmp_path)
+        matcher = SkillMatcher()
+
+        # Create mock SkillDefinition list
+        skill = SkillDefinition(
+            name="app_smoke_test",
+            version="1.0.0",
+            description="App smoke test",
+            trigger_pattern="冒烟|smoke",
+        )
+
+        result = matcher.match_with_app(
+            "测试B站冒烟测试",
+            [skill],
+            app_identifier=identifier,
+        )
+
+        assert result is not None
+        assert result.app_name == "bilibili"
+        assert result.app_confidence >= 0.9
