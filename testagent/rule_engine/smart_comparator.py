@@ -49,6 +49,26 @@ class SmartComparator:
                 message="Exact string match" if matched else f"'{ui_value}' != '{expected_value}'",
             )
 
+        # Layer 0: None guard — both missing is consistent, one missing is not
+        if ui_value is None and expected_value is None:
+            return CompareResult(
+                matched=True,
+                ui_value=ui_value,
+                expected_value=expected_value,
+                matcher_used="NoneGuard",
+                confidence=1.0,
+                message="Both values are None (consistent)",
+            )
+        if ui_value is None or expected_value is None:
+            return CompareResult(
+                matched=False,
+                ui_value=ui_value,
+                expected_value=expected_value,
+                matcher_used="NoneGuard",
+                confidence=1.0,
+                message=f"One value is None: ui={ui_value}, expected={expected_value}",
+            )
+
         # Layer 1: Auto-match funnel
         return self._auto_match(ui_value, expected_value)
 
@@ -80,8 +100,8 @@ class SmartComparator:
     def _try_numeric(self, ui_value: Any, expected_value: Any) -> CompareResult | None:
         """Try numeric comparison."""
         try:
-            ui_num = float(str(ui_value).strip())
-            exp_num = float(str(expected_value).strip())
+            ui_num = float(str(ui_value).strip().replace(",", ""))
+            exp_num = float(str(expected_value).strip().replace(",", ""))
             matched = abs(ui_num - exp_num) < 1e-9
             return CompareResult(
                 matched=matched,

@@ -119,6 +119,44 @@ class TestExplicitTransforms:
         assert result.matched is False  # "¥100" != 100 strictly
 
 
+class TestNoneHandling:
+    def test_both_none(self):
+        comp = SmartComparator()
+        result = comp.compare(None, None)
+        assert result.matched is True
+        assert result.matcher_used == "NoneGuard"
+
+    def test_one_none(self):
+        comp = SmartComparator()
+        result = comp.compare(None, 100)
+        assert result.matched is False
+        assert result.matcher_used == "NoneGuard"
+
+    def test_ui_none_expected_value(self):
+        comp = SmartComparator()
+        result = comp.compare("hello", None)
+        assert result.matched is False
+        assert result.matcher_used == "NoneGuard"
+
+
+class TestCommaNumbers:
+    def test_comma_separated_number(self):
+        comp = SmartComparator()
+        result = comp.compare("1,234", 1234)
+        assert result.matched is True
+        assert result.matcher_used == "NumericMatcher"
+
+    def test_large_comma_number(self):
+        comp = SmartComparator()
+        result = comp.compare("100,000", 100000)
+        assert result.matched is True
+
+    def test_comma_number_vs_float(self):
+        comp = SmartComparator()
+        result = comp.compare("1,234.56", 1234.56)
+        assert result.matched is True
+
+
 class TestCompareResult:
     def test_result_fields(self):
         comp = SmartComparator()
