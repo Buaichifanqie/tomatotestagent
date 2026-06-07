@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from abc import ABC, abstractmethod
 from typing import Any
@@ -8,7 +7,6 @@ from typing import Any
 import httpx
 
 from testagent.rule_engine.context_manager import ContextManager
-from testagent.rule_engine.models import DataSourceConfig
 
 
 class BaseDataSource(ABC):
@@ -93,40 +91,44 @@ class ApiDataSource(BaseDataSource):
 
     async def fetch(self, context: ContextManager) -> dict[str, Any]:
         """Send HTTP request and extract values from response."""
+        return await self._do_request(
+            method=self.method,
+            body=self.body,
+            context=context,
+        )
+
+    async def create(self, data: dict[str, Any], context: ContextManager) -> dict[str, Any]:
+        """Create data via POST and extract from response."""
+        return await self._do_request(method="POST", body=data, context=context)
+
+    async def _do_request(
+        self,
+        method: str,
+        body: dict[str, Any] | None,
+        context: ContextManager,
+    ) -> dict[str, Any]:
+        """Send an HTTP request with explicit method and body."""
         url = context.resolve(self.endpoint)
         headers = {k: context.resolve(v) for k, v in self.headers.items()}
-        body = context.resolve_dict(self.body) if self.body else None
+        resolved_body = context.resolve_dict(body) if body else None
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 kwargs: dict[str, Any] = {"url": url, "headers": headers}
-                if self.method in ("POST", "PUT", "PATCH"):
-                    kwargs["json"] = body
+                if method in ("POST", "PUT", "PATCH"):
+                    kwargs["json"] = resolved_body
 
-                method_fn = getattr(client, self.method.lower())
+                method_fn = getattr(client, method.lower())
                 response = await method_fn(**kwargs)
                 response.raise_for_status()
                 data = response.json()
                 return self._extract_values(data)
         except httpx.TimeoutException:
-            return {"error": f"API timeout: {self.method} {url}"}
+            return {"error": f"API timeout: {method} {url}"}
         except httpx.HTTPStatusError as e:
             return {"error": f"API error {e.response.status_code}: {e.response.text[:200]}"}
         except Exception as e:
             return {"error": f"API request failed: {str(e)}"}
-
-    async def create(self, data: dict[str, Any], context: ContextManager) -> dict[str, Any]:
-        """Create data via POST and extract from response."""
-        original_method = self.method
-        original_body = self.body
-        self.method = "POST"
-        self.body = data
-        try:
-            result = await self.fetch(context)
-            return result
-        finally:
-            self.method = original_method
-            self.body = original_body
 
 
 class DatabaseDataSource(BaseDataSource):
@@ -149,13 +151,14 @@ class DatabaseDataSource(BaseDataSource):
 
     async def fetch(self, context: ContextManager) -> dict[str, Any]:
         """Execute query and extract values from results."""
-        resolved_query = self._resolve_query_params(self.query, context)
+        query_text, params = self._resolve_query_params(self.query, context)
 
         try:
             import sqlalchemy
             engine = sqlalchemy.create_engine(self.connection)
             with engine.connect() as conn:
-                result = conn.execute(sqlalchemy.text(resolved_query))
+                stmt = sqlalchemy.text(query_text).bindparams(**params)
+                result = conn.execute(stmt)
                 rows = [dict(row._mapping) for row in result]
                 return self._extract_values({"rows": rows})
         except Exception as e:
@@ -166,19 +169,28 @@ class DatabaseDataSource(BaseDataSource):
         return await self.fetch(context)
 
     @staticmethod
-    def _resolve_query_params(query: str, context: ContextManager) -> str:
-        """Resolve :param style variables from context."""
+    def _resolve_query_params(
+        query: str, context: ContextManager
+    ) -> tuple[str, dict[str, Any]]:
+        """Resolve :param style variables from context.
+
+        Returns a tuple of (query_text, params_dict) where query_text uses
+        __param__ placeholders and params_dict maps those placeholders to
+        resolved values.  Safe for use with sqlalchemy.text().bindparams().
+        """
+        params: dict[str, Any] = {}
+
         def _replacer(match: re.Match[str]) -> str:
             name = match.group(1)
             value = context.get(name)
             if value is None:
                 return match.group(0)
-            # Quote string values
-            if isinstance(value, str):
-                return f"'{value}'"
-            return str(value)
+            placeholder = f"__{name}__"
+            params[placeholder] = value
+            return f":{placeholder}"
 
-        return re.sub(r":(\w+)", _replacer, query)
+        safe_query = re.sub(r":(\w+)", _replacer, query)
+        return safe_query, params
 
 
 class DataSourceFactory:
@@ -189,6 +201,23 @@ class DataSourceFactory:
         "database": DatabaseDataSource,
     }
 
+    # Maps each registered type to the config keys its constructor expects
+    # (excluding ``name`` which is always extracted).
+    _config_keys: dict[str, dict[str, Any]] = {
+        "api": {
+            "method": "GET",
+            "endpoint": "",
+            "headers": None,
+            "body": None,
+            "extract": None,
+        },
+        "database": {
+            "connection": "",
+            "query": "",
+            "extract": None,
+        },
+    }
+
     @classmethod
     def create(cls, config: dict[str, Any]) -> BaseDataSource:
         """Create a data source from a config dict."""
@@ -197,23 +226,11 @@ class DataSourceFactory:
         if source_cls is None:
             raise ValueError(f"Unknown data source type: {source_type}")
 
-        if source_type == "api":
-            return ApiDataSource(
-                name=config.get("name", ""),
-                method=config.get("method", "GET"),
-                endpoint=config.get("endpoint", ""),
-                headers=config.get("headers"),
-                body=config.get("body"),
-                extract=config.get("extract"),
-            )
-        elif source_type == "database":
-            return DatabaseDataSource(
-                name=config.get("name", ""),
-                connection=config.get("connection", ""),
-                query=config.get("query", ""),
-                extract=config.get("extract"),
-            )
-        raise ValueError(f"Unhandled data source type: {source_type}")
+        defaults = cls._config_keys.get(source_type, {})
+        kwargs: dict[str, Any] = {"name": config.get("name", "")}
+        for key, default in defaults.items():
+            kwargs[key] = config.get(key, default)
+        return source_cls(**kwargs)
 
     @classmethod
     def register(cls, type_name: str, source_cls: type[BaseDataSource]) -> None:
