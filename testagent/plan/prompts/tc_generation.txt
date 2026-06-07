@@ -207,7 +207,7 @@
 | `tap` | 点击 UI 元素 |
 | `type` | 在输入框输入文本。`value` 填要输入的文本 |
 | `swipe` | 滑动手势。`target` 格式 `"start_x,start_y,end_x,end_y"`（像素或百分比，执行层决定） |
-| `wait` | 等待异步条件。`target` 写等待条件（如「加载圈消失」） |
+| `wait` | 等待异步加载完成。`target` 写等待条件描述（如「搜索联想列表加载」），`expected` 写加载完成后的可见状态（如「联想列表至少 1 项可见」）。**仅在 tap/type 触发了异步加载时使用；如只需验证当前状态，请用 `assert`** |
 | `assert` | 断言验证。`target` 写要验证的目标，`expected` 写具体条件 |
 | `exec` | 设备级系统命令。`value` 写命令本身（具体命令格式由「平台适配段」定义） |
 | `screenshot` | 截图取证 |
