@@ -64,6 +64,11 @@ class BaseDataSource(ABC):
                 return None
         return current
 
+    @staticmethod
+    def resolve_json_path(data: Any, path: str) -> Any:
+        """Resolve a simple JSONPath expression like $.data.field."""
+        return BaseDataSource._resolve_json_path(data, path)
+
 
 class ApiDataSource(BaseDataSource):
     """REST API data source.
