@@ -44,6 +44,7 @@ class ContextAssembler:
         agent_type: AgentType,
         session: TestSession | None = None,
         rag_query: str | None = None,
+        app_name: str | None = None,
     ) -> AssembledContext:
         agents_section = self._build_agents_section(agent_type)
         soul_section = self._build_soul_section(agent_type)
@@ -57,6 +58,12 @@ class ContextAssembler:
         if skill_hints:
             hints_text = "\n".join(f"- {s.get('name', 'unknown')}: {s.get('description', '')}" for s in skill_hints)
             system_parts.append(f"# Available Skills\n\n{hints_text}")
+
+        # App Skill 摘要注入（第一层）
+        if app_name:
+            app_summary = self._load_app_skill_summary(app_name)
+            if app_summary:
+                system_parts.append(f"# Target App Knowledge\n\n{app_summary}")
 
         if rag_context:
             rag_section = "\n\n".join(rag_context)
@@ -287,3 +294,13 @@ class ContextAssembler:
             context_parts.append("\n".join(items))
 
         return context_parts
+
+    def _load_app_skill_summary(self, app_name: str) -> str | None:
+        """加载 App Skill 摘要用于 system prompt 注入。"""
+        from pathlib import Path
+        from testagent.skills.app_skill_loader import AppSkillLoader
+
+        skills_dir = Path("skills")
+        apps_dir = skills_dir / "apps"
+        loader = AppSkillLoader(apps_dir=apps_dir)
+        return loader.get_summary(app_name)
