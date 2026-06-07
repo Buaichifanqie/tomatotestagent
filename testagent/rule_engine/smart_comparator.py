@@ -199,9 +199,23 @@ class SmartComparator:
     ) -> CompareResult:
         """Apply an explicit transform before comparison."""
         if isinstance(transform, str):
-            # Built-in transform name
-            transformed = self._run_builtin_transform(ui_value, transform)
-            matcher_label = f"transform:{transform}"
+            # Check for "source_to_target" mapping pattern (e.g., "以旧换新_to_2")
+            if "_to_" in transform:
+                parts = transform.split("_to_", 1)
+                source, target = parts[0], parts[1]
+                if str(ui_value).strip() == source:
+                    transformed = target
+                    matcher_label = f"transform:{transform}"
+                    confidence = 0.95
+                else:
+                    transformed = ui_value
+                    matcher_label = f"transform:{transform}"
+                    confidence = 0.0
+            else:
+                # Built-in transform name
+                transformed = self._run_builtin_transform(ui_value, transform)
+                matcher_label = f"transform:{transform}"
+                confidence = 1.0
         elif isinstance(transform, dict):
             # Complex transform with rules
             transform_type = transform.get("type", "")
@@ -212,9 +226,11 @@ class SmartComparator:
             else:
                 transformed = ui_value
             matcher_label = f"transform:{transform_type}"
+            confidence = 1.0
         else:
             transformed = ui_value
             matcher_label = "transform:custom"
+            confidence = 1.0
 
         # Compare transformed value with expected
         try:
@@ -232,7 +248,7 @@ class SmartComparator:
             ui_value=transformed,
             expected_value=expected_value,
             matcher_used=matcher_label,
-            confidence=1.0,
+            confidence=confidence,
             message=f"Transform applied: {ui_value} -> {transformed}, "
             f"{'matched' if matched else 'mismatch'}",
         )

@@ -112,6 +112,13 @@ class TestExplicitTransforms:
         result = comp.compare("已发货", 2, transform={"type": "map", "rules": mapping})
         assert result.matched is True
 
+    def test_custom_mapping_transform(self):
+        comp = SmartComparator()
+        result = comp.compare("以旧换新", 2, transform="以旧换新_to_2")
+        assert result.matched is True
+        assert result.matcher_used == "transform:以旧换新_to_2"
+        assert result.confidence == 0.95
+
     def test_strict_mode_no_auto_match(self):
         comp = SmartComparator()
         # Without transform, strict mode should do exact comparison
