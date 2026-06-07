@@ -68,6 +68,39 @@ class PerTCEvaluator:
             )
 
         if status == ExecutionStatus.EXECUTED:
+            # Check cross-source assertion results first
+            cross_results = tc.execution.cross_source_results
+            if cross_results:
+                failed_assertions = [
+                    r for r in cross_results
+                    if isinstance(r, dict) and r.get("status") == "FAIL"
+                ]
+                error_assertions = [
+                    r for r in cross_results
+                    if isinstance(r, dict) and r.get("status") == "ERROR"
+                ]
+                if failed_assertions:
+                    first_fail = failed_assertions[0]
+                    compare = first_fail.get("compare_result", {})
+                    return EvaluationOutput(
+                        verdict=ExecutionVerdict.FAIL,
+                        confidence=compare.get("confidence", 0.9) if isinstance(compare, dict) else 0.9,
+                        reason=f"Cross-source mismatch on '{first_fail.get('field', '?')}': "
+                               f"{compare.get('message', '') if isinstance(compare, dict) else ''}",
+                        evidence=list(tc.execution.evidence),
+                        evidence_missing=missing,
+                        failure_type=FailureType.ASSERTION_FAILED,
+                    )
+                if error_assertions:
+                    first_err = error_assertions[0]
+                    return EvaluationOutput(
+                        verdict=ExecutionVerdict.NEED_REVIEW,
+                        confidence=0.5,
+                        reason=f"Cross-source error on '{first_err.get('field', '?')}': "
+                               f"{first_err.get('error_message', 'unknown')}",
+                        evidence=list(tc.execution.evidence),
+                        evidence_missing=missing,
+                    )
             # Check for assert warnings — downgrade to NEED_REVIEW if present
             if tc.execution.assert_warnings:
                 warn_summary = "; ".join(tc.execution.assert_warnings[:3])
