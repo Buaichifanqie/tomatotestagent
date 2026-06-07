@@ -41,14 +41,25 @@ class SkillExecutor:
         self,
         skill: SkillDefinition,
         context: dict[str, Any] | None = None,
+        app_name: str | None = None,
     ) -> SkillResult:
         _context = context or {}
         start_time = time.monotonic()
 
         logger.info(
             "Skill execution started",
-            extra={"extra_data": {"skill": skill.name, "version": skill.version}},
+            extra={"extra_data": {"skill": skill.name, "version": skill.version, "app": app_name}},
         )
+
+        # 如果指定了 App，加载 App Skill 内容并注入 context
+        if app_name:
+            app_skill_content = self._load_app_skill_content(app_name)
+            if app_skill_content:
+                _context["app_skill"] = app_skill_content
+                logger.info(
+                    "App Skill loaded for execution",
+                    extra={"extra_data": {"app": app_name, "content_length": len(app_skill_content)}},
+                )
 
         validation = await self._validate_prerequisites(skill)
         if not validation["valid"]:
@@ -104,6 +115,26 @@ class SkillExecutor:
         )
 
         return result
+
+    def _load_app_skill_content(self, app_name: str) -> str | None:
+        """加载 App Skill 的完整内容用于执行阶段。"""
+        from pathlib import Path
+
+        from testagent.skills.app_skill_loader import AppSkillLoader
+
+        skills_dir = Path("skills")
+        apps_dir = skills_dir / "apps"
+        loader = AppSkillLoader(apps_dir=apps_dir)
+        skills = loader.load_app(app_name)
+        if not skills:
+            return None
+
+        # 合并所有 Skill 文件内容
+        parts: list[str] = []
+        for s in skills:
+            parts.append(f"## {s.name} ({s.file_path.name})\n\n{s.body}")
+
+        return "\n\n---\n\n".join(parts)
 
     async def _validate_prerequisites(self, skill: SkillDefinition) -> dict[str, Any]:
         required_servers = skill.required_mcp_servers
