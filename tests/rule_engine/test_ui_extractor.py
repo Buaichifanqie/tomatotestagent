@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 from testagent.rule_engine.ui_extractor import UIExtractor
 from testagent.rule_engine.context_manager import ContextManager
@@ -9,7 +9,7 @@ from testagent.rule_engine.context_manager import ContextManager
 
 class TestUIExtractorDOM:
     @pytest.mark.asyncio
-    async def test_extract_text_by_xpath(self):
+    async def test_extract_text_by_resource_id(self):
         """UIExtractor extracts text from DOM element via Appium."""
         extractor = UIExtractor(
             appium_url="http://localhost:4723",

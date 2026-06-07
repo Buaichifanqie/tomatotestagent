@@ -91,7 +91,6 @@ class UIExtractor:
 
         locator = config.get("locator", {})
         resource_id = locator.get("resource_id", "")
-        xpath = locator.get("xpath", "")
         text_match = locator.get("text", "")
 
         try:
