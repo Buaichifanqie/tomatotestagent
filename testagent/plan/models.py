@@ -137,6 +137,7 @@ class TCExecution(BaseModel):
     reason: str = ""
     previous_attempts: list[dict[str, object]] = Field(default_factory=list)
     assert_warnings: list[str] = Field(default_factory=list)
+    cross_source_results: list[dict[str, object]] = Field(default_factory=list)
 
 
 class TestCase(BaseModel):
@@ -156,6 +157,8 @@ class TestCase(BaseModel):
     teardown: list[TestStep] = Field(default_factory=list)
     steps: list[TestStep] = Field(default_factory=list)
     execution: TCExecution = Field(default_factory=TCExecution)
+    setup: list[dict[str, object]] = Field(default_factory=list)
+    assertions: list[dict[str, object]] = Field(default_factory=list)
 
 
 class EvaluationOutput(BaseModel):
