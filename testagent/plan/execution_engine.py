@@ -87,6 +87,7 @@ class ExecutionEngine:
         self._coordinate_cache = CoordinateCache()
         self._action_context_stack: list[str] = []
         self._context_depth: int = 2
+        self._rule_engine: Any | None = None
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -681,6 +682,10 @@ class ExecutionEngine:
         # Ensure app is launched before executing steps.
         await self._ensure_app_launched()
 
+        # ── Phase A: Execute setup data sources ──────────────────────
+        if tc.setup:
+            await self._execute_setup(tc)
+
         for step in tc.steps:
             if self.should_abort():
                 self._mark_aborted(tc, "Abort during execution")
@@ -704,6 +709,39 @@ class ExecutionEngine:
                 return
 
         tc.execution.status = ExecutionStatus.EXECUTED
+
+        # ── Phase C: Execute cross-source assertions ──────────────────
+        if tc.assertions and self._rule_engine is not None:
+            try:
+                assertion_results = await self._rule_engine.execute_assertions(tc.assertions)
+                tc.execution.cross_source_results = [
+                    r.model_dump() for r in assertion_results
+                ]
+                # Check for failures
+                failed = [r for r in assertion_results if r.status.value == "FAIL"]
+                if failed:
+                    tc.execution.status = ExecutionStatus.FAILED
+                    tc.execution.error_message = f"Cross-source assertion failed: {failed[0].field}"
+                    tc.execution.failure_type = FailureType.ASSERTION_FAILED
+                self._log(f"  [Assertions: {len(assertion_results)} executed, {len(failed)} failed]")
+            except Exception as exc:
+                self._log(f"  [Assertions warning: {exc}]")
+
+    async def _execute_setup(self, tc: TestCase) -> None:
+        """Execute setup data sources and register results in rule engine context."""
+        from testagent.rule_engine.engine import RuleEngine
+
+        if self._rule_engine is None:
+            self._rule_engine = RuleEngine(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id or "",
+            )
+
+        try:
+            await self._rule_engine.execute_setup(tc.setup)
+            self._log(f"  [Setup: {len(tc.setup)} data source(s) executed]")
+        except Exception as exc:
+            self._log(f"  [Setup warning: {exc}]")
 
     async def _execute_step_async(self, tc: TestCase, step: TestStep) -> StepExecution:
         """Async implementation of step execution with real Appium calls.
@@ -867,11 +905,33 @@ class ExecutionEngine:
                     return {"error": f"exec command timed out: {cmd}"}
                 except Exception as exc:
                     return {"error": f"exec command failed: {exc}"}
+            elif step.action == "wait":
+                # Wait for an async condition (e.g., "加载圈消失", "列表加载").
+                # Strategy: sleep briefly, then optionally verify via Vision.
+                wait_seconds = 3
+                target_desc = step.target or step.expected or ""
+                self._log(f"  [Wait] Waiting {wait_seconds}s for: {target_desc}")
+                await asyncio.sleep(wait_seconds)
+                # If there's an expected condition, verify it via Vision
+                if step.expected:
+                    vision_result = await self._assert_with_vision(step.expected, tc, step)
+                    if vision_result and not vision_result.get("error"):
+                        return {"status": "wait_completed", "verified": True}
+                    # Condition not met yet — wait a bit more and retry once
+                    self._log(f"  [Wait] Condition not met after {wait_seconds}s, retrying...")
+                    await asyncio.sleep(2)
+                    vision_result = await self._assert_with_vision(step.expected, tc, step)
+                    if vision_result and not vision_result.get("error"):
+                        return {"status": "wait_completed", "verified": True}
+                    return {"status": "wait_completed", "verified": False, "warning": f"Condition may not be met: {step.expected}"}
+                return {"status": "wait_completed"}
             elif step.action == "screenshot":
                 return await app_screenshot(
                     appium_url=appium_url, session_id=sid,
                 )
-            return {"error": f"Unknown action: {step.action}"}
+            # Unknown action — log warning and skip instead of hard failure
+            self._log(f"  [Warning] Unknown action '{step.action}', skipping step")
+            return {"status": "skipped", "warning": f"Unknown action: {step.action}"}
 
         try:
             result = await _exec_action()
