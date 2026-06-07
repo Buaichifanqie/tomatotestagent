@@ -160,6 +160,7 @@ test_case:
       sources:
         ui:
           semantic: "商品原价"
+          transform: "strip_currency"  # Explicitly strip ¥ before strict comparison
         db:
           source_ref: "query_db"
           extract: "$.db_price"
@@ -350,7 +351,7 @@ Built-in matchers:
 | Matcher | Input | Output | Logic |
 |---------|-------|--------|-------|
 | NumericMatcher | `"100.0"`, `100` | Match | Parse both as float, compare |
-| CurrencyMatcher | `"¥100.00"`, `150` | No match | Strip `¥$`, parse as float |
+| CurrencyMatcher | `"¥150.00"`, `150` | Match | Strip `¥$`, parse as float |
 | DatetimeMatcher | `"2026-06-07"`, `1749273600` | Match | Normalize to timestamp |
 | FuzzyStringMatcher | `"Hello"`, `"hello "` | Match | Lowercase + strip |
 
@@ -384,7 +385,7 @@ class RuleEngine:
 | API timeout | Retry 1x with 5s timeout, then mark assertion as `ERROR` (not FAIL) |
 | API returns non-200 | Mark assertion as `ERROR`, log response body |
 | DB connection failure | Mark assertion as `ERROR`, skip DB-dependent assertions |
-| OCR returns empty | Fall back to VLM (V1.1+), or mark as `NEED_REVIEW` |
+| OCR returns empty | MVP: mark as `ERROR` (message: "UI extraction failed via DOM and OCR"). V1.1+: fall back to VLM. |
 | Variable not in context | Mark assertion as `ERROR` with clear message: `${product_id} not found` |
 | JSONPath extraction fails | Mark assertion as `ERROR`, log the raw response |
 
