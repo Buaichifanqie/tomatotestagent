@@ -1033,7 +1033,7 @@ async def _plan_command_async(
         if raw:
             typer.echo("\n--- Raw LLM output (first 2000 chars) ---")
             typer.echo(raw[:2000])
-        return None
+        return None, None, []
 
     typer.echo(f"Generated {len(test_cases)} test case(s).")
 
@@ -1058,7 +1058,7 @@ async def _plan_command_async(
     original_steps = {tc.id: [{"step": s.step, "action": s.action, "target": s.target, "value": s.value} for s in tc.steps] for tc in test_cases}
     if not present_tc_to_user(test_cases, auto_yes=auto_yes, llm_provider=llm_provider, app_package=app_package or ""):
         typer.echo("Execution cancelled by user.")
-        return None
+        return None, None, []
 
     # ── Phase 3.5: Delta extraction and learning ─────────────────────────
     if memory_app_id:

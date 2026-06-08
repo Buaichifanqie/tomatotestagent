@@ -282,8 +282,8 @@ class TestPlanCommand:
         mock_report_cls.assert_called_once()
         mock_report.generate.assert_called_once()
 
-        # Returns the report path
-        assert result == report_path
+        # Returns (report_path, overall, executed_tcs) tuple
+        assert result[0] == report_path
 
     @patch("testagent.cli.plan.TestCaseGenerator")
     @patch("testagent.cli.plan.typer.echo")
@@ -310,7 +310,7 @@ class TestPlanCommand:
                 auto_yes=True,
             )
 
-        assert result is None
+        assert result[0] is None
 
     @patch("testagent.cli.plan.TestCaseGenerator")
     @patch("testagent.cli.plan.setup_output_dir")
@@ -344,7 +344,7 @@ class TestPlanCommand:
                 auto_yes=False,
             )
 
-        assert result is None
+        assert result[0] is None
 
     @patch("testagent.cli.plan.ReportGenerator")
     @patch("testagent.cli.plan.OverallEvaluator")
@@ -438,7 +438,7 @@ class TestPlanCommand:
         mock_overall.evaluate.assert_called_once()
         mock_report.generate.assert_called_once()
 
-        assert result == report_path
+        assert result[0] == report_path
 
 
 # ── main.py registration ────────────────────────────────────────────────────
