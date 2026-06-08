@@ -23,6 +23,24 @@ from testagent.rag.app_memory import (
     serialize_cases_for_storage,
 )
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class PlanResult:
+    """Structured result from a single plan execution."""
+
+    status: str  # "completed" | "failed"
+    requirement_source: str  # original input (file path / URL / text)
+    test_cases: list[TestCase] = field(default_factory=list)
+    report_path: str = ""
+    summary: str = ""  # human-readable text summary
+    error: str | None = None
+    case_count: int = 0
+    passed: int = 0
+    failed: int = 0
+    duration: str = ""
+
 
 # ── helper functions ─────────────────────────────────────────────────────────
 
@@ -1282,3 +1300,99 @@ async def _plan_command_async(
         typer.echo(f"  [Replay capture warning: {exc}]")
 
     return report_path
+
+
+async def run_single_plan(
+    requirement: str,
+    app_package: str = "",
+    app_activity: str = "",
+    app_id: str = "",
+    auto_yes: bool = True,
+    name: str = "",
+    log_fn: Any = None,
+) -> PlanResult:
+    """Execute a single requirement document's full test lifecycle.
+
+    This is the async entry point used by the batch orchestrator (ask command).
+    It wraps ``_plan_command_async`` with structured result handling.
+
+    Args:
+        requirement: File path, URL, or raw requirement text.
+        app_package: Android app package name (auto-detected if empty).
+        app_activity: Android launch activity.
+        app_id: App identifier for App Context Memory.
+        auto_yes: Skip interactive confirmation (always True for batch).
+        name: Custom plan name.
+        log_fn: Optional callable(str) for progress messages.
+
+    Returns:
+        PlanResult with status, summary, and report path.
+    """
+    import time
+
+    _log = log_fn or (lambda msg: None)
+
+    _log(f"Starting plan for: {requirement[:80]}...")
+    start_time = time.monotonic()
+
+    try:
+        report_path = await _plan_command_async(
+            requirement,
+            name=name,
+            app_package=app_package,
+            app_activity=app_activity,
+            app_id=app_id,
+            auto_yes=auto_yes,
+        )
+    except Exception as exc:
+        duration_s = time.monotonic() - start_time
+        _log(f"Plan failed: {exc}")
+        return PlanResult(
+            status="failed",
+            requirement_source=requirement,
+            error=str(exc),
+            duration=f"{duration_s:.1f}s",
+        )
+
+    duration_s = time.monotonic() - start_time
+
+    if report_path is None:
+        return PlanResult(
+            status="failed",
+            requirement_source=requirement,
+            error="Plan was aborted (no test cases generated or user cancelled)",
+            duration=f"{duration_s:.1f}s",
+        )
+
+    # Parse the report to extract summary stats
+    passed, failed, total = 0, 0, 0
+    summary_lines = []
+    try:
+        report_text = Path(report_path).read_text(encoding="utf-8")
+        import re as _re
+        pass_match = _re.search(r"Passed:\s*(\d+)", report_text)
+        fail_match = _re.search(r"Failed:\s*(\d+)", report_text)
+        total_match = _re.search(r"Total:\s*(\d+)", report_text)
+        if pass_match:
+            passed = int(pass_match.group(1))
+        if fail_match:
+            failed = int(fail_match.group(1))
+        if total_match:
+            total = int(total_match.group(1))
+        summary_lines.append(f"{total} test cases: {passed} passed, {failed} failed")
+        summary_lines.append(f"Report: {report_path}")
+    except Exception:
+        summary_lines.append(f"Report: {report_path}")
+
+    _log(f"Plan completed: {', '.join(summary_lines)}")
+
+    return PlanResult(
+        status="completed",
+        requirement_source=requirement,
+        report_path=report_path,
+        summary="\n".join(summary_lines),
+        case_count=total,
+        passed=passed,
+        failed=failed,
+        duration=f"{duration_s:.1f}s",
+    )
