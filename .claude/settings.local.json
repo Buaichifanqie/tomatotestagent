@@ -31,7 +31,8 @@
       "Bash(tasklist //FI \"IMAGENAME eq node.exe\")",
       "Bash(taskkill *)",
       "Bash(taskkill.exe *)",
-      "Bash(curl -s --max-time 3 http://localhost:4723/status)"
+      "Bash(curl -s --max-time 3 http://localhost:4723/status)",
+      "Bash(testagent skill *)"
     ]
   }
 }
