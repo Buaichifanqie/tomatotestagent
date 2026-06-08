@@ -13,7 +13,7 @@ import typer
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.session_manager import SessionManager
 from testagent.plan.evaluator import PerTCEvaluator
-from testagent.plan.models import PlanConfig, TestCase, TestStep
+from testagent.plan.models import OverallEvaluation, PlanConfig, TestCase, TestStep
 from testagent.plan.overall_evaluator import OverallEvaluator
 from testagent.plan.prd_parser import PrdParser
 from testagent.plan.report_generator import ReportGenerator
@@ -45,7 +45,7 @@ class PlanResult:
 # ── helper functions ─────────────────────────────────────────────────────────
 
 
-async def _detect_app_package(requirement: str) -> str | None:
+async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Auto-detect app package from connected Android device.
 
     Uses ``adb`` to list third-party packages on the connected device, then
@@ -135,7 +135,7 @@ async def _detect_app_package(requirement: str) -> str | None:
     return None
 
 
-async def _detect_app_version(package: str) -> str | None:
+async def _detect_app_version(package: str) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Auto-detect app version from connected Android device.
 
     Uses ``adb shell dumpsys package`` to extract the versionName of the
@@ -604,7 +604,7 @@ def plan_command(
     app_activity: str = "",
     app_id: str = "",
     auto_yes: bool = False,
-) -> str | None:
+) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Main orchestration function — sync entry point for the Typer CLI.
 
     Wraps the async implementation in ``asyncio.run()``. See
@@ -624,7 +624,7 @@ async def _plan_command_async(
     app_activity: str = "",
     app_id: str = "",
     auto_yes: bool = False,
-) -> str | None:
+) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Async implementation of the full plan lifecycle.
 
     Orchestrates the full plan lifecycle:
@@ -647,8 +647,8 @@ async def _plan_command_async(
         auto_yes: Skip the user confirmation step.
 
     Returns:
-        The absolute path to the generated Markdown report, or ``None`` if the
-        pipeline was aborted.
+        A tuple of (report_path, overall_evaluation, executed_test_cases).
+        report_path is ``None`` if the pipeline was aborted.
     """
     # ── Phase 0: Parse input ────────────────────────────────────────────────
     from testagent.db.engine import init_db
@@ -1299,7 +1299,7 @@ async def _plan_command_async(
     except Exception as exc:
         typer.echo(f"  [Replay capture warning: {exc}]")
 
-    return report_path
+    return report_path, overall, executed_tcs
 
 
 async def run_single_plan(
@@ -1336,7 +1336,7 @@ async def run_single_plan(
     start_time = time.monotonic()
 
     try:
-        report_path = await _plan_command_async(
+        report_path, overall, executed_tcs = await _plan_command_async(
             requirement,
             name=name,
             app_package=app_package,
@@ -1364,31 +1364,21 @@ async def run_single_plan(
             duration=f"{duration_s:.1f}s",
         )
 
-    # Parse the report to extract summary stats
-    passed, failed, total = 0, 0, 0
-    summary_lines = []
-    try:
-        report_text = Path(report_path).read_text(encoding="utf-8")
-        import re as _re
-        pass_match = _re.search(r"Passed:\s*(\d+)", report_text)
-        fail_match = _re.search(r"Failed:\s*(\d+)", report_text)
-        total_match = _re.search(r"Total:\s*(\d+)", report_text)
-        if pass_match:
-            passed = int(pass_match.group(1))
-        if fail_match:
-            failed = int(fail_match.group(1))
-        if total_match:
-            total = int(total_match.group(1))
-        summary_lines.append(f"{total} test cases: {passed} passed, {failed} failed")
-        summary_lines.append(f"Report: {report_path}")
-    except Exception:
-        summary_lines.append(f"Report: {report_path}")
+    # Extract stats from OverallEvaluation (avoids regex parsing of Chinese report)
+    total = overall.total_count if overall else len(executed_tcs)
+    passed = overall.passed_count if overall else 0
+    failed = total - passed
+    summary_lines = [
+        f"{total} test cases: {passed} passed, {failed} failed",
+        f"Report: {report_path}",
+    ]
 
     _log(f"Plan completed: {', '.join(summary_lines)}")
 
     return PlanResult(
         status="completed",
         requirement_source=requirement,
+        test_cases=executed_tcs,
         report_path=report_path,
         summary="\n".join(summary_lines),
         case_count=total,
