@@ -183,6 +183,24 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    {
+        "name": "run_single_plan",
+        "description": "对单个需求文档执行完整测试流程：解析PRD → 生成用例 → 执行 → 生成报告。支持本地文件路径、URL链接、或直接粘贴的需求文本。当用户给出多个文档时，逐个调用此工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requirement": {
+                    "type": "string",
+                    "description": "需求文档的路径、URL、或需求描述文本",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "可选，自定义测试计划名称",
+                },
+            },
+            "required": ["requirement"],
+        },
+    },
 ]
 
 _SYSTEM_PROMPT = """\
@@ -200,11 +218,33 @@ You are TestAgent, an AI-powered mobile testing assistant connected to an Androi
 - **app_wait(seconds?)** — 等待指定秒数让界面加载稳定
 - **vision_find_element(screenshot_id, target, context?)** — 在截图中视觉查找目标 UI 元素，返回坐标
 - **vision_describe_screen(screenshot_id)** — 视觉描述当前屏幕内容
+- **run_single_plan(requirement, name?)** — 对单个需求文档执行完整测试流程（PRD解析→用例生成→执行→报告）
 
 ## Notes
 - app_launch 成功后会自动等待 3 秒让应用加载
 - app_tap / app_swipe 成功后会自动等待 2 秒让界面稳定
 - Session 过期会自动恢复，无需人工干预
+
+## 批量测试能力
+当用户给出多个需求文档时（多个文件路径、多个URL、或多段需求文本），
+你应该：
+1. 识别并提取所有需求文档
+2. 逐个调用 run_single_plan 工具执行测试
+3. 最后汇总所有结果，给出总结报告
+
+示例：
+  用户："请测试 doc1.md doc2.md doc3.md"
+  → 调用 run_single_plan("doc1.md")
+  → 调用 run_single_plan("doc2.md")
+  → 调用 run_single_plan("doc3.md")
+  → 汇总输出
+
+注意：
+- 如果用户没有特别说明顺序，按文档列出顺序执行
+- 如果用户说"先测X再测Y"，尊重用户指定的顺序
+- 每个文档测试完后简要汇报进度
+- 单个文档失败不影响其他文档，继续执行剩余文档
+- 对于单个需求文档，同样使用 run_single_plan 工具
 """
 
 
@@ -708,6 +748,36 @@ def _register_tool_handlers(
     register_tool_handler("app_launch", _handler_launch)
     register_tool_handler("app_exec", _handler_exec)
     register_tool_handler("app_wait", _handler_wait)
+
+    async def _handler_run_single_plan(input_data: dict[str, Any]) -> dict[str, Any]:
+        from testagent.cli.plan import run_single_plan
+
+        req = str(input_data.get("requirement", ""))
+        plan_name = str(input_data.get("name", ""))
+
+        if not req:
+            return {"error": "Missing 'requirement' parameter"}
+
+        result = await run_single_plan(
+            requirement=req,
+            name=plan_name,
+            auto_yes=True,
+            log_fn=lambda msg: print(f"  [plan] {msg}"),
+        )
+
+        return {
+            "status": result.status,
+            "requirement": result.requirement_source,
+            "summary": result.summary,
+            "report_path": result.report_path,
+            "case_count": result.case_count,
+            "passed": result.passed,
+            "failed": result.failed,
+            "duration": result.duration,
+            "error": result.error,
+        }
+
+    register_tool_handler("run_single_plan", _handler_run_single_plan)
 
     # ── Vision tool handlers ────────────────────────────────────
     if glm_client is not None:

@@ -18,33 +18,31 @@ def plan(
         False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"
     ),
 ) -> None:
-    """根据产品需求自动生成、执行测试用例并生成结构化报告。
+    """根据产品需求自动生成、执行测试用例并生成结构化报告。"""
+    import asyncio
+    from testagent.cli.plan import run_single_plan
 
-    生成用例后进入确认界面:
+    def _log(msg: str) -> None:
+        typer.echo(msg)
 
-    \b
-    - (y) 执行所有用例
-    - (e) 编辑用例
-    - (n) 取消
-
-    按 e 进入编辑模式:
-
-    \b
-    - (a) 添加用例 — 输入 ID、标题、优先级、步骤
-    - (d) 删除用例 — 选择编号删除
-    - (m) 修改用例 — 修改标题、优先级、核心标记或步骤
-    - (b) 返回上级
-    """
-    from testagent.cli.plan import plan_command as _plan_command
-
-    _plan_command(
+    result = asyncio.run(run_single_plan(
         requirement,
-        name=name,
         app_package=app_package,
         app_activity=app_activity,
         app_id=app_id,
         auto_yes=auto_yes,
-    )
+        name=name,
+        log_fn=_log,
+    ))
+
+    if result.status == "failed":
+        typer.echo(f"\n  ! 失败: {result.error}")
+        raise typer.Exit(1)
+
+    typer.echo(f"\n  状态: {result.status}")
+    typer.echo(f"  用例: {result.case_count} (通过 {result.passed}, 失败 {result.failed})")
+    typer.echo(f"  耗时: {result.duration}")
+    typer.echo(f"  报告: {result.report_path}")
 
 
 @app_typer.command()
