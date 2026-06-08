@@ -205,8 +205,8 @@ class ReportGenerator:
                         lines.append("")
                         lines.append(f"  > ⚠️ **断言警告:** {s.warning}")
                         lines.append("")
-                    # Screenshot for failed steps
-                    if not s.success and s.screenshot_after:
+                    # Screenshot for failed steps and warning steps
+                    if (not s.success or s.warning) and s.screenshot_after:
                         scr_path = Path(s.screenshot_after)
                         try:
                             rel = scr_path.relative_to(self._output_dir)
@@ -215,8 +215,8 @@ class ReportGenerator:
                             lines.append("")
                         except ValueError:
                             pass
-                    # Vision analysis for failed steps
-                    if not s.success and s.vision_analysis:
+                    # Vision analysis for failed steps and warning steps
+                    if (not s.success or s.warning) and s.vision_analysis:
                         lines.append("")
                         lines.append("  > **多模态分析:**")
                         for line in s.vision_analysis.strip().split("\n"):

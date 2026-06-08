@@ -1036,7 +1036,26 @@ class ExecutionEngine:
                         f"  [Assert warning: '{step.target}' — "
                         f"downgrading to warning. Reason: {_reason[:100]}]"
                     )
-                    result = {"passed": True, "warning": _reason}
+                    # Capture screenshot as evidence before downgrading
+                    try:
+                        if self.session_manager.is_connected():
+                            _scr = await app_screenshot(
+                                appium_url=self.session_manager.appium_url,
+                                session_id=self.session_manager.session_id,
+                            )
+                            _scr_id = _scr.get("screenshot_id", "")
+                            if _scr_id:
+                                from testagent.mcp_servers.shared_cache import get_screenshot as _gs
+                                _b64 = _gs(_scr_id)
+                                if _b64:
+                                    _scr_dir = Path(self.config.output_dir) / "screenshots"
+                                    _scr_dir.mkdir(parents=True, exist_ok=True)
+                                    _warning_scr_path = _scr_dir / f"{tc.id}_step{step.step}_warning.png"
+                                    _warning_scr_path.write_bytes(base64.b64decode(_b64))
+                                    result["_warning_screenshot"] = str(_warning_scr_path)
+                    except Exception:
+                        pass
+                    result = {"passed": True, "warning": _reason, "_warning_screenshot": result.get("_warning_screenshot", "")}
 
                 if not _recovered and step.action != "assert":
                     # Diagnostic: log visible texts so we can debug
@@ -1071,8 +1090,10 @@ class ExecutionEngine:
         _source = result.pop("_source", "") if isinstance(result, dict) else ""
         # Extract assert warning (when assert downgraded from fail to warning)
         _warning = ""
+        _warning_scr = ""
         if isinstance(result, dict) and "warning" in result:
             _warning = str(result["warning"])
+            _warning_scr = str(result.get("_warning_screenshot", ""))
         step_exec = StepExecution(
             step=step.step,
             action=step.action,
@@ -1084,6 +1105,11 @@ class ExecutionEngine:
             source=_source,
             warning=_warning,
         )
+        if _warning_scr:
+            step_exec.screenshot_after = _warning_scr
+            tc.execution.evidence.append(
+                EvidenceItem(type="screenshot", path=_warning_scr)
+            )
 
         # Push successful action to context stack for cache key generation
         if success:

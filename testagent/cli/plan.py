@@ -1207,7 +1207,7 @@ async def _plan_command_async(
         tc.execution.reason = evaluation.reason
 
     # ── Phase 5.5: Retry failed cases ──────────────────────────────────────
-    failed_tcs = [tc for tc in executed_tcs if tc.execution.verdict == "FAIL"]
+    failed_tcs = [tc for tc in executed_tcs if tc.execution.verdict in ("FAIL", "NEED_REVIEW")]
     if failed_tcs:
         typer.echo(f"  Retrying {len(failed_tcs)} failed case(s)...")
         retry_engine = ExecutionEngine(config, llm_provider=llm_provider)
