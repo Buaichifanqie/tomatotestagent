@@ -174,7 +174,12 @@ class TestCaseGenerator:
 
     @staticmethod
     def _extract_objects(text: str) -> list[str]:
-        """Extract top-level JSON objects by matching curly braces."""
+        """Extract top-level JSON objects by matching curly braces.
+
+        When an opening brace never closes (truncated output), we skip past
+        it and continue scanning so that complete inner objects can still be
+        found — e.g. ``{"cases": [{...}, {...}`` yields the two inner objects.
+        """
         objects: list[str] = []
         i = 0
         while i < len(text):
@@ -183,6 +188,7 @@ class TestCaseGenerator:
                 break
             depth = 0
             j = start
+            closed = False
             while j < len(text):
                 if text[j] == "{":
                     depth += 1
@@ -191,10 +197,13 @@ class TestCaseGenerator:
                     if depth == 0:
                         objects.append(text[start : j + 1])
                         i = j + 1
+                        closed = True
                         break
                 j += 1
-            else:
-                break
+            if not closed:
+                # Outer brace never closed (truncated) — skip past it so
+                # inner complete objects can still be discovered.
+                i = start + 1
         return objects
 
     def _extract_json(self, raw: str) -> str:

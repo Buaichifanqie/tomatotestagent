@@ -109,6 +109,30 @@ class TestParseResponse:
         result = gen._parse_response("not valid json at all")
         assert result == []
 
+    def test_parse_response_truncated_cases_object(self):
+        """Salvages complete TCs from truncated {"cases": [...]} output.
+
+        When the LLM output is cut off mid-way through the last test case,
+        the parser should still return all complete objects it can find.
+        """
+        import json
+
+        gen = TestCaseGenerator()
+        tc1 = {"id": "TC-001", "title": "First", "priority": "P0", "steps": []}
+        tc2 = {"id": "TC-002", "title": "Second", "priority": "P1", "steps": []}
+        # Third TC is incomplete (missing closing braces)
+        truncated = (
+            '{"cases": ['
+            + json.dumps(tc1)
+            + ", "
+            + json.dumps(tc2)
+            + ', {"id": "TC-003", "title": "Third", "steps": [{"step": 1'
+        )
+        result = gen._parse_response(truncated)
+        assert len(result) == 2
+        assert result[0].id == "TC-001"
+        assert result[1].id == "TC-002"
+
 
 class TestExtractJson:
     def test_extract_json_markdown_fenced(self):
