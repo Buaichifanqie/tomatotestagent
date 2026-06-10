@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import signal
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from testagent.common.appium_manager import ensure_appium_running
 from testagent.plan.scheduler import _has_state_conflict, _infer_state
@@ -68,6 +70,8 @@ class ExecutionEngine:
         popup_handler: PopupHandler | None = None,
         session_manager: SessionManager | None = None,
         llm_provider: Any = None,
+        on_tc_complete: Callable[[TestCase], None] | None = None,
+        on_all_complete: Callable[[list[TestCase]], None] | None = None,
     ) -> None:
         self.config = config
         self.popup_handler = popup_handler or PopupHandler()
@@ -89,6 +93,9 @@ class ExecutionEngine:
         self._context_depth: int = 2
         self._rule_engine: Any | None = None
         self._consecutive_session_failures: int = 0
+        self._on_tc_complete = on_tc_complete
+        self._on_all_complete = on_all_complete
+        self._interrupted: bool = False
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -503,6 +510,8 @@ class ExecutionEngine:
         time.sleep(2)
 
         for attempt in range(1, max_attempts + 1):
+            if self._interrupted:
+                return None
             sid = self.session_manager.create_session()
             if sid:
                 return sid
@@ -511,7 +520,11 @@ class ExecutionEngine:
                     f"  [Session creation attempt {attempt}/{max_attempts} "
                     f"failed, retrying in {delay}s...]"
                 )
-                time.sleep(delay)
+                # Interruptible sleep: check flag every 0.5s
+                for _ in range(int(delay * 2)):
+                    if self._interrupted:
+                        return None
+                    time.sleep(0.5)
 
         self._log(
             f"  [Session creation failed after {max_attempts} attempts, giving up]"
@@ -543,6 +556,14 @@ class ExecutionEngine:
         """
         self._events = []
         self._start_time = time.monotonic()
+        self._interrupted = False
+
+        # ── Install graceful-pause signal handlers ─────────────────────
+        original_sigint = signal.getsignal(signal.SIGINT)
+        if sys.platform != "win32":
+            original_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, self._handle_interrupt)
+        signal.signal(signal.SIGINT, self._handle_interrupt)
 
         # ── Create Appium session before execution ────────────────────────
         sid = self.session_manager.create_session()
@@ -565,114 +586,132 @@ class ExecutionEngine:
             "建议：检查模拟器状态，运行 `adb devices` 确认设备在线，然后重新执行测试。"
         )
 
-        for tc in test_cases:
-            if self.should_abort():
-                self._mark_aborted(tc, "Abort condition met")
-                continue
+        try:
+            for tc in test_cases:
+                try:
+                    if self.should_abort() or self._interrupted:
+                        reason = "用户暂停执行" if self._interrupted else "Abort condition met"
+                        self._mark_aborted(tc, reason)
+                        continue
 
-            # ── Check if device is dead — abort all remaining TCs ──────
-            if self._consecutive_session_failures >= _MAX_CONSECUTIVE_SESSION_FAILURES:
-                self._mark_aborted(tc, _DEVICE_DEAD_REASON)
-                continue
-
-            # ── Determine if teardown is needed ─────────────────────────
-            tc_needed = _infer_state(tc)
-            tc_missing = tc_needed - current_app_state
-
-            needs_teardown = (
-                tc != test_cases[0]
-                and (bool(tc_missing) or _has_state_conflict(current_app_state, tc_needed))
-            )
-
-            # ── Environment reset before each TC ──────────────────────────
-            if needs_teardown:
-                self._log("Resetting device environment...")
-                await self._teardown_app()
-                current_app_state = set()
-
-                # ── Appium server health check — restart if process died ──
-                if not await ensure_appium_running():
-                    self._consecutive_session_failures += 1
-                    self._log(
-                        f"[Appium 恢复失败 ({self._consecutive_session_failures}/"
-                        f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
-                    )
-                    self._mark_aborted(tc, _DEVICE_DEAD_REASON)
-                    continue
-
-                # ── Session recreation if UiAutomator2 is dead ──────────
-                session_dead = not self.session_manager.is_connected()
-                if not session_dead:
-                    try:
-                        src_result = await app_get_source(
-                            appium_url=self.session_manager.appium_url,
-                            session_id=self.session_manager.session_id,
-                        )
-                        page_src = src_result.get("source", "")
-                        if not page_src:
-                            self._log("Session is zombie (no page source) — recreating...")
-                            session_dead = True
-                    except Exception:
-                        session_dead = True
-
-                if session_dead:
-                    self.session_manager.close_session()
-                    self.session_manager.reset_recovery()
-                    new_sid = self._retry_create_session()
-                    if new_sid:
-                        self._log(f"[Session recreated: {new_sid[:12]}...]")
-                        self._consecutive_session_failures = 0
-                    else:
-                        self._consecutive_session_failures += 1
-                        self._log(
-                            f"[会话重建失败 ({self._consecutive_session_failures}/"
-                            f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
-                        )
+                    # ── Check if device is dead — abort all remaining TCs ──────
+                    if self._consecutive_session_failures >= _MAX_CONSECUTIVE_SESSION_FAILURES:
                         self._mark_aborted(tc, _DEVICE_DEAD_REASON)
                         continue
 
-            # ── State preparation (login/logout) ──────────────────────
-            if tc_needed and tc_needed != current_app_state:
-                state_ok = await self._ensure_states(tc_needed, tc)
-                if not state_ok:
-                    continue  # TC was marked as SKIPPED inside _ensure_states
+                    # ── Determine if teardown is needed ─────────────────────────
+                    tc_needed = _infer_state(tc)
+                    tc_missing = tc_needed - current_app_state
 
-            self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
-            self._logcat_start(tc.id)
+                    needs_teardown = (
+                        tc != test_cases[0]
+                        and (bool(tc_missing) or _has_state_conflict(current_app_state, tc_needed))
+                    )
 
-            # ── Start screen recording for this TC ───────────────────────
-            await self._start_recording(tc)
+                    # ── Environment reset before each TC ──────────────────────────
+                    if needs_teardown:
+                        self._log("Resetting device environment...")
+                        await self._teardown_app()
+                        current_app_state = set()
 
-            try:
-                await self._execute_single(tc)
-            finally:
-                # ── Stop recording for this TC (always, even on error) ───
-                await self._stop_recording(tc)
+                        # ── Appium server health check — restart if process died ──
+                        if not await ensure_appium_running():
+                            self._consecutive_session_failures += 1
+                            self._log(
+                                f"[Appium 恢复失败 ({self._consecutive_session_failures}/"
+                                f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
+                            )
+                            self._mark_aborted(tc, _DEVICE_DEAD_REASON)
+                            continue
 
-            self._logcat_stop(tc)
+                        # ── Session recreation if UiAutomator2 is dead ──────────
+                        session_dead = not self.session_manager.is_connected()
+                        if not session_dead:
+                            try:
+                                src_result = await app_get_source(
+                                    appium_url=self.session_manager.appium_url,
+                                    session_id=self.session_manager.session_id,
+                                )
+                                page_src = src_result.get("source", "")
+                                if not page_src:
+                                    self._log("Session is zombie (no page source) — recreating...")
+                                    session_dead = True
+                            except Exception:
+                                session_dead = True
 
-            status = tc.execution.status.value if tc.execution.status else "UNKNOWN"
-            verdict = tc.execution.verdict.value if tc.execution.verdict else ""
-            if verdict == "PASS":
-                print(f" ✅ {verdict}")
-            elif verdict == "FAIL":
-                print(f" ❌ {verdict}")
-            else:
-                print(f" {status}")
+                        if session_dead:
+                            self.session_manager.close_session()
+                            self.session_manager.reset_recovery()
+                            new_sid = self._retry_create_session()
+                            if new_sid:
+                                self._log(f"[Session recreated: {new_sid[:12]}...]")
+                                self._consecutive_session_failures = 0
+                            else:
+                                self._consecutive_session_failures += 1
+                                self._log(
+                                    f"[会话重建失败 ({self._consecutive_session_failures}/"
+                                    f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
+                                )
+                                self._mark_aborted(tc, _DEVICE_DEAD_REASON)
+                                continue
 
-            self._update_consecutive_blocked(tc)
+                    # ── State preparation (login/logout) ──────────────────────
+                    if tc_needed and tc_needed != current_app_state:
+                        state_ok = await self._ensure_states(tc_needed, tc)
+                        if not state_ok:
+                            continue  # TC was marked as SKIPPED inside _ensure_states
 
-            # ── Update state tracking (only on success) ─────────────
-            if tc.execution.status in (ExecutionStatus.EXECUTED,):
-                self._consecutive_session_failures = 0
-                if tc_needed:
-                    current_app_state = tc_needed
-            else:
-                # TC failed/blocked — state is uncertain, force teardown next
-                current_app_state = set()
+                    self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
+                    self._logcat_start(tc.id)
 
-            # ── Pause between TCs for visual pacing ───────────────────────
-            await asyncio.sleep(2)
+                    # ── Start screen recording for this TC ───────────────────────
+                    await self._start_recording(tc)
+
+                    try:
+                        await self._execute_single(tc)
+                    finally:
+                        # ── Stop recording for this TC (always, even on error) ───
+                        await self._stop_recording(tc)
+
+                    self._logcat_stop(tc)
+
+                    status = tc.execution.status.value if tc.execution.status else "UNKNOWN"
+                    verdict = tc.execution.verdict.value if tc.execution.verdict else ""
+                    if verdict == "PASS":
+                        print(f" ✅ {verdict}")
+                    elif verdict == "FAIL":
+                        print(f" ❌ {verdict}")
+                    else:
+                        print(f" {status}")
+
+                    self._update_consecutive_blocked(tc)
+
+                    # ── Update state tracking (only on success) ─────────────
+                    if tc.execution.status in (ExecutionStatus.EXECUTED,):
+                        self._consecutive_session_failures = 0
+                        if tc_needed:
+                            current_app_state = tc_needed
+                    else:
+                        # TC failed/blocked — state is uncertain, force teardown next
+                        current_app_state = set()
+
+                    # ── Pause between TCs for visual pacing ───────────────────────
+                    await asyncio.sleep(2)
+
+                finally:
+                    # ── Checkpoint callback (fires for every TC, including aborted) ──
+                    if self._on_tc_complete is not None:
+                        self._on_tc_complete(tc)
+
+        finally:
+            # ── Restore original signal handlers ────────────────────────
+            signal.signal(signal.SIGINT, original_sigint)
+            if sys.platform != "win32":
+                signal.signal(signal.SIGTERM, original_sigterm)
+
+        # ── Final checkpoint callback ──────────────────────────────────
+        if self._on_all_complete is not None:
+            self._on_all_complete(test_cases)
 
         return test_cases
 
@@ -2747,6 +2786,12 @@ class ExecutionEngine:
             return True
 
         return False
+
+    def _handle_interrupt(self, signum: int, frame: Any) -> None:
+        """Set interrupt flag on SIGINT/SIGTERM; current TC finishes first."""
+        if not self._interrupted:
+            self._interrupted = True
+            self._log("\n[Interrupt received — will pause after current TC completes]")
 
     def _mark_aborted(self, tc: TestCase, reason: str) -> None:
         """Mark a test case as aborted with a reason.

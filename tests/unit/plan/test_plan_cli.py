@@ -205,6 +205,7 @@ class TestPlanCommand:
 
         # Mock ExecutionEngine
         mock_engine = MagicMock()
+        mock_engine._interrupted = False
         mock_engine_cls.return_value = mock_engine
         executed_tcs = [
             _make_tc("TC-001", "Login test"),
@@ -386,6 +387,7 @@ class TestPlanCommand:
 
         # Mock execution engine
         mock_engine = MagicMock()
+        mock_engine._interrupted = False
         mock_engine_cls.return_value = mock_engine
         mock_engine.execute_all = AsyncMock(return_value=[_make_tc("TC-001", "Test")])
 

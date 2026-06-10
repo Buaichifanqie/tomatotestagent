@@ -8,7 +8,7 @@ app_typer = typer.Typer(name="app", help="Android App 测试命令")
 @app_typer.command()
 def plan(
     requirement: str = typer.Argument(
-        ..., help="产品需求文档路径 或 自然语言需求描述"
+        "", help="产品需求文档路径 或 自然语言需求描述"
     ),
     name: str = typer.Option("", "--name", "-n", help="自定义计划名称"),
     app_package: str = typer.Option("", "--app-package", "-p", help="App package name"),
@@ -17,10 +17,19 @@ def plan(
     auto_yes: bool = typer.Option(
         False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"
     ),
+    resume: str = typer.Option(
+        "", "--resume", "-r",
+        help="恢复中断的测试计划。传入报告目录路径，或 'latest' 恢复最近的计划。"
+    ),
 ) -> None:
     """根据产品需求自动生成、执行测试用例并生成结构化报告。"""
     import asyncio
     from testagent.cli.plan import run_single_plan
+
+    # Validation
+    if not resume and not requirement:
+        typer.echo("Error: 请提供需求文档路径或使用 --resume 恢复中断的计划。")
+        raise typer.Exit(1)
 
     def _log(msg: str) -> None:
         typer.echo(msg)
@@ -33,6 +42,7 @@ def plan(
         auto_yes=auto_yes,
         name=name,
         log_fn=_log,
+        resume_dir=resume,
     ))
 
     if result.status == "failed":
@@ -40,7 +50,11 @@ def plan(
         raise typer.Exit(1)
 
     typer.echo(f"\n  状态: {result.status}")
-    typer.echo(f"  用例: {result.case_count} (通过 {result.passed}, 失败 {result.failed})")
+    stat_line = f"  用例: {result.case_count} (通过 {result.passed}, 失败 {result.failed}"
+    if result.aborted:
+        stat_line += f", 未运行 {result.aborted}"
+    stat_line += ")"
+    typer.echo(stat_line)
     typer.echo(f"  耗时: {result.duration}")
     typer.echo(f"  报告: {result.report_path}")
 

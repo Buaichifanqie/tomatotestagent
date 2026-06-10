@@ -13,7 +13,7 @@ import typer
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.session_manager import SessionManager
 from testagent.plan.evaluator import PerTCEvaluator
-from testagent.plan.models import OverallEvaluation, PlanConfig, TestCase, TestStep
+from testagent.plan.models import ExecutionStatus, OverallEvaluation, PlanConfig, TestCase, TestStep
 from testagent.plan.overall_evaluator import OverallEvaluator
 from testagent.plan.prd_parser import PrdParser
 from testagent.plan.report_generator import ReportGenerator
@@ -39,6 +39,7 @@ class PlanResult:
     case_count: int = 0
     passed: int = 0
     failed: int = 0
+    aborted: int = 0
     duration: str = ""
 
 
@@ -624,6 +625,7 @@ async def _plan_command_async(
     app_activity: str = "",
     app_id: str = "",
     auto_yes: bool = False,
+    resume_dir: str = "",
 ) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Async implementation of the full plan lifecycle.
 
@@ -650,6 +652,10 @@ async def _plan_command_async(
         A tuple of (report_path, overall_evaluation, executed_test_cases).
         report_path is ``None`` if the pipeline was aborted.
     """
+    # ── Resume mode ───────────────────────────────────────────────────────
+    if resume_dir:
+        return await _resume_plan(resume_dir, llm_provider=None, log_fn=typer.echo)
+
     # ── Phase 0: Parse input ────────────────────────────────────────────────
     from testagent.db.engine import init_db
     await init_db()
@@ -1205,8 +1211,19 @@ async def _plan_command_async(
     test_cases = reorder_for_execution(test_cases)
     typer.echo(f"  Execution order: {len(test_cases)} cases (original order)")
 
-    engine = ExecutionEngine(config, llm_provider=llm_provider)
+    # ── Set up checkpoint for crash/pause recovery ──────────────────────
+    from testagent.plan.checkpoint import CheckpointManager
+
+    ckpt = CheckpointManager(output_dir)
+    ckpt.save(name, config, test_cases)
+
+    engine = ExecutionEngine(
+        config,
+        llm_provider=llm_provider,
+        on_tc_complete=lambda tc: ckpt.save(name, config, test_cases),
+    )
     executed_tcs = await engine.execute_all(test_cases)
+    was_interrupted = engine._interrupted
 
     # ── Teardown: kill app and close session after all TCs ───────────────
     try:
@@ -1219,6 +1236,8 @@ async def _plan_command_async(
     typer.echo("Evaluating test case results...")
     evaluator = PerTCEvaluator()
     for tc in executed_tcs:
+        if tc.execution.status == ExecutionStatus.ABORTED:
+            continue  # Don't evaluate — never ran
         evaluation = evaluator.evaluate(tc)
         tc.execution.verdict = evaluation.verdict
         tc.execution.confidence = evaluation.confidence
@@ -1226,7 +1245,9 @@ async def _plan_command_async(
 
     # ── Phase 5.5: Retry failed cases ──────────────────────────────────────
     failed_tcs = [tc for tc in executed_tcs if tc.execution.verdict in ("FAIL", "NEED_REVIEW")]
-    if failed_tcs:
+    if was_interrupted and failed_tcs:
+        typer.echo(f"  [Interrupted — skipping retry of {len(failed_tcs)} failed case(s)]")
+    if failed_tcs and not was_interrupted:
         typer.echo(f"  Retrying {len(failed_tcs)} failed case(s)...")
         retry_engine = ExecutionEngine(config, llm_provider=llm_provider)
         for tc in failed_tcs:
@@ -1278,6 +1299,10 @@ async def _plan_command_async(
 
     typer.echo(f"Report generated: {report_path}")
 
+    # ── Cleanup checkpoint only on successful (non-interrupted) completion ──
+    if not was_interrupted:
+        ckpt.delete()
+
     # ── Phase 6b: Auto-capture failed cases for replay ──────────────────
     try:
         import uuid as _uuid
@@ -1302,6 +1327,163 @@ async def _plan_command_async(
     return report_path, overall, executed_tcs
 
 
+# ── Resume helpers ─────────────────────────────────────────────────────────
+
+
+def _find_latest_checkpoint(base_dir: str = "") -> str:
+    """Find the most recent checkpoint file in the reports directory.
+
+    Scans ``{base_dir}/*/checkpoint.json`` and returns the directory path
+    of the one with the most recent ``updated_at`` timestamp.
+
+    Returns:
+        Directory path containing the latest checkpoint, or empty string.
+    """
+    from testagent.plan.checkpoint import CheckpointManager
+
+    if not base_dir:
+        base_dir = str(Path.cwd() / "reports")
+
+    reports_dir = Path(base_dir)
+    if not reports_dir.is_dir():
+        return ""
+
+    latest_dir = ""
+    latest_time = ""
+
+    for checkpoint_file in reports_dir.glob("*/checkpoint.json"):
+        try:
+            mgr = CheckpointManager(checkpoint_file.parent)
+            data = mgr.load()
+            if data.updated_at > latest_time:
+                latest_time = data.updated_at
+                latest_dir = str(checkpoint_file.parent)
+        except Exception:
+            continue
+
+    return latest_dir
+
+
+async def _resume_plan(
+    resume_dir: str,
+    llm_provider: Any = None,
+    log_fn: Any = None,
+) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
+    """Resume an interrupted plan from its checkpoint.
+
+    Loads the checkpoint, skips completed TCs, re-executes interrupted ones,
+    then runs evaluation and report generation on the merged results.
+    """
+    from testagent.plan.checkpoint import (
+        CheckpointManager,
+        CheckpointCorruptedError,
+        CheckpointNotFoundError,
+    )
+
+    _log = log_fn or (lambda msg: None)
+
+    # Resolve 'latest'
+    if resume_dir == "latest":
+        resume_dir = _find_latest_checkpoint()
+        if not resume_dir:
+            _log("Error: no checkpoint found in reports/ directory.")
+            return None, None, []
+
+    output_dir = resume_dir
+    if not Path(output_dir).is_dir():
+        _log(f"Error: output directory not found: {output_dir}")
+        return None, None, []
+
+    ckpt = CheckpointManager(output_dir)
+    if not ckpt.exists():
+        _log("Error: no checkpoint found in this directory.")
+        return None, None, []
+
+    try:
+        data = ckpt.load()
+    except CheckpointCorruptedError as exc:
+        _log(f"Error: checkpoint file is corrupted: {exc}")
+        _log("Delete checkpoint.json and start a fresh run.")
+        return None, None, []
+
+    completed_tcs, remaining_tcs = ckpt.load_and_resume()
+
+    _log(f"Resuming plan '{data.plan_name}'")
+    _log(f"  Already completed: {len(completed_tcs)}/{data.total_count}")
+    _log(f"  Remaining: {len(remaining_tcs)}")
+
+    # Reconstruct config from checkpoint
+    from testagent.plan.models import PlanConfig
+
+    config = PlanConfig(**data.config_snapshot)
+    config.output_dir = output_dir
+
+    was_interrupted = False
+
+    if not remaining_tcs:
+        _log("All test cases already completed. Generating report...")
+        all_tcs = completed_tcs
+    else:
+        # Initialize LLM provider for execution
+        from testagent.config.settings import get_settings
+        from testagent.llm.local_provider import LLMProviderFactory
+
+        settings = get_settings()
+        if llm_provider is None:
+            llm_provider = LLMProviderFactory.create(settings)
+
+        # Execute remaining TCs
+        _log(f"Executing {len(remaining_tcs)} remaining test cases...")
+
+        from testagent.common.appium_manager import ensure_appium_running
+
+        if not await ensure_appium_running():
+            _log("Error: Appium server is not available.")
+            return None, None, completed_tcs + remaining_tcs
+
+        engine = ExecutionEngine(
+            config,
+            llm_provider=llm_provider,
+            on_tc_complete=lambda tc: ckpt.save(
+                data.plan_name, config, completed_tcs + remaining_tcs
+            ),
+        )
+        executed_remaining = await engine.execute_all(remaining_tcs)
+        was_interrupted = engine._interrupted
+
+        # Teardown
+        try:
+            await engine._teardown_app()
+        except Exception:
+            pass
+
+        all_tcs = completed_tcs + executed_remaining
+
+    # ── Evaluation + report ────────────────────────────────────────────
+    _log("Evaluating test case results...")
+    evaluator = PerTCEvaluator()
+    for tc in all_tcs:
+        if tc.execution.status in (ExecutionStatus.EXECUTED, ExecutionStatus.FAILED):
+            evaluation = evaluator.evaluate(tc)
+            tc.execution.verdict = evaluation.verdict
+            tc.execution.confidence = evaluation.confidence
+
+    _log("Generating overall evaluation and report...")
+    overall_evaluator = OverallEvaluator()
+    overall = overall_evaluator.evaluate(all_tcs)
+
+    report_gen = ReportGenerator(output_dir)
+    report_path = report_gen.generate(data.plan_name, all_tcs, overall, config)
+
+    _log(f"Report generated: {report_path}")
+
+    # Cleanup checkpoint only on successful completion
+    if not was_interrupted:
+        ckpt.delete()
+
+    return report_path, overall, all_tcs
+
+
 async def run_single_plan(
     requirement: str,
     app_package: str = "",
@@ -1310,6 +1492,7 @@ async def run_single_plan(
     auto_yes: bool = True,
     name: str = "",
     log_fn: Any = None,
+    resume_dir: str = "",
 ) -> PlanResult:
     """Execute a single requirement document's full test lifecycle.
 
@@ -1343,6 +1526,7 @@ async def run_single_plan(
             app_activity=app_activity,
             app_id=app_id,
             auto_yes=auto_yes,
+            resume_dir=resume_dir,
         )
     except Exception as exc:
         duration_s = time.monotonic() - start_time
@@ -1367,11 +1551,13 @@ async def run_single_plan(
     # Extract stats from OverallEvaluation (avoids regex parsing of Chinese report)
     total = overall.total_count if overall else len(executed_tcs)
     passed = overall.passed_count if overall else 0
-    failed = total - passed
-    summary_lines = [
-        f"{total} test cases: {passed} passed, {failed} failed",
-        f"Report: {report_path}",
-    ]
+    aborted_count = sum(1 for tc in executed_tcs if tc.execution.status == ExecutionStatus.ABORTED)
+    failed = total - passed - aborted_count
+    summary_parts = [f"{total} test cases: {passed} passed, {failed} failed"]
+    if aborted_count:
+        summary_parts.append(f"{aborted_count} aborted (not run)")
+    summary_parts.append(f"Report: {report_path}")
+    summary_lines = summary_parts
 
     _log(f"Plan completed: {', '.join(summary_lines)}")
 
@@ -1384,5 +1570,6 @@ async def run_single_plan(
         case_count=total,
         passed=passed,
         failed=failed,
+        aborted=aborted_count,
         duration=f"{duration_s:.1f}s",
     )

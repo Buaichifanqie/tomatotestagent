@@ -25,6 +25,7 @@ class ExecutionVerdict(str, Enum):
     NEED_REVIEW = "NEED_REVIEW"
     INCONCLUSIVE = "INCONCLUSIVE"
     PARTIAL = "PARTIAL"
+    SKIP = "SKIP"
 
 
 class FailureType(str, Enum):
