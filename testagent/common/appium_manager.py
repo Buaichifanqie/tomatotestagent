@@ -150,7 +150,7 @@ async def _create_test_session() -> str | None:
 
     capabilities = {"capabilities": {"alwaysMatch": always_match, "firstMatch": [{}]}}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(f"{_APPIUM_URL}/session", json=capabilities)
             if resp.status_code == 200:
                 data = resp.json()
@@ -253,8 +253,8 @@ async def ensure_appium_running() -> bool:
             env=env,
         )
 
-    # Step 4: Wait for readiness
-    for _ in range(30):
+    # Step 4: Wait for readiness (max ~3 min: 18 retries × 10s timeout)
+    for _ in range(18):
         await asyncio.sleep(1)
         try:
             async with httpx.AsyncClient(timeout=2) as client:

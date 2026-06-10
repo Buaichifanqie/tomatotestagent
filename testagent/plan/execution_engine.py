@@ -88,6 +88,7 @@ class ExecutionEngine:
         self._action_context_stack: list[str] = []
         self._context_depth: int = 2
         self._rule_engine: Any | None = None
+        self._consecutive_session_failures: int = 0
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -554,10 +555,24 @@ class ExecutionEngine:
 
         # ── State-aware execution ────────────────────────────────────────
         current_app_state: set[str] = set()
+        _MAX_CONSECUTIVE_SESSION_FAILURES = 2
+        _DEVICE_DEAD_REASON = (
+            "设备连接中断，无法创建 Appium 会话。可能原因：\n"
+            "1. 模拟器已崩溃或被关闭\n"
+            "2. ADB 连接断开（设备离线）\n"
+            "3. 模拟器内存不足被系统杀死\n"
+            "4. Appium 服务异常（可尝试手动重启 Appium）\n"
+            "建议：检查模拟器状态，运行 `adb devices` 确认设备在线，然后重新执行测试。"
+        )
 
         for tc in test_cases:
             if self.should_abort():
                 self._mark_aborted(tc, "Abort condition met")
+                continue
+
+            # ── Check if device is dead — abort all remaining TCs ──────
+            if self._consecutive_session_failures >= _MAX_CONSECUTIVE_SESSION_FAILURES:
+                self._mark_aborted(tc, _DEVICE_DEAD_REASON)
                 continue
 
             # ── Determine if teardown is needed ─────────────────────────
@@ -577,8 +592,12 @@ class ExecutionEngine:
 
                 # ── Appium server health check — restart if process died ──
                 if not await ensure_appium_running():
-                    self._log("[Appium is down and could not be restarted — aborting]")
-                    self._mark_aborted(tc, "Appium unavailable after teardown")
+                    self._consecutive_session_failures += 1
+                    self._log(
+                        f"[Appium 恢复失败 ({self._consecutive_session_failures}/"
+                        f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
+                    )
+                    self._mark_aborted(tc, _DEVICE_DEAD_REASON)
                     continue
 
                 # ── Session recreation if UiAutomator2 is dead ──────────
@@ -602,8 +621,14 @@ class ExecutionEngine:
                     new_sid = self._retry_create_session()
                     if new_sid:
                         self._log(f"[Session recreated: {new_sid[:12]}...]")
+                        self._consecutive_session_failures = 0
                     else:
-                        self._mark_aborted(tc, "Failed to recreate session after teardown")
+                        self._consecutive_session_failures += 1
+                        self._log(
+                            f"[会话重建失败 ({self._consecutive_session_failures}/"
+                            f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
+                        )
+                        self._mark_aborted(tc, _DEVICE_DEAD_REASON)
                         continue
 
             # ── State preparation (login/logout) ──────────────────────
@@ -639,6 +664,7 @@ class ExecutionEngine:
 
             # ── Update state tracking (only on success) ─────────────
             if tc.execution.status in (ExecutionStatus.EXECUTED,):
+                self._consecutive_session_failures = 0
                 if tc_needed:
                     current_app_state = tc_needed
             else:
