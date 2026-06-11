@@ -1,11 +1,122 @@
 from __future__ import annotations
 
+import sys
+
 import typer
 
 app_typer = typer.Typer(name="app", help="Android App 测试命令")
 
 
-@app_typer.command()
+def _interactive_help() -> None:
+    """交互式帮助：用上下键选择选项，回车查看详情，q 退出。"""
+    import msvcrt
+
+    options = [
+        ("requirement",   "产品需求文档路径 或 自然语言需求描述"),
+        ("--name/-n",     "自定义计划名称"),
+        ("--app-package", "App package name（如 tv.danmaku.bili）"),
+        ("--app-activity","App launch activity"),
+        ("--app-id",      "App 标识（如 com.bilibili.app），默认使用 app-package"),
+        ("--auto-yes/-y", "跳过确认步骤，直接执行"),
+        ("--resume/-r",   "恢复中断的测试计划"),
+    ]
+
+    details = {
+        "requirement": (
+            "位置参数，必填（除非使用 --resume）。\n"
+            "  可以是：\n"
+            "    - 产品需求文档的文件路径（如 docs/需求.md）\n"
+            "    - 自然语言需求描述文本\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求文档.md\"\n"
+            "    testagent app plan \"用户登录功能测试\""
+        ),
+        "--name/-n": (
+            "自定义计划名称，用于报告目录和报告标题。\n"
+            "  如果不指定，自动从需求文档文件名生成。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" --name my-plan\n"
+            "    testagent app plan \"需求.md\" -n v2.0-regression"
+        ),
+        "--app-package": (
+            "Android App 的 package name。\n"
+            "  如果连接了设备，会自动检测。手动指定可跳过检测。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" -p tv.danmaku.bili\n"
+            "    testagent app plan \"需求.md\" -p com.tencent.mm"
+        ),
+        "--app-activity": (
+            "App 的启动 Activity。\n"
+            "  通常不需要指定，Appium 会自动使用默认 Activity。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" -a .MainActivity"
+        ),
+        "--app-id": (
+            "App 标识符，用于 App Context Memory（历史用例、学习模式）。\n"
+            "  默认使用 app-package 的值。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" --app-id com.bilibili.app"
+        ),
+        "--auto-yes/-y": (
+            "跳过确认步骤，生成用例后直接执行。\n"
+            "  适用于 CI/CD 或批量执行场景。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" -y\n"
+            "    testagent app plan \"需求.md\" --app-package tv.danmaku.bili -y"
+        ),
+        "--resume/-r": (
+            "恢复之前中断的测试计划。\n"
+            "  中断原因可以是：Ctrl+C 手动暂停、设备死机、进程崩溃等。\n"
+            "  已完成的用例不会重复运行，被中断的用例会重新执行。\n\n"
+            "  参数值：\n"
+            "    latest    — 自动查找最近一次中断的计划\n"
+            "    <目录路径> — 指定报告目录路径\n\n"
+            "  示例：\n"
+            "    testagent app plan --resume latest\n"
+            "    testagent app plan --resume reports/2026-06-11-015824-bilibili/\n"
+            "    testagent app plan -r latest"
+        ),
+    }
+
+    selected = 0
+
+    def _render() -> None:
+        sys.stdout.write("\033[2J\033[H")  # clear screen
+        sys.stdout.write("  testagent app plan — 交互式帮助\n")
+        sys.stdout.write("  ↑↓ 移动  Enter 查看详情  q 退出\n\n")
+        for i, (key, desc) in enumerate(options):
+            prefix = "  > " if i == selected else "    "
+            sys.stdout.write(f"{prefix}{key:20s} {desc}\n")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    _render()
+
+    while True:
+        ch = msvcrt.getwch()
+        if ch == "q" or ch == "\x1b":  # q or Escape
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+            break
+        elif ch == "\r":  # Enter
+            key = options[selected][0]
+            sys.stdout.write(f"\n{'='*60}\n")
+            sys.stdout.write(f"  {key}\n")
+            sys.stdout.write(f"{'='*60}\n")
+            sys.stdout.write(details.get(key, "暂无详细说明。") + "\n")
+            sys.stdout.write(f"\n  按任意键返回...\n")
+            msvcrt.getwch()
+            _render()
+        elif ch in ("\x00", "\xe0"):  # Arrow key prefix on Windows
+            ch2 = msvcrt.getwch()
+            if ch2 == "H":  # Up
+                selected = (selected - 1) % len(options)
+            elif ch2 == "P":  # Down
+                selected = (selected + 1) % len(options)
+            _render()
+
+
+@app_typer.command(add_help_option=False)
 def plan(
     requirement: str = typer.Argument(
         "", help="产品需求文档路径 或 自然语言需求描述"
@@ -19,10 +130,18 @@ def plan(
     ),
     resume: str = typer.Option(
         "", "--resume", "-r",
-        help="恢复中断的测试计划。传入报告目录路径，或 'latest' 恢复最近的计划。"
+        help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"
+    ),
+    show_help: bool = typer.Option(
+        False, "--help", "-h", is_eager=True,
+        help="显示交互式帮助。"
     ),
 ) -> None:
     """根据产品需求自动生成、执行测试用例并生成结构化报告。"""
+    if show_help:
+        _interactive_help()
+        return
+
     import asyncio
     from testagent.cli.plan import run_single_plan
 
