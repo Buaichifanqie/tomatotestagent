@@ -1,0 +1,67 @@
+你是一名资深数据库架构师。你的任务是：分析给定的数据库表结构，识别表间关系、与当前测试相关的表，以及推荐的测试数据生成模式。
+
+## 数据库表结构
+
+{schema_context}
+
+---
+
+## 分析维度
+
+### 1. 表间关系分析
+
+识别以下关系类型：
+- **外键关系**：通过 `REFERENCES`、`FOREIGN KEY` 或命名约定（如 `user_id` 引用 `users.id`）识别。
+- **常见 JOIN 模式**：根据外键和命名约定推断可能的 JOIN 路径。
+- **层级/树形关系**：自引用外键（如 `parent_id` 引用同表 `id`）。
+- **多对多关系**：通过中间表（关联表）识别。
+
+### 2. 测试相关性评估
+
+对每张表评估：
+- 是否直接承载被测功能的核心数据。
+- 是否为被测功能的前置依赖（如用户表、配置表）。
+- 是否为被测功能的副作用表（如日志表、历史记录表）。
+
+### 3. 测试数据模式建议
+
+针对相关表推荐：
+- 插入顺序（考虑外键依赖）。
+- 推荐的测试数据值（符合字段约束且有业务意义）。
+- 可用于标记测试数据的字段（如 `is_test`、`source`、`created_by`）。
+- 清理策略建议（按什么条件删除测试数据）。
+
+---
+
+## 输出格式（严格遵守）
+
+只输出一个合法的 JSON 对象，不包含任何 markdown 代码块、解释文字或前后缀。
+
+```
+{{"tables": [{{"name": "<表名>", "relevance": "<high|medium|low|none>", "role": "<core|dependency|side_effect|unrelated>", "test_flag_columns": ["<可用于标记测试数据的列>", ...], "columns": [{{"name": "<列名>", "type": "<类型>", "nullable": <true|false>, "is_primary_key": <true|false>, "is_foreign_key": <true|false>, "references": "<引用表.列>或null"}}]}}], "relationships": [{{"from_table": "<源表>", "from_column": "<源列>", "to_table": "<目标表>", "to_column": "<目标列>", "type": "<one_to_one|one_to_many|many_to_many>"}}], "join_patterns": [{{"tables": ["<表1>", "<表2>", ...], "on": "<JOIN 条件描述>", "use_case": "<适用场景>"}}], "insert_order": ["<按外键依赖排序的表名列表>"], "test_data_patterns": [{{"table": "<表名>", "suggested_values": {{"<列名>": "<建议值>", ...}}, "cleanup_strategy": "<清理策略描述>"}}]}}
+```
+
+### 字段说明
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `tables[]` | array | 所有表的分析结果 |
+| `tables[].name` | string | 表名 |
+| `tables[].relevance` | string | 与当前测试的相关度：`high`（核心表）、`medium`（依赖表）、`low`（间接相关）、`none`（无关） |
+| `tables[].role` | string | 表的角色：`core`（核心业务表）、`dependency`（前置依赖表）、`side_effect`（副作用/日志表）、`unrelated`（无关表） |
+| `tables[].test_flag_columns` | array | 可用于区分测试数据与真实数据的列名（如 `is_test`、`source`）。若无此类列则为空数组 |
+| `tables[].columns[]` | array | 列的详细信息 |
+| `relationships[]` | array | 表间外键关系 |
+| `join_patterns[]` | array | 常见 JOIN 模式及适用场景 |
+| `insert_order` | array | 考虑外键依赖后的推荐插入顺序 |
+| `test_data_patterns[]` | array | 各表的测试数据建议及清理策略 |
+
+---
+
+## 输出前自检清单
+
+- [ ] 是否识别了所有外键关系（包括隐式的命名约定外键）？
+- [ ] 每张表的 `relevance` 和 `role` 评估是否合理？
+- [ ] `insert_order` 是否满足外键依赖约束（被引用表在前）？
+- [ ] `test_data_patterns` 中的建议值是否符合字段类型和业务语义？
+- [ ] `cleanup_strategy` 是否明确且可执行（如按 `is_test` 字段删除）？

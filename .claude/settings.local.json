@@ -32,7 +32,9 @@
       "Bash(taskkill *)",
       "Bash(taskkill.exe *)",
       "Bash(curl -s --max-time 3 http://localhost:4723/status)",
-      "Bash(testagent skill *)"
+      "Bash(testagent skill *)",
+      "Bash(xargs grep -l \"llm\\\\|LLM\\\\|openai\\\\|anthropic\\\\|chat_completion\\\\|generate\\\\|invoke_model\")",
+      "Bash(xargs grep -l \"prompt\\\\|confirm\\\\|input\\\\|click\\\\|questionary\\\\|inquirer\")"
     ]
   }
 }

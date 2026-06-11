@@ -139,6 +139,8 @@ class TCExecution(BaseModel):
     previous_attempts: list[dict[str, object]] = Field(default_factory=list)
     assert_warnings: list[str] = Field(default_factory=list)
     cross_source_results: list[dict[str, object]] = Field(default_factory=list)
+    db_ops_results: list[dict[str, object]] = Field(default_factory=list)
+    db_ops_cleanup_executed: bool = False
 
 
 class TestCase(BaseModel):
@@ -160,6 +162,8 @@ class TestCase(BaseModel):
     execution: TCExecution = Field(default_factory=TCExecution)
     setup: list[dict[str, object]] = Field(default_factory=list)
     assertions: list[dict[str, object]] = Field(default_factory=list)
+    db_ops_setup: list[str] = Field(default_factory=list)   # Natural language intents for DB setup
+    db_ops_cleanup: bool = True  # Whether to run cleanup after test
 
 
 class EvaluationOutput(BaseModel):
@@ -240,3 +244,4 @@ class PlanConfig(BaseModel):
     max_workers: int = 1
     cache_enabled: bool = True
     cache_verify_after_tap: bool = False
+    db_ops: object | None = None  # DbConfig from testagent.db_ops.models
