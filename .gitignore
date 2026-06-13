@@ -28,6 +28,8 @@ configs/
 .idea/
 .vscode/
 .claude/
+.trae/
+!.trae/rules/
 *.swp
 *.swo
 *~
