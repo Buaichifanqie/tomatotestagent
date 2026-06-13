@@ -1,1 +1,0 @@
-- [Popup handling](feedback_popup_handling.md) — Android popup dismissal strategy: text-based → vision fallback → false positive suppression + tap retry
