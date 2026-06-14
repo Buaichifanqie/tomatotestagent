@@ -160,7 +160,15 @@ async def handle_db_execute(state: ToolkitState, args: dict[str, Any]) -> dict[s
             duration = int((time.monotonic() - start) * 1000)
             rows_affected = result.rowcount
 
-        _record_cleanup(state, op_type, sql, params, rows_affected, original_values)
+            # Capture inserted ID for cleanup tracking
+            inserted_id = None
+            if op_type == SqlOpType.INSERT:
+                try:
+                    inserted_id = result.lastrowid
+                except Exception:
+                    pass
+
+        _record_cleanup(state, op_type, sql, params, rows_affected, original_values, inserted_id)
 
         return {
             "success": True,
@@ -388,13 +396,17 @@ def _record_cleanup(
     params: dict[str, Any] | None,
     rows_affected: int,
     original_values: list[dict[str, Any]],
+    inserted_id: int | None = None,
 ) -> None:
     """Record the operation in the cleanup tracker."""
     table_match = re.search(r"(?:INTO|FROM|UPDATE)\s+(\w+)", sql, re.IGNORECASE)
     table = table_match.group(1) if table_match else "unknown"
 
     if op_type == SqlOpType.INSERT:
-        inserted_ids = list(range(1, rows_affected + 1))  # placeholder
+        if inserted_id is not None:
+            inserted_ids = [inserted_id]
+        else:
+            inserted_ids = list(range(1, rows_affected + 1))
         state.cleanup_tracker.record_insert(table, inserted_ids=inserted_ids)
     elif op_type == SqlOpType.UPDATE:
         where_match = re.search(r"\bWHERE\b\s+(.+?)(?:\bORDER\b|\bLIMIT\b|$)", sql, re.IGNORECASE | re.DOTALL)

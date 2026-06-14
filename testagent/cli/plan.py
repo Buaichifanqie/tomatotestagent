@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from rich.console import Console
 
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.session_manager import SessionManager
@@ -1031,7 +1032,26 @@ async def _plan_command_async(
             typer.echo(f"  [RetrievalTrace save skipped: {exc}]")
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
-    test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
+
+    _TC_COUNT_MIN = 30
+    _TC_COUNT_MAX = 70
+    _console = Console()
+
+    with _console.status("[bold green]Generating test cases, please wait...", spinner="dots"):
+        test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
+
+    # Retry once if count is below minimum
+    if test_cases and len(test_cases) < _TC_COUNT_MIN:
+        _console.print(f"  [yellow]Generated only {len(test_cases)} cases (target: {_TC_COUNT_MIN}-{_TC_COUNT_MAX}). Retrying for more coverage...[/yellow]")
+        retry_prd = enhanced_prd + (
+            f"\n\n## 重要补充\n"
+            f"你上次只生成了 {len(test_cases)} 条用例，数量不足。"
+            f"请覆盖 PRD 中**所有**功能模块，每个模块至少 3 条用例，目标总数 {_TC_COUNT_MIN}-{_TC_COUNT_MAX} 条。"
+        )
+        with _console.status("[bold green]Regenerating test cases...", spinner="dots"):
+            retry_cases = await ts_gen.generate(retry_prd, plan_name=name)
+        if retry_cases and len(retry_cases) > len(test_cases):
+            test_cases = retry_cases
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")
@@ -1040,6 +1060,9 @@ async def _plan_command_async(
             typer.echo("\n--- Raw LLM output (first 2000 chars) ---")
             typer.echo(raw[:2000])
         return None, None, []
+
+    if len(test_cases) > _TC_COUNT_MAX:
+        _console.print(f"  [yellow]Generated {len(test_cases)} cases (target: {_TC_COUNT_MIN}-{_TC_COUNT_MAX}). Keeping all — review for duplicates.[/yellow]")
 
     typer.echo(f"Generated {len(test_cases)} test case(s).")
 

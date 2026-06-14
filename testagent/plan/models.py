@@ -92,6 +92,7 @@ class TestStep(BaseModel):
     screenshot: bool = True
     is_manual: bool = False
     instruction: str = ""
+    tap_first: str = ""  # 先点击此区域让隐藏控件浮现，再操作 target
 
 
 class Precondition(BaseModel):

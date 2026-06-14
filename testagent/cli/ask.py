@@ -214,7 +214,11 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-_SYSTEM_PROMPT = """\
+def _build_system_prompt() -> str:
+    """动态构建 system prompt，根据配置注入 DB toolkit 信息。"""
+    from testagent.config.settings import get_settings
+
+    prompt = """\
 You are TestAgent, an AI-powered mobile testing assistant connected to an Android emulator via Appium.
 
 ## Available Tools
@@ -229,7 +233,30 @@ You are TestAgent, an AI-powered mobile testing assistant connected to an Androi
 - **app_wait(seconds?)** — 等待指定秒数让界面加载稳定
 - **vision_find_element(screenshot_id, target, context?)** — 在截图中视觉查找目标 UI 元素，返回坐标
 - **vision_describe_screen(screenshot_id)** — 视觉描述当前屏幕内容
-- **run_single_plan(requirement, name?)** — 对单个需求文档执行完整测试流程（PRD解析→用例生成→执行→报告）
+- **run_single_plan(requirement, name?)** — 对单个需求文档执行完整测试流程（PRD解析→用例生成→执行→报告）"""
+
+    # 动态注入 DB toolkit 工具描述
+    settings = get_settings()
+    app_db_url = settings.app_db_url
+    if app_db_url:
+        prompt += f"""
+
+## 数据库工具
+- **db_inspect(connection_url, tables?, include_sample?, sample_limit?)** — 查看数据库表结构、列信息和样本数据
+- **db_query(connection_url, sql, params?)** — 执行 SELECT 查询读取数据（自动添加 LIMIT 保护）
+- **db_execute(connection_url, sql, params?, confirm?)** — 执行写操作 INSERT/UPDATE/DELETE（仅测试环境可用，先 preview 再 confirm）
+- **db_cleanup(connection_url)** — 清理本次会话中创建的测试数据
+
+## 数据库连接
+当前测试数据库连接 URL: `{app_db_url}`
+进行数据库操作时，直接使用上述 URL 作为 connection_url 参数，无需询问用户。
+
+## 数据库操作行为规范
+每次执行写操作（db_execute）后，必须立即用 db_query 查询受影响的表，展示操作后的完整数据状态。
+例如：INSERT 后查询该表所有数据，UPDATE 后查询被修改的行，DELETE 后查询确认已删除。
+这样用户可以直观看到每次操作的效果。"""
+
+    prompt += """
 
 ## Notes
 - app_launch 成功后会自动等待 3 秒让应用加载
@@ -257,6 +284,7 @@ You are TestAgent, an AI-powered mobile testing assistant connected to an Androi
 - 单个文档失败不影响其他文档，继续执行剩余文档
 - 对于单个需求文档，同样使用 run_single_plan 工具
 """
+    return prompt
 
 
 def _strategy_from_source(source: str, selector: str) -> str:
@@ -995,7 +1023,7 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
         result_messages = await agent_loop(
             messages=messages,
             tools=APPIUM_TOOLS + DB_TOOL_DEFINITIONS,
-            system=_SYSTEM_PROMPT,
+            system=_build_system_prompt(),
             llm_provider=llm,
             dispatch_fn=safe_dispatch,
             max_rounds=1000,
@@ -1327,7 +1355,7 @@ async def interactive_chat() -> None:
             result_msgs = await agent_loop(
                 messages=messages,
                 tools=tools,
-                system=_SYSTEM_PROMPT,
+                system=_build_system_prompt(),
                 llm_provider=llm,
                 dispatch_fn=safe_dispatch or dispatch_fn,
                 max_rounds=1000,
@@ -1348,7 +1376,7 @@ async def interactive_chat() -> None:
                 result_msgs = await agent_loop(
                     messages=messages,
                     tools=tools,
-                    system=_SYSTEM_PROMPT,
+                    system=_build_system_prompt(),
                     llm_provider=llm,
                     dispatch_fn=safe_dispatch or dispatch_fn,
                     max_rounds=1000,

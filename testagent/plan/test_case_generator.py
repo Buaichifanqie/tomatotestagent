@@ -258,6 +258,7 @@ class TestCaseGenerator:
         "step", "action", "target", "value", "expected",
         "timeout_ms", "poll_interval_ms", "wait_after",
         "success_condition", "screenshot", "is_manual", "instruction",
+        "tap_first",
     })
 
     def _normalize_step(self, s: dict) -> dict:

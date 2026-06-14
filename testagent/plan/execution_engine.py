@@ -43,6 +43,7 @@ from testagent.plan.ui_tree_utils import get_page_hash_from_source
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 _STEP_EXECUTION_TEMPLATE: str | None = None
+_DB_OPERATIONS_TEMPLATE: str | None = None
 
 
 def _load_step_prompt() -> str:
@@ -51,6 +52,14 @@ def _load_step_prompt() -> str:
     if _STEP_EXECUTION_TEMPLATE is None:
         _STEP_EXECUTION_TEMPLATE = (_PROMPTS_DIR / "step_execution.txt").read_text(encoding="utf-8")
     return _STEP_EXECUTION_TEMPLATE
+
+
+def _load_db_operations_prompt() -> str:
+    """Load the DB operations prompt template (cached after first load)."""
+    global _DB_OPERATIONS_TEMPLATE
+    if _DB_OPERATIONS_TEMPLATE is None:
+        _DB_OPERATIONS_TEMPLATE = (_PROMPTS_DIR / "db_operations.txt").read_text(encoding="utf-8")
+    return _DB_OPERATIONS_TEMPLATE
 
 
 class ExecutionEngine:
@@ -89,6 +98,7 @@ class ExecutionEngine:
         self._screen_w: int = 0
         self._screen_h: int = 0
         self._coordinate_cache = CoordinateCache()
+        self._tap_first_chain_cache: dict[str, dict] = {}  # tap_first 原子动作链缓存
         self._action_context_stack: list[str] = []
         self._context_depth: int = 2
         self._rule_engine: Any | None = None
@@ -96,6 +106,9 @@ class ExecutionEngine:
         self._on_tc_complete = on_tc_complete
         self._on_all_complete = on_all_complete
         self._interrupted: bool = False
+        self._db_toolkit_state: Any | None = None
+        self._db_schema_cache: str = ""
+        self._db_setup_done: bool = False
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -200,6 +213,124 @@ class ExecutionEngine:
 
         return await self._execute_tap_and_cache(step, tc_id, context_hash)
 
+    async def _execute_tap_with_tap_first(self, step: TestStep, tc_id: str) -> dict:
+        """复合动作（探测-回放模式）：处理瞬态 UI 控件。
+
+        核心思路：将探测和执行分离。
+        - 探测阶段（允许慢）：点击触发区域 → 等待 → 截图 → vision 获取目标坐标
+        - 执行阶段（必须快 < 1s）：用已知坐标组装原子动作链，直接执行，不经过 vision API
+
+        首次运行：探测 + 执行（探测可能因 vision 延迟而失败，但坐标会被缓存）
+        后续运行：坐标已缓存，直接执行快速链条，完美避开瞬态 UI 消失问题。
+        """
+        appium_url = self.session_manager.appium_url
+        session_id = self.session_manager.session_id
+
+        # ── 检查缓存：是否已有完整的动作链坐标 ──
+        chain_key = f"tap_first_chain:{step.tap_first}→{step.target}"
+        cached_chain = self._tap_first_chain_cache.get(chain_key)
+
+        if cached_chain:
+            # 缓存命中：直接执行快速原子动作链（< 1 秒）
+            self._log(f"  [Reveal Chain Cache Hit: '{step.tap_first}' → '{step.target}']")
+            return await self._execute_tap_first_chain(cached_chain, appium_url, session_id)
+
+        # ── 探测阶段：获取触发区域和目标控件的坐标 ──
+        self._log(f"  [Reveal Probe: discovering coordinates for '{step.tap_first}' → '{step.target}']")
+
+        # 1. 获取触发区域坐标（如视频画面中心）
+        tap_first_coords = await self._probe_get_coords(step.tap_first, tc_id)
+        if not tap_first_coords:
+            return {"error": f"tap_first: cannot find trigger area '{step.tap_first}'"}
+
+        # 2. 点击触发区域，让隐藏控件浮现
+        tap_res = await app_tap(
+            x=tap_first_coords["x"], y=tap_first_coords["y"],
+            appium_url=appium_url, session_id=session_id,
+        )
+        if tap_res.get("error"):
+            return tap_res
+
+        # 3. 等待控件浮现
+        await asyncio.sleep(0.8)
+
+        # 4. 截图 + vision 获取目标控件坐标
+        self._log(f"  [Reveal Probe: looking for '{step.target}']")
+        target_coords = await self._vision_find_element(step.target)
+
+        if not target_coords or "x" not in target_coords:
+            # 重试一次
+            await asyncio.sleep(0.5)
+            target_coords = await self._vision_find_element(step.target)
+
+        if not target_coords or "x" not in target_coords:
+            return {"error": f"tap_first: '{step.target}' not found after tapping '{step.tap_first}'"}
+
+        # ── 探测成功：缓存动作链，供后续快速回放 ──
+        chain = {
+            "tap_first_coords": tap_first_coords,
+            "target_coords": target_coords,
+            "wait_ms": 500,
+        }
+        self._tap_first_chain_cache[chain_key] = chain
+        self._log(f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}']")
+
+        # ── 执行阶段：用刚获取的坐标立即执行快速链条 ──
+        return await self._execute_tap_first_chain(chain, appium_url, session_id)
+
+    async def _execute_tap_first_chain(
+        self, chain: dict, appium_url: str, session_id: str
+    ) -> dict:
+        """执行快速原子动作链：tap(触发区域) → wait → tap(目标控件)。
+
+        全程直接 Appium 调用，不经过 vision API，总耗时 < 1 秒。
+        """
+        rc = chain["tap_first_coords"]
+        tc = chain["target_coords"]
+        wait_ms = chain.get("wait_ms", 500)
+
+        # Step 1: 点击触发区域
+        res1 = await app_tap(x=rc["x"], y=rc["y"], appium_url=appium_url, session_id=session_id)
+        if res1.get("error"):
+            return res1
+
+        # Step 2: 等待控件浮现（固定短延迟）
+        await asyncio.sleep(wait_ms / 1000.0)
+
+        # Step 3: 点击目标控件
+        res2 = await app_tap(x=tc["x"], y=tc["y"], appium_url=appium_url, session_id=session_id)
+        if res2.get("error"):
+            return res2
+
+        res2["_source"] = "tap_first_chain"
+        return res2
+
+    async def _probe_get_coords(self, target: str, tc_id: str) -> dict | None:
+        """探测获取元素坐标（优先缓存，否则 vision）。"""
+        context_hash = self._get_context_hash()
+        if context_hash and self.config.cache_enabled:
+            cache_entry = self._coordinate_cache.get(context_hash, "tap", target)
+            if cache_entry:
+                self._log(f"  [Probe Cache Hit: '{target}']")
+                return cache_entry.coord
+
+        # Vision 查找
+        vision_result = await self._vision_find_element(target)
+        if vision_result and "x" in vision_result and "y" in vision_result:
+            # 缓存坐标
+            if context_hash:
+                self._coordinate_cache.put(
+                    context_hash=context_hash,
+                    action="tap",
+                    target=target,
+                    coord=vision_result,
+                    page_hash_after=None,
+                    tc_id=tc_id,
+                    step=0,
+                )
+            return vision_result
+        return None
+
     async def _execute_tap_and_cache(self, step: TestStep, tc_id: str, context_hash: str) -> dict:
         """执行 tap 并缓存结果."""
         appium_url = self.session_manager.appium_url
@@ -209,7 +340,7 @@ class ExecutionEngine:
         self._log(f"  [Vision: looking for '{step.target}']")
         vision_result = await self._vision_find_element(step.target)
 
-        # Handle swipe suggestion from vision
+        # Handle swipe/tap_first suggestion from vision
         if vision_result and "suggestion" in vision_result:
             suggestion = vision_result["suggestion"]
             # For back/return targets, try KEYCODE_BACK first (more reliable
@@ -218,6 +349,21 @@ class ExecutionEngine:
                 back_ok = await self._try_keycode_back()
                 if back_ok:
                     return {"success": True, "_source": "adb:KEYCODE_BACK"}
+
+            # ── 自动检测「点击某区域呼出/显示」类 suggestion → 走探测-回放流程 ──
+            tap_first_trigger = self._extract_tap_first_trigger(suggestion)
+            if tap_first_trigger:
+                self._log(f"  [Auto-tap_first detected: suggestion='{suggestion}', trigger='{tap_first_trigger}']")
+                # 构造一个带 tap_first 的 step，走完整的探测-回放流程
+                tap_first_step = TestStep(
+                    step=step.step, action="tap", target=step.target,
+                    tap_first=tap_first_trigger, expected=step.expected,
+                )
+                tap_first_result = await self._execute_tap_with_tap_first(tap_first_step, tc_id)
+                if not tap_first_result.get("error"):
+                    return tap_first_result
+                # tap_first 失败则继续走原有逻辑
+
             self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
             swipe_ok = await self._execute_vision_swipe(suggestion)
             if swipe_ok:
@@ -251,9 +397,21 @@ class ExecutionEngine:
         await asyncio.sleep(2)
         vision_result = await self._vision_find_element(step.target)
 
-        # Handle swipe suggestion from vision retry
+        # Handle swipe/tap_first suggestion from vision retry
         if vision_result and "suggestion" in vision_result:
             suggestion = vision_result["suggestion"]
+            # ── 自动检测「点击某区域呼出/显示」类 suggestion → 走探测-回放流程 ──
+            tap_first_trigger = self._extract_tap_first_trigger(suggestion)
+            if tap_first_trigger:
+                self._log(f"  [Auto-tap_first detected (retry): suggestion='{suggestion}', trigger='{tap_first_trigger}']")
+                tap_first_step = TestStep(
+                    step=step.step, action="tap", target=step.target,
+                    tap_first=tap_first_trigger, expected=step.expected,
+                )
+                tap_first_result = await self._execute_tap_with_tap_first(tap_first_step, tc_id)
+                if not tap_first_result.get("error"):
+                    return tap_first_result
+
             self._log(f"  [Vision retry suggests {suggestion}, executing swipe...]")
             swipe_ok = await self._execute_vision_swipe(suggestion)
             if swipe_ok:
@@ -290,6 +448,26 @@ class ExecutionEngine:
     def _is_back_target(target: str) -> bool:
         """Check if the tap target is a back/return button."""
         return bool(re.search(r"返回|后退|back|back_btn|返回按钮|返回键", target, re.IGNORECASE))
+
+    @staticmethod
+    def _extract_tap_first_trigger(suggestion: str) -> str:
+        """从 vision suggestion 中提取「点击某区域呼出/显示」的触发区域。
+
+        例如：
+        - "点击顶部的视频播放区域呼出播放控制栏" → "播放器画面"
+        - "点击视频区域显示控制栏" → "视频画面"
+        - "先点击屏幕中央呼出控制栏" → "屏幕中央"
+        返回空字符串表示不是 tap_first suggestion。
+        """
+        # 匹配模式：点击 + 描述 + 呼出/显示/浮现
+        m = re.search(r"点击(.{2,15}?)(?:呼出|显示|浮现|打开)", suggestion)
+        if m:
+            trigger_desc = m.group(1).strip()
+            # 标准化常见的触发区域描述
+            if re.search(r"视频.*播放|播放.*区域|播放器|视频画面|视频区域|屏幕中央", trigger_desc):
+                return "播放器画面"
+            return trigger_desc
+        return ""
 
     async def _try_keycode_back(self) -> bool:
         """Send KEYCODE_BACK via ADB. Returns True if succeeded."""
@@ -601,6 +779,20 @@ class ExecutionEngine:
 
                     # ── Determine if teardown is needed ─────────────────────────
                     tc_needed = _infer_state(tc)
+
+                    # ── Pre-check: skip TC early if required states are unsatisfiable ──
+                    # Avoids wasting time on teardown + session recreation for TCs
+                    # that will be SKIPPED anyway (e.g. needs login but no config).
+                    if "logged_in" in tc_needed:
+                        from testagent.plan.app_accounts import get_login_config
+                        pkg = self.config.app_package or ""
+                        if not get_login_config(pkg):
+                            self._log(f"  [No login config for {pkg}, skipping {tc.id}]")
+                            tc.execution.status = ExecutionStatus.EXECUTED
+                            tc.execution.verdict = "SKIP"
+                            tc.execution.error_message = f"No login config for {pkg}"
+                            continue
+
                     tc_missing = tc_needed - current_app_state
 
                     needs_teardown = (
@@ -751,6 +943,13 @@ class ExecutionEngine:
         if tc.setup:
             await self._execute_setup(tc)
 
+        # ── Phase A2: DB setup (LLM-driven) ─────────────────────────
+        try:
+            await self._init_db_toolkit()
+            await self._execute_db_phase(tc, "setup")
+        except Exception as exc:
+            self._log(f"  [DB setup error (non-fatal): {exc}]")
+
         for step in tc.steps:
             if self.should_abort():
                 self._mark_aborted(tc, "Abort during execution")
@@ -771,9 +970,20 @@ class ExecutionEngine:
                 tc.execution.failed_step = step.step
                 tc.execution.failure_type = step_exec.failure_type
                 tc.execution.error_message = step_exec.error_message
+                # ── Phase B2: DB verify even on failure ─────────────
+                try:
+                    await self._execute_db_phase(tc, "verify")
+                except Exception as exc:
+                    self._log(f"  [DB verify error (non-fatal): {exc}]")
                 return
 
         tc.execution.status = ExecutionStatus.EXECUTED
+
+        # ── Phase B2: DB verify/cleanup after steps ─────────────────
+        try:
+            await self._execute_db_phase(tc, "verify")
+        except Exception as exc:
+            self._log(f"  [DB verify error (non-fatal): {exc}]")
 
         # ── Phase C: Execute cross-source assertions ──────────────────
         if tc.assertions and self._rule_engine is not None:
@@ -809,6 +1019,193 @@ class ExecutionEngine:
         except Exception as exc:
             self._log(f"  [Setup warning: {exc}]")
 
+    # ── DB Toolkit integration ─────────────────────────────────────────────
+
+    async def _init_db_toolkit(self) -> None:
+        """Initialize DB toolkit state from settings. Called once lazily."""
+        if self._db_setup_done:
+            return
+        self._db_setup_done = True
+
+        try:
+            from testagent.config.settings import get_settings
+            from testagent.db_toolkit.connection import ConnectionManager
+            from testagent.db_toolkit.env import detect_environment
+            from testagent.db_toolkit.models import DbEnv, Environment
+            from testagent.db_toolkit.tools import ToolkitState, handle_db_inspect
+
+            settings = get_settings()
+            app_db_url = settings.app_db_url
+            if not app_db_url:
+                return
+
+            conn_mgr = ConnectionManager()
+            db_env = detect_environment(app_db_url)
+            self._db_toolkit_state = ToolkitState(env=db_env, conn_manager=conn_mgr)
+
+            # Cache schema for LLM prompts
+            try:
+                result = await handle_db_inspect(
+                    self._db_toolkit_state,
+                    {"connection_url": app_db_url, "include_sample": False},
+                )
+                tables = result.get("tables", [])
+                lines: list[str] = []
+                for t in tables:
+                    cols = ", ".join(
+                        f"{c['name']}({c['type']})" for c in t.get("columns", [])
+                    )
+                    lines.append(f"  {t['name']}: {cols}")
+                self._db_schema_cache = "\n".join(lines) if lines else "(empty)"
+            except Exception as exc:
+                self._db_schema_cache = f"(schema load failed: {exc})"
+
+            self._log(f"  [DB Toolkit initialized: {db_env.level.value}, schema cached]")
+        except Exception as exc:
+            self._log(f"  [DB Toolkit init failed: {exc}]")
+
+    async def _execute_db_phase(self, tc: TestCase, phase: str) -> None:
+        """Ask LLM if DB operations are needed and execute them.
+
+        Args:
+            tc: The test case being executed.
+            phase: "setup" (before steps) or "verify" (after steps).
+        """
+        if not self._db_toolkit_state or not self._llm_provider:
+            return
+
+        app_db_url = self._db_toolkit_state.env.connection_url
+
+        # Build step summary
+        steps_summary_lines: list[str] = []
+        for s in tc.steps[:10]:  # limit to 10 steps to keep prompt small
+            val = f" (输入: {s.value})" if s.value else ""
+            steps_summary_lines.append(f"  Step {s.step}: {s.action} → {s.target}{val}")
+        steps_summary = "\n".join(steps_summary_lines) if steps_summary_lines else "(no steps)"
+
+        prerequisites = ", ".join(tc.prerequisites) if tc.prerequisites else "(none)"
+
+        template = _load_db_operations_prompt()
+        prompt = template.format(
+            phase=phase,
+            tc_id=tc.id,
+            tc_title=tc.title,
+            expected_outcome=tc.expected_outcome or "(none)",
+            prerequisites=prerequisites,
+            tc_steps_summary=steps_summary,
+            db_schema=self._db_schema_cache,
+        )
+
+        try:
+            response = await self._llm_provider.chat(
+                system="你是一个数据库操作决策助手。请始终用 JSON 回复。",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=1024,
+            )
+            raw = ""
+            for block in response.content:
+                if block.get("type") == "text":
+                    raw += str(block.get("text", ""))
+        except Exception as exc:
+            self._log(f"  [DB {phase}: LLM call failed: {exc}]")
+            return
+
+        if not raw:
+            return
+
+        # Parse JSON response
+        import json as _json
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start < 0 or end <= start:
+                self._log(f"  [DB {phase}: no JSON object found in LLM response]")
+                return
+            decision = _json.loads(raw[start:end + 1])
+            if not isinstance(decision, dict):
+                self._log(f"  [DB {phase}: LLM returned {type(decision).__name__}, expected dict]")
+                return
+        except (_json.JSONDecodeError, ValueError) as exc:
+            self._log(f"  [DB {phase}: failed to parse LLM response: {exc}]")
+            return
+
+        needs_db = decision.get("needs_db", False)
+        reasoning = decision.get("reasoning", "")
+        operations = decision.get("operations", [])
+
+        if not needs_db or not operations:
+            if reasoning:
+                self._log(f"  [DB {phase}: skip — {reasoning}]")
+            return
+
+        self._log(f"  [DB {phase}: {reasoning}]")
+
+        # Execute operations
+        from testagent.db_toolkit.tools import (
+            handle_db_cleanup,
+            handle_db_execute,
+            handle_db_inspect,
+            handle_db_query,
+        )
+
+        for op in operations:
+            op_type = op.get("op", "")
+            desc = op.get("description", op_type)
+            try:
+                if op_type == "inspect":
+                    result = await handle_db_inspect(
+                        self._db_toolkit_state,
+                        {"connection_url": app_db_url},
+                    )
+                    self._log(f"  [DB {phase}] inspect → {result.get('total_tables', 0)} tables")
+
+                elif op_type == "query":
+                    result = await handle_db_query(
+                        self._db_toolkit_state,
+                        {
+                            "connection_url": app_db_url,
+                            "sql": op.get("sql", ""),
+                            "params": op.get("params"),
+                        },
+                    )
+                    rows = result.get("data", [])
+                    self._log(f"  [DB {phase}] {desc} → {len(rows)} rows")
+                    if rows and len(rows) <= 5:
+                        for row in rows:
+                            self._log(f"    {row}")
+
+                elif op_type == "execute":
+                    result = await handle_db_execute(
+                        self._db_toolkit_state,
+                        {
+                            "connection_url": app_db_url,
+                            "sql": op.get("sql", ""),
+                            "params": op.get("params"),
+                            "confirm": True,
+                        },
+                    )
+                    self._log(
+                        f"  [DB {phase}] {desc} → "
+                        f"{result.get('rows_affected', 0)} rows affected"
+                    )
+
+                elif op_type == "cleanup":
+                    result = await handle_db_cleanup(
+                        self._db_toolkit_state,
+                        {"connection_url": app_db_url},
+                    )
+                    self._log(
+                        f"  [DB {phase}] cleanup → "
+                        f"{result.get('cleaned', 0)}/{result.get('total', 0)} cleaned"
+                    )
+
+                else:
+                    self._log(f"  [DB {phase}] unknown op: {op_type}")
+
+            except Exception as exc:
+                self._log(f"  [DB {phase}] {desc} failed: {exc}")
+
     async def _execute_step_async(self, tc: TestCase, step: TestStep) -> StepExecution:
         """Async implementation of step execution with real Appium calls.
 
@@ -843,6 +1240,9 @@ class ExecutionEngine:
             sid = session_id or self.session_manager.session_id
 
             if step.action == "tap":
+                # ── 复合动作：先点击触发区域让隐藏控件浮现 ──
+                if step.tap_first:
+                    return await self._execute_tap_with_tap_first(step, tc.id)
                 return await self._execute_tap_with_cache(step, tc.id)
             elif step.action == "type":
                 context_hash = self._get_context_hash()
