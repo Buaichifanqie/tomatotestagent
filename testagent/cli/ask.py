@@ -13,6 +13,16 @@ import httpx
 
 from testagent.common.errors import LLMTokenLimitError
 from testagent.common.logging import get_logger
+from testagent.db_toolkit.connection import ConnectionManager
+from testagent.db_toolkit.env import detect_environment
+from testagent.db_toolkit.tools import (
+    DB_TOOL_DEFINITIONS,
+    ToolkitState,
+    handle_db_cleanup,
+    handle_db_execute,
+    handle_db_inspect,
+    handle_db_query,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -811,6 +821,21 @@ def _register_tool_handlers(
         register_tool_handler("vision_find_element", _handler_vision_find)
         register_tool_handler("vision_describe_screen", _handler_vision_describe)
 
+    # Register DB toolkit tools
+    db_conn_mgr = ConnectionManager()
+    db_env = detect_environment("")  # Will be configured per-session later
+    db_state = ToolkitState(env=db_env, conn_manager=db_conn_mgr)
+
+    def _make_db_handler(fn):
+        async def _handler(input_data: dict[str, Any]) -> dict[str, Any]:
+            return await fn(db_state, input_data)
+        return _handler
+
+    register_tool_handler("db_inspect", _make_db_handler(handle_db_inspect))
+    register_tool_handler("db_query", _make_db_handler(handle_db_query))
+    register_tool_handler("db_execute", _make_db_handler(handle_db_execute))
+    register_tool_handler("db_cleanup", _make_db_handler(handle_db_cleanup))
+
     # 返回 dispatch_fn
     async def dispatch_fn(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
         handler = TOOL_HANDLERS.get(tool_name)
@@ -962,7 +987,7 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
     try:
         result_messages = await agent_loop(
             messages=messages,
-            tools=APPIUM_TOOLS,
+            tools=APPIUM_TOOLS + DB_TOOL_DEFINITIONS,
             system=_SYSTEM_PROMPT,
             llm_provider=llm,
             dispatch_fn=safe_dispatch,
@@ -1230,7 +1255,7 @@ async def interactive_chat() -> None:
                     print("  [无法创建 Appium 会话，将以对话模式运行]")
 
         # 传给 agent 的 tools（有会话时才给 Appium 工具）
-        tools = APPIUM_TOOLS if dispatch_fn is not None else []
+        tools = (APPIUM_TOOLS + DB_TOOL_DEFINITIONS) if dispatch_fn is not None else []
 
         # 清洗 messages 中的孤立 tool 消息：如果 tool message 之前没有匹配的
         # assistant tool_calls（auto-compact 后可能出现），移除它们以避免 LLM API 报错

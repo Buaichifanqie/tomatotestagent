@@ -176,6 +176,7 @@ class ContextAssembler:
                     "- **MCP Git Server**: Access code repository and change history",
                     "- **Strategy Skills**: Test strategy formulation and planning",
                     "- **RAG Query**: Retrieve knowledge from requirement docs, API docs, and defect history",
+                    "- **DB Toolkit**: 查看数据库结构 (db_inspect), 查询数据 (db_query) — 辅助理解被测系统数据层",
                 ]
             )
 
@@ -186,6 +187,7 @@ class ContextAssembler:
                     "- **MCP API Server**: HTTP API testing and validation",
                     "- **Harness Runner**: Sandboxed test execution environment",
                     "- **RAG Query**: Retrieve locator library and environment configuration",
+                    "- **DB Toolkit**: 查看数据库结构 (db_inspect), 查询数据 (db_query), 执行写操作 (db_execute, 仅测试环境), 清理测试数据 (db_cleanup)",
                 ]
             )
 
