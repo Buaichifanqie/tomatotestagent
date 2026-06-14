@@ -92,7 +92,6 @@ class ExecutionEngine:
         self._action_context_stack: list[str] = []
         self._context_depth: int = 2
         self._rule_engine: Any | None = None
-        self._db_ops_loop: Any | None = None
         self._consecutive_session_failures: int = 0
         self._on_tc_complete = on_tc_complete
         self._on_all_complete = on_all_complete
@@ -752,10 +751,6 @@ class ExecutionEngine:
         if tc.setup:
             await self._execute_setup(tc)
 
-        # ── Phase A.5: Execute DB ops setup ─────────────────────────
-        if tc.db_ops_setup:
-            await self._execute_db_ops_setup(tc)
-
         for step in tc.steps:
             if self.should_abort():
                 self._mark_aborted(tc, "Abort during execution")
@@ -797,9 +792,6 @@ class ExecutionEngine:
             except Exception as exc:
                 self._log(f"  [Assertions warning: {exc}]")
 
-        # ── Phase D: DB ops cleanup ─────────────────────────────────
-        if tc.db_ops_cleanup and self._db_ops_loop is not None:
-            await self._execute_db_ops_cleanup(tc)
 
     async def _execute_setup(self, tc: TestCase) -> None:
         """Execute setup data sources and register results in rule engine context."""
@@ -816,77 +808,6 @@ class ExecutionEngine:
             self._log(f"  [Setup: {len(tc.setup)} data source(s) executed]")
         except Exception as exc:
             self._log(f"  [Setup warning: {exc}]")
-
-    async def _execute_db_ops_setup(self, tc: TestCase) -> None:
-        """Execute AI database operations for test setup (Phase A.5)."""
-        from testagent.db_ops import ConnectionManager, DecisionLoop, CleanupManager
-
-        db_config = self.config.db_ops
-        if db_config is None or not hasattr(db_config, "connection_url"):
-            self._log("  [DB Ops: no config, skipping]")
-            return
-
-        if self._db_ops_loop is None:
-            conn_mgr = ConnectionManager()
-            self._db_ops_loop = DecisionLoop(
-                config=db_config,
-                llm=self._llm_provider,
-                conn_manager=conn_mgr,
-            )
-
-        test_context = f"测试用例: {tc.title}\n预期结果: {tc.expected_outcome}"
-        results = []
-        for intent in tc.db_ops_setup:
-            try:
-                result = await self._db_ops_loop.run(
-                    intent=intent,
-                    connection_url=db_config.connection_url,
-                    test_context=test_context,
-                )
-                results.append(result.model_dump())
-                self._log(f"  [DB Ops setup: {intent[:50]}... {'OK' if result.success else 'FAILED'}]")
-            except Exception as exc:
-                self._log(f"  [DB Ops setup warning: {exc}]")
-                results.append({"success": False, "error_message": str(exc)})
-
-        tc.execution.db_ops_results = results
-
-    async def _execute_db_ops_cleanup(self, tc: TestCase) -> None:
-        """Execute AI database cleanup after test (Phase D)."""
-        from testagent.db_ops import CleanupManager, ConnectionManager, SQLExecutor
-
-        db_config = self.config.db_ops
-        if db_config is None or not hasattr(db_config, "connection_url"):
-            return
-
-        if not tc.execution.db_ops_results:
-            return
-
-        try:
-            conn_mgr = ConnectionManager()
-            executor = SQLExecutor(conn_mgr, db_config.timeout_seconds)
-            cleanup_mgr = CleanupManager(conn_mgr, executor, self._llm_provider)
-
-            from testagent.db_ops.schema import SchemaInspector
-            inspector = SchemaInspector(conn_mgr)
-            schema = await inspector.get_full_schema(db_config.connection_url)
-            schema_context = inspector.format_schema_for_prompt(schema)
-
-            # Convert results to ExecutionResult objects
-            from testagent.db_ops.models import ExecutionResult
-            exec_results = []
-            for r in tc.execution.db_ops_results:
-                if isinstance(r, dict) and "operations" in r:
-                    for op in r["operations"]:
-                        exec_results.append(ExecutionResult(**op))
-
-            plan = await cleanup_mgr.generate_cleanup_plan(exec_results, schema_context)
-            if plan.operations:
-                cleanup_results = await cleanup_mgr.execute_cleanup(plan, db_config.connection_url)
-                tc.execution.db_ops_cleanup_executed = True
-                self._log(f"  [DB Ops cleanup: {len(cleanup_results)} operation(s)]")
-        except Exception as exc:
-            self._log(f"  [DB Ops cleanup warning: {exc}]")
 
     async def _execute_step_async(self, tc: TestCase, step: TestStep) -> StepExecution:
         """Async implementation of step execution with real Appium calls.
