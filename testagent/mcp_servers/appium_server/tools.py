@@ -95,7 +95,7 @@ async def _find_element(
     # When using uiautomator strategy with a plain text selector, auto-wrap it
     # into a valid UiSelector expression to avoid the invalid `new UiSelector().<text>` error.
     if strategy == "uiautomator" and selector and not re.match(r'^(new UiSelector\(\)|\.)', selector):
-        # Resource-id like "tv.danmaku.bili:id/search_src_text" → resourceId()
+        # Resource-id like "com.example.app:id/search_src_text" → resourceId()
         if ":" in selector or selector.startswith("android:id/"):
             selector = f'new UiSelector().resourceId("{selector}")'
         # Chinese text → textContains()

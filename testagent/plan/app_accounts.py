@@ -38,7 +38,7 @@ def get_login_config(package: str) -> dict[str, str] | None:
     """Get login configuration for an app by package name.
 
     Args:
-        package: Android app package name (e.g. "tv.danmaku.bili")
+        package: Android app package name (e.g. "com.example.app")
 
     Returns:
         Dict with keys: name, login_method, account, password, entry

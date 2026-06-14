@@ -138,11 +138,11 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "app_launch",
-        "description": "通过包名直接启动应用，比截图找图标点击更快更稳定。例如启动哔哩哔哩: app_launch(package='tv.danmaku.bili')",
+        "description": "通过包名直接启动应用，比截图找图标点击更快更稳定。例如: app_launch(package='com.example.app')",
         "parameters": {
             "type": "object",
             "properties": {
-                "package": {"type": "string", "description": "应用包名，如 tv.danmaku.bili"},
+                "package": {"type": "string", "description": "应用包名，如 com.example.app"},
                 "activity": {"type": "string", "description": "可选，Activity 名称，如 .MainActivity"},
             },
             "required": ["package"],

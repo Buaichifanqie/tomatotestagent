@@ -84,7 +84,13 @@ def _parse_found_status(text: str) -> bool:
 
 
 def _parse_suggestion(text: str) -> str | None:
-    """Parse navigation suggestion from response."""
+    """Parse navigation suggestion from response.
+
+    Returns:
+        Swipe direction string (swipe_up/down/left/right, scroll_up/down),
+        or the full suggestion text if it contains a "tap to reveal" pattern,
+        or None if no suggestion found.
+    """
     lower = text.lower()
     swipe_patterns = [
         (r"swipe_left|向左滑|左滑|向左划", "swipe_left"),
@@ -97,6 +103,11 @@ def _parse_suggestion(text: str) -> str | None:
     for pattern, suggestion in swipe_patterns:
         if re.search(pattern, lower):
             return suggestion
+
+    # "tap to reveal" patterns: 点击...呼出/显示/浮现/唤起
+    if re.search(r"点击.{2,15}?(?:呼出|显示|浮现|唤起|打开)", text):
+        return text
+
     return None
 
 

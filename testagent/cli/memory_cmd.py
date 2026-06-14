@@ -22,7 +22,7 @@ memory_typer = typer.Typer(name="memory", help="Manage App Context Memory (learn
 
 @memory_typer.command("list-patterns")
 def list_patterns(
-    app_id: str = typer.Argument(help="App identifier (e.g. com.bilibili.app)"),
+    app_id: str = typer.Argument(help="App identifier (e.g. com.example.app)"),
     status: str | None = typer.Option(None, "--status", "-s", help="Filter by review status: pending, approved, rejected"),
     limit: int = typer.Option(20, "--limit", "-l", help="Maximum number of patterns to show"),
 ) -> None:

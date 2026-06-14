@@ -14,9 +14,9 @@ def _interactive_help() -> None:
     options = [
         ("requirement",   "产品需求文档路径 或 自然语言需求描述"),
         ("--name/-n",     "自定义计划名称"),
-        ("--app-package", "App package name（如 tv.danmaku.bili）"),
+        ("--app-package", "App package name（如 com.example.app）"),
         ("--app-activity","App launch activity"),
-        ("--app-id",      "App 标识（如 com.bilibili.app），默认使用 app-package"),
+        ("--app-id",      "App 标识（如 com.example.app），默认使用 app-package"),
         ("--auto-yes/-y", "跳过确认步骤，直接执行"),
         ("--resume/-r",   "恢复中断的测试计划"),
     ]
@@ -42,7 +42,7 @@ def _interactive_help() -> None:
             "Android App 的 package name。\n"
             "  如果连接了设备，会自动检测。手动指定可跳过检测。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" -p tv.danmaku.bili\n"
+            "    testagent app plan \"需求.md\" -p com.example.app\n"
             "    testagent app plan \"需求.md\" -p com.tencent.mm"
         ),
         "--app-activity": (
@@ -55,14 +55,14 @@ def _interactive_help() -> None:
             "App 标识符，用于 App Context Memory（历史用例、学习模式）。\n"
             "  默认使用 app-package 的值。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" --app-id com.bilibili.app"
+            "    testagent app plan \"需求.md\" --app-id com.example.app"
         ),
         "--auto-yes/-y": (
             "跳过确认步骤，生成用例后直接执行。\n"
             "  适用于 CI/CD 或批量执行场景。\n\n"
             "  示例：\n"
             "    testagent app plan \"需求.md\" -y\n"
-            "    testagent app plan \"需求.md\" --app-package tv.danmaku.bili -y"
+            "    testagent app plan \"需求.md\" --app-package com.example.app -y"
         ),
         "--resume/-r": (
             "恢复之前中断的测试计划。\n"
@@ -73,7 +73,7 @@ def _interactive_help() -> None:
             "    <目录路径> — 指定报告目录路径\n\n"
             "  示例：\n"
             "    testagent app plan --resume latest\n"
-            "    testagent app plan --resume reports/2026-06-11-015824-bilibili/\n"
+            "    testagent app plan --resume reports/2026-06-11-015824-my-app/\n"
             "    testagent app plan -r latest"
         ),
     }
@@ -124,7 +124,7 @@ def plan(
     name: str = typer.Option("", "--name", "-n", help="自定义计划名称"),
     app_package: str = typer.Option("", "--app-package", "-p", help="App package name"),
     app_activity: str = typer.Option("", "--app-activity", "-a", help="App launch activity"),
-    app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.bilibili.app），默认使用 app-package"),
+    app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.example.app），默认使用 app-package"),
     auto_yes: bool = typer.Option(
         False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"
     ),
@@ -180,7 +180,7 @@ def plan(
 
 @app_typer.command()
 def replay(
-    app_id: str = typer.Option(..., "--app-id", help="App 标识（如 tv.danmaku.bili）"),
+    app_id: str = typer.Option(..., "--app-id", help="App 标识（如 com.example.app）"),
     stats: bool = typer.Option(False, "--stats", help="显示待重跑用例统计"),
     case_ids: str = typer.Option("", "--case-ids", help="只重跑指定用例，逗号分隔"),
     with_prerequisites: bool = typer.Option(False, "--with-prerequisites", help="先执行前置用例链"),

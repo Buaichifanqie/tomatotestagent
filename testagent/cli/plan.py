@@ -829,8 +829,18 @@ async def _plan_command_async(
     # ── Phase 2: Generate test cases ────────────────────────────────────────
     typer.echo("Generating test cases...")
 
-    # ── Inject app info into TC generation prompt ──────────────────────
+    # ── Inject scope constraint for short/raw text inputs ─────────────
     enhanced_prd = prd_text
+    if not is_file and len(prd_text) < 200:
+        enhanced_prd = (
+            f"# 测试范围限定\n\n"
+            f"**严格约束**：只为以下需求描述中明确提到的功能生成测试用例。\n"
+            f"不要为需求中未提到的功能（如搜索、直播、个人中心等）生成用例。\n"
+            f"历史用例仅供参考格式和写法，不要照搬其功能范围。\n\n"
+            f"## 用户需求\n\n{prd_text}"
+        )
+
+    # ── Inject app info into TC generation prompt ──────────────────────
     app_info_parts = []
     if app_package:
         app_info_parts.append(f"Android app package name: {app_package}")
@@ -878,7 +888,7 @@ async def _plan_command_async(
             # ── Filter by functional relevance ────────────────────────────
             from testagent.rag.app_memory import filter_by_functional_relevance
             before_count = len(cases)
-            cases = filter_by_functional_relevance(cases, user_intent=prd_text)
+            cases = filter_by_functional_relevance(cases, user_intent=prd_text, app_package=app_package)
             filtered_count = before_count - len(cases)
             if filtered_count > 0:
                 typer.echo(f"  [Filtered out {filtered_count} functionally irrelevant case(s)]")
@@ -1067,7 +1077,7 @@ async def _plan_command_async(
     typer.echo(f"Generated {len(test_cases)} test case(s).")
 
     # ── Fix LLM-hallucinated package names in generated TCs ─────────────────
-    # The LLM often generates "tv.danmaku.buli" instead of "tv.danmaku.bili".
+    # The LLM sometimes hallucinates package names (e.g. typos).
     # Override launch targets with the correct package and fix exec commands.
     if app_package:
         for tc in test_cases:

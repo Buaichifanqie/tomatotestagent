@@ -150,7 +150,7 @@ class AppiumMCPServer(BaseMCPServer):
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "package": {"type": "string", "description": "应用包名，如 tv.danmaku.bili"},
+                    "package": {"type": "string", "description": "应用包名，如 com.example.app"},
                     "activity": {"type": "string", "description": "可选，Activity 名称，如 .MainActivity"},
                 },
                 "required": ["package"],

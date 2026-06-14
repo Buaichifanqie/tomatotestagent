@@ -20,19 +20,46 @@ def _extract_module_from_id(case_id: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _extract_function_keywords(user_intent: str) -> list[str]:
+def _extract_function_keywords(user_intent: str, app_package: str = "") -> list[str]:
     """Extract functional keywords from user intent.
 
-    "测试哔哩哔哩搜索功能" → ["搜索"]
+    "测试搜索功能" → ["搜索"]
     "测试登录和支付" → ["登录", "支付"]
+    "测试视频播放功能" → ["视频", "播放"]
     """
     # Strip common prefix
     cleaned = re.sub(r"^测试|^test|^验证", "", user_intent, flags=re.IGNORECASE).strip()
     # Strip "功能/feature/functionality" suffix
     cleaned = re.sub(r"功能$|feature$|functionality$", "", cleaned, flags=re.IGNORECASE).strip()
+    # Strip generic app references
+    cleaned = re.sub(r"该应用|此应用|这个应用|该App|此App|这个App|App的", "", cleaned).strip()
+
+    # Strip app name from accounts config if available
+    if app_package:
+        try:
+            from testagent.plan.app_accounts import get_login_config
+            cfg = get_login_config(app_package)
+            if cfg and cfg.get("name"):
+                cleaned = cleaned.replace(cfg["name"], "").strip()
+        except Exception:
+            pass
+
     # Split on delimiters
     parts = re.split(r"[、，,和与及还有]+", cleaned)
-    keywords = [p.strip() for p in parts if p.strip()]
+    raw_keywords = [p.strip() for p in parts if p.strip()]
+
+    # Match known keywords from compound text
+    # e.g. "视频播放" → ["视频", "播放"]
+    keywords: list[str] = []
+    for part in raw_keywords:
+        matched = False
+        for kw in _KEYWORD_TO_MODULE:
+            if kw in part:
+                keywords.append(kw)
+                matched = True
+        if not matched and part:
+            keywords.append(part)
+
     return keywords
 
 
@@ -54,7 +81,7 @@ def _is_functionally_relevant(
         # Direct substring match (covers English ↔ English)
         if kw_lower in module_lower or module_lower in kw_lower:
             return True
-        # Chinese keyword → English module mapping (substring: "哔哩哔哩搜索" contains "搜索")
+        # Chinese keyword → English module mapping (substring match)
         for known_kw, mapped_module in _KEYWORD_TO_MODULE.items():
             if known_kw in kw_lower and mapped_module == module_lower:
                 return True
@@ -99,6 +126,7 @@ _KEYWORD_TO_MODULE: dict[str, str] = {
 def filter_by_functional_relevance(
     results: list[RAGResult],
     user_intent: str,
+    app_package: str = "",
 ) -> list[RAGResult]:
     """Filter out RAG results that are not functionally relevant to the user intent.
 
@@ -113,7 +141,7 @@ def filter_by_functional_relevance(
     if not results:
         return []
 
-    intent_keywords = _extract_function_keywords(user_intent)
+    intent_keywords = _extract_function_keywords(user_intent, app_package)
     if not intent_keywords:
         return results
 

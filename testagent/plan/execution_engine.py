@@ -362,14 +362,15 @@ class ExecutionEngine:
                 tap_first_result = await self._execute_tap_with_tap_first(tap_first_step, tc_id)
                 if not tap_first_result.get("error"):
                     return tap_first_result
-                # tap_first 失败则继续走原有逻辑
-
-            self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
-            swipe_ok = await self._execute_vision_swipe(suggestion)
-            if swipe_ok:
-                # After swipe, wait for UI to settle and retry vision
-                await asyncio.sleep(1.5)
-                vision_result = await self._vision_find_element(step.target)
+                # tap_first 失败则跳过 swipe（suggestion 是中文描述，不是滑动方向）
+            else:
+                # 只有 swipe 方向类 suggestion 才执行滑动
+                self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
+                swipe_ok = await self._execute_vision_swipe(suggestion)
+                if swipe_ok:
+                    # After swipe, wait for UI to settle and retry vision
+                    await asyncio.sleep(1.5)
+                    vision_result = await self._vision_find_element(step.target)
 
         if vision_result and "x" in vision_result and "y" in vision_result:
             coords = vision_result
@@ -411,12 +412,12 @@ class ExecutionEngine:
                 tap_first_result = await self._execute_tap_with_tap_first(tap_first_step, tc_id)
                 if not tap_first_result.get("error"):
                     return tap_first_result
-
-            self._log(f"  [Vision retry suggests {suggestion}, executing swipe...]")
-            swipe_ok = await self._execute_vision_swipe(suggestion)
-            if swipe_ok:
-                await asyncio.sleep(1.5)
-                vision_result = await self._vision_find_element(step.target)
+            else:
+                self._log(f"  [Vision retry suggests {suggestion}, executing swipe...]")
+                swipe_ok = await self._execute_vision_swipe(suggestion)
+                if swipe_ok:
+                    await asyncio.sleep(1.5)
+                    vision_result = await self._vision_find_element(step.target)
 
         if vision_result and "x" in vision_result and "y" in vision_result:
             coords = vision_result
@@ -453,20 +454,16 @@ class ExecutionEngine:
     def _extract_tap_first_trigger(suggestion: str) -> str:
         """从 vision suggestion 中提取「点击某区域呼出/显示」的触发区域。
 
-        例如：
-        - "点击顶部的视频播放区域呼出播放控制栏" → "播放器画面"
-        - "点击视频区域显示控制栏" → "视频画面"
-        - "先点击屏幕中央呼出控制栏" → "屏幕中央"
+        通用匹配，不绑定任何具体 App 类型：
+        - "点击顶部的播放区域呼出控制栏" → "播放区域"
+        - "点击屏幕中央显示菜单" → "屏幕中央"
+        - "点击底部区域呼出工具栏" → "底部区域"
         返回空字符串表示不是 tap_first suggestion。
         """
-        # 匹配模式：点击 + 描述 + 呼出/显示/浮现
-        m = re.search(r"点击(.{2,15}?)(?:呼出|显示|浮现|打开)", suggestion)
+        # 匹配模式：点击 + 描述 + 呼出/显示/浮现/唤起/打开
+        m = re.search(r"点击(.{2,20}?)(?:呼出|显示|浮现|唤起|打开)", suggestion)
         if m:
-            trigger_desc = m.group(1).strip()
-            # 标准化常见的触发区域描述
-            if re.search(r"视频.*播放|播放.*区域|播放器|视频画面|视频区域|屏幕中央", trigger_desc):
-                return "播放器画面"
-            return trigger_desc
+            return m.group(1).strip()
         return ""
 
     async def _try_keycode_back(self) -> bool:
@@ -1633,8 +1630,8 @@ class ExecutionEngine:
         if not pkg:
             return
 
-        # Force-stop before launch to ensure cold start (prevents apps like
-        # B站 from restoring previous page state on warm start)
+        # Force-stop before launch to ensure cold start (prevents apps
+        # from restoring previous page state on warm start)
         import subprocess
         try:
             subprocess.run(
@@ -1905,8 +1902,12 @@ class ExecutionEngine:
             await asyncio.sleep(2)
         return True
 
-    async def _vision_tap_element(self, description: str) -> bool:
+    async def _vision_tap_element(self, description: str, _depth: int = 0) -> bool:
         """Use vision to find and tap a UI element by description."""
+        if _depth >= 3:
+            self._log(f"    [Swipe retry limit reached for '{description}']")
+            return False
+
         client = self._init_vision_client()
         if not client:
             return False
@@ -1955,8 +1956,8 @@ class ExecutionEngine:
                 if parsed.get("suggestion", "").startswith("swipe"):
                     await self._execute_vision_swipe(parsed["suggestion"])
                     await asyncio.sleep(1)
-                    # Retry after swipe
-                    return await self._vision_tap_element(description)
+                    # Retry after swipe (with depth limit to prevent infinite loop)
+                    return await self._vision_tap_element(description, _depth=_depth + 1)
         except Exception:
             pass
         return False
