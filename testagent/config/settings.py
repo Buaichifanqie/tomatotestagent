@@ -71,6 +71,9 @@ class TestAgentSettings(BaseSettings):
     vision_timeout: int = 60
     vision_max_retries: int = 2
 
+    # 被测应用数据库（db_toolkit 使用）
+    app_db_url: str = ""
+
     # 坐标缓存配置
     cache_enabled: bool = True
     cache_max_size: int = 1000

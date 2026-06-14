@@ -15,6 +15,7 @@ from testagent.common.errors import LLMTokenLimitError
 from testagent.common.logging import get_logger
 from testagent.db_toolkit.connection import ConnectionManager
 from testagent.db_toolkit.env import detect_environment
+from testagent.db_toolkit.models import DbEnv, Environment
 from testagent.db_toolkit.tools import (
     DB_TOOL_DEFINITIONS,
     ToolkitState,
@@ -822,8 +823,14 @@ def _register_tool_handlers(
         register_tool_handler("vision_describe_screen", _handler_vision_describe)
 
     # Register DB toolkit tools
+    from testagent.config.settings import get_settings
+    _settings = get_settings()
+    _app_db_url = _settings.app_db_url
+
     db_conn_mgr = ConnectionManager()
-    db_env = detect_environment("")  # Will be configured per-session later
+    db_env = detect_environment(_app_db_url) if _app_db_url else DbEnv(
+        level=Environment.PRODUCTION, connection_url="", detected_by="default",
+    )
     db_state = ToolkitState(env=db_env, conn_manager=db_conn_mgr)
 
     def _make_db_handler(fn):
