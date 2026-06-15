@@ -707,6 +707,35 @@ async def _plan_command_async(
         if detected_version:
             typer.echo(f"  [auto-detected app version: {detected_version}]")
 
+    # ── Load App Skill ───────────────────────────────────────────────────
+    skill_app_name: str | None = None
+    skill_summary: str = ""
+    skill_full_content: str = ""
+    _skill_loader = None
+    if app_package:
+        from testagent.skills.app_skill_loader import AppSkillLoader
+        from pathlib import Path as _Path
+        _skill_loader = AppSkillLoader(apps_dir=_Path("skills") / "apps")
+        skill_app_name = _skill_loader.find_app_by_package(app_package)
+        if skill_app_name:
+            sub_skills = [f.file_path.stem for f in _skill_loader.load_app(skill_app_name) if not f.is_main]
+            sub_str = ", ".join(sub_skills) if sub_skills else ""
+            skill_label = f"{skill_app_name} ({sub_str})" if sub_str else skill_app_name
+            typer.echo(f"  Found skill: {skill_label}")
+            if typer.confirm(f"  Load skill '{skill_app_name}'?", default=True):
+                # 只注入与用户意图匹配的子 skill，避免范围蔓延
+                skill_summary = _skill_loader.get_matching_content(skill_app_name, requirement)
+                skill_full_content = skill_summary  # 执行引擎也用匹配的内容
+                if not skill_summary:
+                    skill_summary = _skill_loader.get_summary(skill_app_name) or ""
+                    skill_full_content = skill_summary
+                    typer.echo(f"  [Loaded skill: {skill_label} (summary only, no sub-skill matched)]")
+                else:
+                    typer.echo(f"  [Loaded skill: {skill_label}]")
+            else:
+                skill_app_name = None
+                typer.echo("  [Skill skipped]")
+
     # ── Set up output directory ─────────────────────────────────────────────
     output_dir = setup_output_dir(name)
     typer.echo(f"Output directory: {output_dir}")
@@ -749,10 +778,10 @@ async def _plan_command_async(
 
         return _call  # return async callable directly (no asyncio.run wrapper)
 
-    # ── Phase 1.5: App UI Exploration ────────────────────────────────────
+    # ── Phase 1.5: App UI Exploration (disabled — 0 elements, wastes time) ──
     ui_context_map = None
     ui_context_string = ""
-    if app_package:
+    if False and app_package:  # disabled
         typer.echo("[Phase 1.5] Exploring App UI...")
         try:
             from testagent.exploration.app_explorer import AppExplorer
@@ -863,6 +892,15 @@ async def _plan_command_async(
 
     if ui_context_string:
         enhanced_prd += "\n\n## App 界面信息\n\n以下是通过自动化探索获取的 App 实际界面信息，包括各页面的可交互元素和导航路径。请基于这些真实信息生成测试用例步骤，不要猜测元素名称。\n\n" + ui_context_string
+
+    # ── Inject App Skill knowledge ───────────────────────────────────────
+    if skill_summary:
+        enhanced_prd += (
+            f"\n\n## App 测试技能（来自 {skill_app_name} skill）\n\n"
+            f"**范围约束**：以下 Skill 仅供参考该 App 的 UI 特征和交互模式。"
+            f"你必须严格按照用户的核心意图生成用例，不要为 Skill 中提到但用户未要求的功能生成用例。\n\n"
+            f"{skill_summary}"
+        )
 
     # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────
     history_context = ""
@@ -1043,25 +1081,10 @@ async def _plan_command_async(
 
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
 
-    _TC_COUNT_MIN = 30
-    _TC_COUNT_MAX = 70
     _console = Console()
 
     with _console.status("[bold green]Generating test cases, please wait...", spinner="dots"):
         test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
-
-    # Retry once if count is below minimum
-    if test_cases and len(test_cases) < _TC_COUNT_MIN:
-        _console.print(f"  [yellow]Generated only {len(test_cases)} cases (target: {_TC_COUNT_MIN}-{_TC_COUNT_MAX}). Retrying for more coverage...[/yellow]")
-        retry_prd = enhanced_prd + (
-            f"\n\n## 重要补充\n"
-            f"你上次只生成了 {len(test_cases)} 条用例，数量不足。"
-            f"请覆盖 PRD 中**所有**功能模块，每个模块至少 3 条用例，目标总数 {_TC_COUNT_MIN}-{_TC_COUNT_MAX} 条。"
-        )
-        with _console.status("[bold green]Regenerating test cases...", spinner="dots"):
-            retry_cases = await ts_gen.generate(retry_prd, plan_name=name)
-        if retry_cases and len(retry_cases) > len(test_cases):
-            test_cases = retry_cases
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")
@@ -1070,9 +1093,6 @@ async def _plan_command_async(
             typer.echo("\n--- Raw LLM output (first 2000 chars) ---")
             typer.echo(raw[:2000])
         return None, None, []
-
-    if len(test_cases) > _TC_COUNT_MAX:
-        _console.print(f"  [yellow]Generated {len(test_cases)} cases (target: {_TC_COUNT_MIN}-{_TC_COUNT_MAX}). Keeping all — review for duplicates.[/yellow]")
 
     typer.echo(f"Generated {len(test_cases)} test case(s).")
 
@@ -1250,9 +1270,16 @@ async def _plan_command_async(
     ckpt = CheckpointManager(output_dir)
     ckpt.save(name, config, test_cases)
 
+    # ── Extract toggle groups from loaded skill (app-specific) ─────────
+    skill_toggle_groups: list[list[str]] = []
+    if skill_app_name and _skill_loader is not None:
+        skill_toggle_groups = _skill_loader.get_toggle_groups(skill_app_name)
+
     engine = ExecutionEngine(
         config,
         llm_provider=llm_provider,
+        app_skill_context=skill_full_content,
+        toggle_groups=skill_toggle_groups,
         on_tc_complete=lambda tc: ckpt.save(name, config, test_cases),
     )
     executed_tcs = await engine.execute_all(test_cases)

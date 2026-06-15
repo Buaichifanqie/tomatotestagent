@@ -77,7 +77,7 @@ class CrossEncoderReranker:
             doc_copy["rerank_score"] = float(score)
             scored_docs.append((float(score), doc_copy))
 
-        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        scored_docs.sort(key=lambda x: (-x[0], x[1].get("id", "")))
 
         result = [doc for _, doc in scored_docs[:top_k]]
 

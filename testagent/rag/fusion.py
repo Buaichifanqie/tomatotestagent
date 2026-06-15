@@ -29,7 +29,7 @@ def rrf_fusion(
         if doc_id not in merged:
             merged[doc_id] = dict(item)
 
-    sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+    sorted_ids = sorted(scores.keys(), key=lambda x: (-scores[x], x))
 
     result: list[dict[str, Any]] = []
     for doc_id in sorted_ids:

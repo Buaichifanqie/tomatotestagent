@@ -47,6 +47,8 @@ class TestCaseGenerator:
                 "TC generation parsing failed. Raw output preview:\n%s",
                 preview,
             )
+        if result:
+            result = self._normalize_feature_ids(result)
         return result
 
     # ── LLM helpers ──────────────────────────────────────────────────────────
@@ -339,3 +341,59 @@ class TestCaseGenerator:
             required_state=legacy_required_state,
             steps=steps,
         )
+
+    # ── feature_id normalization ────────────────────────────────────────────
+
+    # LLM 每次可能用不同的 capability 命名（VIDEO / VIDEOPLAY / PLAY），
+    # 这里做归一化，确保相同功能的 TC 使用统一的 feature_id 前缀。
+    _FEATURE_ID_ALIASES: dict[str, str] = {
+        "VIDEO": "VIDEO_PLAY",
+        "VIDEOPLAY": "VIDEO_PLAY",
+        "PLAY": "VIDEO_PLAY",
+        "VIDEO_PLAY": "VIDEO_PLAY",
+        "SEARCH": "SEARCH",
+        "LOGIN": "LOGIN",
+        "REGISTER": "REGISTER",
+        "COMMENT": "COMMENT",
+        "DANMAKU": "DANMAKU",
+        "FAVORITE": "FAVORITE",
+        "SHARE": "SHARE",
+        "LIKE": "LIKE",
+        "PAY": "PAY",
+        "CART": "CART",
+        "ORDER": "ORDER",
+        "PROFILE": "PROFILE",
+        "SETTING": "SETTING",
+        "NOTIFICATION": "NOTIFICATION",
+        "DOWNLOAD": "DOWNLOAD",
+        "UPLOAD": "UPLOAD",
+    }
+
+    @classmethod
+    def _normalize_feature_id(cls, raw_id: str) -> str:
+        """将 LLM 返回的 feature_id 归一化。"""
+        upper = raw_id.upper().replace("-", "_").strip()
+        # 精确匹配
+        if upper in cls._FEATURE_ID_ALIASES:
+            return cls._FEATURE_ID_ALIASES[upper]
+        # 前缀匹配：VIDEO_ENTRY / VIDEO_PAUSE / VIDEO_FULLSCREEN 等 → VIDEO_PLAY
+        for prefix in ("VIDEO", "SEARCH", "LOGIN", "COMMENT", "DANMAKU"):
+            if upper.startswith(prefix + "_") and prefix in cls._FEATURE_ID_ALIASES:
+                return cls._FEATURE_ID_ALIASES[prefix]
+        return upper
+
+    @classmethod
+    def _normalize_feature_ids(cls, cases: list[TestCase]) -> list[TestCase]:
+        """统一所有 TC 的 feature_id 和 TC id 前缀。"""
+        for tc in cases:
+            if not tc.feature_id:
+                continue
+            normalized = cls._normalize_feature_id(tc.feature_id)
+            if normalized == tc.feature_id:
+                continue
+            tc.feature_id = normalized
+            # 同步 TC id 前缀：TC-PLAY-001 → TC-VIDEO_PLAY-001
+            m = re.match(r"TC-(\w+)-(\d+)", tc.id)
+            if m:
+                tc.id = f"TC-{normalized}-{m.group(2)}"
+        return cases

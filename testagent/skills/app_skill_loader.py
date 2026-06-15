@@ -111,6 +111,82 @@ class AppSkillLoader:
 
         return "\n".join(lines)
 
+    def get_full_content(self, app_name: str) -> str:
+        """返回 app 所有 skill 文件的完整内容，用于注入执行上下文。"""
+        files = self.load_app(app_name)
+        if not files:
+            return ""
+        parts: list[str] = []
+        for f in files:
+            if f.body.strip():
+                header = f"## {f.file_path.stem}" if not f.is_main else f"## {app_name} 主技能"
+                parts.append(f"{header}\n\n{f.body.strip()}")
+        return "\n\n---\n\n".join(parts)
+
+    def get_matching_content(self, app_name: str, user_intent: str) -> str:
+        """根据用户意图只返回匹配的子 skill 内容（不包含主 SKILL.md）。
+
+        用于 TC 生成：只注入与用户需求相关的领域知识，避免范围蔓延。
+        例如用户说"测试视频播放功能"，只返回 video_playback.md 的内容。
+        """
+        import re
+
+        files = self.load_app(app_name)
+        if not files:
+            return ""
+
+        intent_lower = user_intent.lower()
+        matched_parts: list[str] = []
+
+        for f in files:
+            if f.is_main or not f.body.strip():
+                continue
+            # 从 frontmatter 获取 trigger
+            trigger = str(f.meta.get("trigger", ""))
+            if not trigger:
+                continue
+            # 检查用户意图是否匹配 trigger 中的任一关键词
+            keywords = [kw.strip() for kw in trigger.split("|") if kw.strip()]
+            if any(kw in intent_lower for kw in keywords):
+                header = f"## {f.file_path.stem}"
+                matched_parts.append(f"{header}\n\n{f.body.strip()}")
+
+        return "\n\n---\n\n".join(matched_parts)
+
+    def find_app_by_package(self, package_name: str) -> str | None:
+        """根据包名查找对应的 app skill 名称。"""
+        for app_name in self.list_apps():
+            files = self.load_app(app_name)
+            for f in files:
+                meta = f.meta or {}
+                info = meta.get("app_info", {})
+                if isinstance(info, dict) and info.get("package_name") == package_name:
+                    return app_name
+        return None
+
+    def get_toggle_groups(self, app_name: str) -> list[list[str]]:
+        """收集 app 所有 skill 文件中定义的 toggle_groups。
+
+        各 skill 文件的 toggle_groups 会被合并为一份完整列表。
+        没有定义时返回空列表。
+        """
+        files = self.load_app(app_name)
+        merged: list[list[str]] = []
+        seen: set[str] = set()
+        for f in files:
+            raw = (f.meta or {}).get("toggle_groups")
+            if not isinstance(raw, list):
+                continue
+            for group in raw:
+                if not isinstance(group, list) or not group:
+                    continue
+                # 用组内第一个元素去重
+                key = str(group[0])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append([str(item) for item in group])
+        return merged
+
     def _load_file(self, path: Path, is_main: bool = False) -> AppSkillFile | None:
         """解析单个 Skill 文件。"""
         try:

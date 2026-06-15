@@ -79,11 +79,15 @@ class ExecutionEngine:
         popup_handler: PopupHandler | None = None,
         session_manager: SessionManager | None = None,
         llm_provider: Any = None,
+        app_skill_context: str = "",
+        toggle_groups: list[list[str]] | None = None,
         on_tc_complete: Callable[[TestCase], None] | None = None,
         on_all_complete: Callable[[list[TestCase]], None] | None = None,
     ) -> None:
         self.config = config
         self.popup_handler = popup_handler or PopupHandler()
+        self._app_skill_context = app_skill_context
+        self._toggle_groups = toggle_groups or []
         self.session_manager = session_manager or SessionManager(
             retry_limit=config.retry.session,
         )
@@ -213,7 +217,9 @@ class ExecutionEngine:
 
         return await self._execute_tap_and_cache(step, tc_id, context_hash)
 
-    async def _execute_tap_with_tap_first(self, step: TestStep, tc_id: str) -> dict:
+    async def _execute_tap_with_tap_first(
+        self, step: TestStep, tc_id: str, trigger_coords: dict | None = None
+    ) -> dict:
         """复合动作（探测-回放模式）：处理瞬态 UI 控件。
 
         核心思路：将探测和执行分离。
@@ -222,26 +228,35 @@ class ExecutionEngine:
 
         首次运行：探测 + 执行（探测可能因 vision 延迟而失败，但坐标会被缓存）
         后续运行：坐标已缓存，直接执行快速链条，完美避开瞬态 UI 消失问题。
+
+        Args:
+            trigger_coords: 预计算的触发区域坐标（自动检测时用屏幕坐标）。
+                为 None 时从缓存或 vision 获取。
         """
         appium_url = self.session_manager.appium_url
         session_id = self.session_manager.session_id
 
         # ── 检查缓存：是否已有完整的动作链坐标 ──
-        chain_key = f"tap_first_chain:{step.tap_first}→{step.target}"
+        normalized_target = self._normalize_toggle_target(step.target)
+        chain_key = f"tap_first_chain:{normalized_target}"
         cached_chain = self._tap_first_chain_cache.get(chain_key)
 
         if cached_chain:
             # 缓存命中：直接执行快速原子动作链（< 1 秒）
-            self._log(f"  [Reveal Chain Cache Hit: '{step.tap_first}' → '{step.target}']")
+            self._log(f"  [Reveal Chain Cache Hit: '{step.tap_first}' → '{step.target}' (key: '{normalized_target}')]")
             return await self._execute_tap_first_chain(cached_chain, appium_url, session_id)
 
         # ── 探测阶段：获取触发区域和目标控件的坐标 ──
         self._log(f"  [Reveal Probe: discovering coordinates for '{step.tap_first}' → '{step.target}']")
 
-        # 1. 获取触发区域坐标（如视频画面中心）
-        tap_first_coords = await self._probe_get_coords(step.tap_first, tc_id)
-        if not tap_first_coords:
-            return {"error": f"tap_first: cannot find trigger area '{step.tap_first}'"}
+        # 1. 获取触发区域坐标：优先用预计算的，否则从缓存/vision 获取
+        if trigger_coords:
+            tap_first_coords = trigger_coords
+            self._log(f"  [Using pre-computed trigger coords: ({tap_first_coords['x']}, {tap_first_coords['y']})]")
+        else:
+            tap_first_coords = await self._probe_get_coords(step.tap_first, tc_id)
+            if not tap_first_coords:
+                return {"error": f"tap_first: cannot find trigger area '{step.tap_first}'"}
 
         # 2. 点击触发区域，让隐藏控件浮现
         tap_res = await app_tap(
@@ -258,22 +273,89 @@ class ExecutionEngine:
         self._log(f"  [Reveal Probe: looking for '{step.target}']")
         target_coords = await self._vision_find_element(step.target)
 
+        # 5. 如果 vision 返回了滑动建议（控件在隐藏页），执行滑动后再重试
+        swipe_performed = None  # 记录是否执行了滑动（用于缓存）
         if not target_coords or "x" not in target_coords:
-            # 重试一次
-            await asyncio.sleep(0.5)
-            target_coords = await self._vision_find_element(step.target)
+            swipe_direction = None
+            if isinstance(target_coords, dict) and "suggestion" in target_coords:
+                sug = target_coords["suggestion"]
+                # swipe_ 或 scroll_ 开头都视为滑动建议
+                if sug.startswith("swipe_") or sug.startswith("scroll_"):
+                    swipe_direction = sug
+
+            if swipe_direction:
+                self._log(
+                    f"  [Reveal Probe: '{swipe_direction}' to reveal '{step.target}']"
+                )
+                # 控制栏可能已自动隐藏，先重新点击触发区域
+                await app_tap(
+                    x=tap_first_coords["x"], y=tap_first_coords["y"],
+                    appium_url=appium_url, session_id=session_id,
+                )
+                await asyncio.sleep(0.5)
+                # 在控制栏区域执行滑动（屏幕底部 ~12%）
+                dw, dh = await self._get_screen_size()
+                control_bar_y = int(dh * 0.88)
+                if "left" in swipe_direction:
+                    sx, sy, ex, ey = int(dw * 0.7), control_bar_y, int(dw * 0.2), control_bar_y
+                elif "right" in swipe_direction:
+                    sx, sy, ex, ey = int(dw * 0.2), control_bar_y, int(dw * 0.7), control_bar_y
+                elif "up" in swipe_direction:
+                    sx, sy, ex, ey = int(dw * 0.5), int(dh * 0.88), int(dw * 0.5), int(dh * 0.7)
+                elif "down" in swipe_direction:
+                    sx, sy, ex, ey = int(dw * 0.5), int(dh * 0.7), int(dw * 0.5), int(dh * 0.88)
+                else:
+                    sx, sy, ex, ey = 0, 0, 0, 0  # fallback
+
+                self._log(f"  [Reveal Probe: swipe ({sx},{sy}) -> ({ex},{ey})]")
+                await app_swipe(
+                    start_x=sx, start_y=sy, end_x=ex, end_y=ey,
+                    duration=600,
+                    appium_url=appium_url, session_id=session_id,
+                )
+                await asyncio.sleep(0.8)
+                target_coords = await self._vision_find_element(step.target)
+                swipe_performed = {
+                    "direction": swipe_direction,
+                    "start_x": sx, "start_y": sy, "end_x": ex, "end_y": ey,
+                }
+            else:
+                # 没有滑动建议，走原有的重试逻辑
+                # 但先检查 session 是否活着，避免在死 session 上浪费时间
+                if not self.session_manager.is_connected():
+                    self._log(f"  [Reveal Probe: session dead — aborting probe]")
+                    return {"error": "session_dead"}
+                self._log(f"  [Reveal Probe: re-tapping trigger area for retry]")
+                await app_tap(
+                    x=tap_first_coords["x"], y=tap_first_coords["y"],
+                    appium_url=appium_url, session_id=session_id,
+                )
+                await asyncio.sleep(0.8)
+                target_coords = await self._vision_find_element(step.target)
 
         if not target_coords or "x" not in target_coords:
+            if isinstance(target_coords, dict) and target_coords.get("suggestion"):
+                pass  # 有 suggestion 但未处理，正常返回错误
+            elif not self.session_manager.is_connected():
+                self._log(f"  [Reveal Probe: session dead after probe — aborting]")
+                return {"error": "session_dead"}
             return {"error": f"tap_first: '{step.target}' not found after tapping '{step.tap_first}'"}
 
         # ── 探测成功：缓存动作链，供后续快速回放 ──
-        chain = {
+        chain: dict = {
             "tap_first_coords": tap_first_coords,
             "target_coords": target_coords,
             "wait_ms": 500,
         }
+        if swipe_performed:
+            chain["swipe"] = swipe_performed
+            self._log(
+                f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}' "
+                f"(with swipe: {swipe_performed['direction']})]"
+            )
+        else:
+            self._log(f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}']")
         self._tap_first_chain_cache[chain_key] = chain
-        self._log(f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}']")
 
         # ── 执行阶段：用刚获取的坐标立即执行快速链条 ──
         return await self._execute_tap_first_chain(chain, appium_url, session_id)
@@ -281,23 +363,40 @@ class ExecutionEngine:
     async def _execute_tap_first_chain(
         self, chain: dict, appium_url: str, session_id: str
     ) -> dict:
-        """执行快速原子动作链：tap(触发区域) → wait → tap(目标控件)。
+        """执行快速原子动作链：tap(触发区域) → [swipe(隐藏页)] → wait → tap(目标控件)。
 
-        全程直接 Appium 调用，不经过 vision API，总耗时 < 1 秒。
+        如果缓存链含 swipe 字段，在 tap 触发区域后先执行 swipe，再 wait 并 tap。
+        全程直接 Appium 调用，不经过 vision API。
         """
         rc = chain["tap_first_coords"]
         tc = chain["target_coords"]
         wait_ms = chain.get("wait_ms", 500)
 
         # Step 1: 点击触发区域
+        self._log(f"  [tap_first chain] tap trigger at ({rc['x']}, {rc['y']})")
         res1 = await app_tap(x=rc["x"], y=rc["y"], appium_url=appium_url, session_id=session_id)
         if res1.get("error"):
             return res1
+
+        # Step 1.5: 可选滑动（控件在控制栏隐藏页时需要）
+        swipe = chain.get("swipe")
+        if swipe:
+            sx, sy, ex, ey = swipe.get("start_x", 0), swipe.get("start_y", 0), swipe.get("end_x", 0), swipe.get("end_y", 0)
+            self._log(f"  [tap_first chain] {swipe['direction']} ({sx},{sy})->({ex},{ey})")
+            swipe_res = await app_swipe(
+                start_x=sx, start_y=sy, end_x=ex, end_y=ey,
+                duration=600,
+                appium_url=appium_url, session_id=session_id,
+            )
+            if swipe_res.get("error"):
+                return swipe_res
+            await asyncio.sleep(0.5)
 
         # Step 2: 等待控件浮现（固定短延迟）
         await asyncio.sleep(wait_ms / 1000.0)
 
         # Step 3: 点击目标控件
+        self._log(f"  [tap_first chain] tap target at ({tc['x']}, {tc['y']})")
         res2 = await app_tap(x=tc["x"], y=tc["y"], appium_url=appium_url, session_id=session_id)
         if res2.get("error"):
             return res2
@@ -351,26 +450,32 @@ class ExecutionEngine:
                     return {"success": True, "_source": "adb:KEYCODE_BACK"}
 
             # ── 自动检测「点击某区域呼出/显示」类 suggestion → 走探测-回放流程 ──
-            tap_first_trigger = self._extract_tap_first_trigger(suggestion)
-            if tap_first_trigger:
-                self._log(f"  [Auto-tap_first detected: suggestion='{suggestion}', trigger='{tap_first_trigger}']")
-                # 构造一个带 tap_first 的 step，走完整的探测-回放流程
+            if self._is_tap_first_suggestion(suggestion):
+                self._log(f"  [Auto-tap_first detected: suggestion='{suggestion}']")
+                dw, dh = await self._get_screen_size()
+                auto_trigger = {"x": dw // 2, "y": dh // 2}
                 tap_first_step = TestStep(
                     step=step.step, action="tap", target=step.target,
-                    tap_first=tap_first_trigger, expected=step.expected,
+                    tap_first="auto", expected=step.expected,
                 )
-                tap_first_result = await self._execute_tap_with_tap_first(tap_first_step, tc_id)
+                tap_first_result = await self._execute_tap_with_tap_first(
+                    tap_first_step, tc_id, trigger_coords=auto_trigger,
+                )
                 if not tap_first_result.get("error"):
                     return tap_first_result
-                # tap_first 失败则跳过 swipe（suggestion 是中文描述，不是滑动方向）
-            else:
-                # 只有 swipe 方向类 suggestion 才执行滑动
-                self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
-                swipe_ok = await self._execute_vision_swipe(suggestion)
-                if swipe_ok:
-                    # After swipe, wait for UI to settle and retry vision
-                    await asyncio.sleep(1.5)
-                    vision_result = await self._vision_find_element(step.target)
+                # session 已死，尝试 swipe 也没意义
+                if tap_first_result.get("error") == "session_dead":
+                    return tap_first_result
+                # tap_first 失败，尝试 swipe 作为回退
+                self._log(f"  [Auto-tap_first failed, trying swipe fallback]")
+
+            # swipe（非 tap_first suggestion 或 tap_first 失败后都走这里）
+            self._log(f"  [Vision suggests {suggestion}, executing swipe...]")
+            swipe_ok = await self._execute_vision_swipe(suggestion)
+            if swipe_ok:
+                # After swipe, wait for UI to settle and retry vision
+                await asyncio.sleep(1.5)
+                vision_result = await self._vision_find_element(step.target)
 
         if vision_result and "x" in vision_result and "y" in vision_result:
             coords = vision_result
@@ -402,22 +507,31 @@ class ExecutionEngine:
         if vision_result and "suggestion" in vision_result:
             suggestion = vision_result["suggestion"]
             # ── 自动检测「点击某区域呼出/显示」类 suggestion → 走探测-回放流程 ──
-            tap_first_trigger = self._extract_tap_first_trigger(suggestion)
-            if tap_first_trigger:
-                self._log(f"  [Auto-tap_first detected (retry): suggestion='{suggestion}', trigger='{tap_first_trigger}']")
+            if self._is_tap_first_suggestion(suggestion):
+                self._log(f"  [Auto-tap_first detected (retry): suggestion='{suggestion}']")
+                dw, dh = await self._get_screen_size()
+                auto_trigger = {"x": dw // 2, "y": dh // 2}
                 tap_first_step = TestStep(
                     step=step.step, action="tap", target=step.target,
-                    tap_first=tap_first_trigger, expected=step.expected,
+                    tap_first="auto", expected=step.expected,
                 )
-                tap_first_result = await self._execute_tap_with_tap_first(tap_first_step, tc_id)
+                tap_first_result = await self._execute_tap_with_tap_first(
+                    tap_first_step, tc_id, trigger_coords=auto_trigger,
+                )
                 if not tap_first_result.get("error"):
                     return tap_first_result
-            else:
-                self._log(f"  [Vision retry suggests {suggestion}, executing swipe...]")
-                swipe_ok = await self._execute_vision_swipe(suggestion)
-                if swipe_ok:
-                    await asyncio.sleep(1.5)
-                    vision_result = await self._vision_find_element(step.target)
+                # session 已死，尝试 swipe 也没意义
+                if tap_first_result.get("error") == "session_dead":
+                    return tap_first_result
+                # tap_first 失败，尝试 swipe 作为回退
+                self._log(f"  [Auto-tap_first failed (retry), trying swipe fallback]")
+
+            # swipe（非 tap_first suggestion 或 tap_first 失败后都走这里）
+            self._log(f"  [Vision retry suggests {suggestion}, executing swipe...]")
+            swipe_ok = await self._execute_vision_swipe(suggestion)
+            if swipe_ok:
+                await asyncio.sleep(1.5)
+                vision_result = await self._vision_find_element(step.target)
 
         if vision_result and "x" in vision_result and "y" in vision_result:
             coords = vision_result
@@ -451,20 +565,28 @@ class ExecutionEngine:
         return bool(re.search(r"返回|后退|back|back_btn|返回按钮|返回键", target, re.IGNORECASE))
 
     @staticmethod
-    def _extract_tap_first_trigger(suggestion: str) -> str:
-        """从 vision suggestion 中提取「点击某区域呼出/显示」的触发区域。
+    def _is_tap_first_suggestion(suggestion: str) -> bool:
+        """判断 vision suggestion 是否暗示需要先点击才能显示目标控件。
 
-        通用匹配，不绑定任何具体 App 类型：
-        - "点击顶部的播放区域呼出控制栏" → "播放区域"
-        - "点击屏幕中央显示菜单" → "屏幕中央"
-        - "点击底部区域呼出工具栏" → "底部区域"
-        返回空字符串表示不是 tap_first suggestion。
+        只做是/否判断，不提取触发区域名称（LLM 措辞多变，提取不可靠）。
+        触发区域坐标由调用方按屏幕尺寸计算。
         """
-        # 匹配模式：点击 + 描述 + 呼出/显示/浮现/唤起/打开
-        m = re.search(r"点击(.{2,20}?)(?:呼出|显示|浮现|唤起|打开)", suggestion)
-        if m:
-            return m.group(1).strip()
-        return ""
+        reveal_keywords = ["呼出", "显示", "浮现", "唤起", "调出"]
+        click_keywords = ["点击", "轻触", "触碰", "点一下", "触摸"]
+        has_click = any(kw in suggestion for kw in click_keywords)
+        has_reveal = any(kw in suggestion for kw in reveal_keywords)
+        return has_click and has_reveal
+
+    def _normalize_toggle_target(self, target: str) -> str:
+        """将 toggle 类 target 归一化为统一缓存键。
+
+        同一物理按钮在不同状态（如暂停/播放）应共享缓存。
+        映射来自 app skill 文件（toggle_groups），绕过引擎硬编码，保证通用性。
+        """
+        for group in self._toggle_groups:
+            if target in group:
+                return group[0]  # 用组内第一个作为缓存键
+        return target
 
     async def _try_keycode_back(self) -> bool:
         """Send KEYCODE_BACK via ADB. Returns True if succeeded."""
@@ -2507,6 +2629,9 @@ class ExecutionEngine:
             screen_height=dh,
         )
 
+        if self._app_skill_context:
+            prompt += f"\n\n## App 测试知识\n\n{self._app_skill_context[:2000]}"
+
         try:
             response = await self._llm_provider.chat(
                 system="你是一个自动化测试助手。请始终用 JSON 回复。",
@@ -2726,6 +2851,9 @@ class ExecutionEngine:
         if not screenshot_id:
             err = scr_result.get("error", scr_result.get("body", "no screenshot_id"))
             self._log(f"  [DIAG: Screenshot failed — {str(err)[:80]}]")
+            # 截图失败时检查 session 状态，离线的 session 后续操作都会失败
+            if not self.session_manager.is_connected():
+                self._log(f"  [DIAG: Session is dead — screenshot will keep failing]")
             return None
 
         from testagent.mcp_servers.shared_cache import get_screenshot
@@ -2756,6 +2884,9 @@ class ExecutionEngine:
         )
         if context:
             prompt = f"之前的屏幕分析：{context}\n\n{prompt}"
+
+        if self._app_skill_context:
+            prompt += f"\n\n## App 测试知识\n\n{self._app_skill_context[:2000]}"
 
         dw, dh = await self._get_screen_size()
         try:
@@ -2791,6 +2922,21 @@ class ExecutionEngine:
 
         coords = _parse_percentage_coordinates(content, dw, dh)
         found = _parse_found_status(content) or bool(coords.get("center"))
+
+        # Debug: log raw vision response and parsed coordinates
+        if coords.get("center"):
+            c = coords["center"]
+            pct = coords.get("center_pct", {})
+            self._log(
+                f"  [Vision: target='{target}' — found at "
+                f"({c['x']}, {c['y']}) px = ({pct.get('x', '?')}%, {pct.get('y', '?')}%) "
+                f"on {dw}x{dh}]"
+            )
+        else:
+            self._log(
+                f"  [Vision: target='{target}' — found={found}, "
+                f"no center coords parsed, response={content[:200]}]"
+            )
 
         if found and coords.get("center"):
             return coords["center"]
