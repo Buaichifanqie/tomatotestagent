@@ -709,8 +709,8 @@ async def _plan_command_async(
 
     # ── Load App Skill ───────────────────────────────────────────────────
     skill_app_name: str | None = None
-    skill_summary: str = ""
-    skill_full_content: str = ""
+    skill_ui_knowledge: str = ""   # UI 知识层：视觉特征 + 元素名称（注入生成阶段）
+    skill_full_content: str = ""   # 完整内容：含执行策略（注入执行阶段）
     _skill_loader = None
     if app_package:
         from testagent.skills.app_skill_loader import AppSkillLoader
@@ -723,15 +723,16 @@ async def _plan_command_async(
             skill_label = f"{skill_app_name} ({sub_str})" if sub_str else skill_app_name
             typer.echo(f"  Found skill: {skill_label}")
             if typer.confirm(f"  Load skill '{skill_app_name}'?", default=True):
-                # 只注入与用户意图匹配的子 skill，避免范围蔓延
-                skill_summary = _skill_loader.get_matching_content(skill_app_name, requirement)
-                skill_full_content = skill_summary  # 执行引擎也用匹配的内容
-                if not skill_summary:
-                    skill_summary = _skill_loader.get_summary(skill_app_name) or ""
-                    skill_full_content = skill_summary
-                    typer.echo(f"  [Loaded skill: {skill_label} (summary only, no sub-skill matched)]")
+                # UI 知识层：只含视觉特征和元素名称，供 TC 生成阶段使用
+                skill_ui_knowledge = _skill_loader.get_ui_knowledge(skill_app_name, requirement)
+                # 完整内容：含执行策略（tap_first、弹窗处理等），供执行引擎使用
+                skill_full_content = _skill_loader.get_matching_content(skill_app_name, requirement)
+                if not skill_full_content:
+                    skill_full_content = _skill_loader.get_summary(skill_app_name) or ""
+                if skill_ui_knowledge:
+                    typer.echo(f"  [Loaded skill: {skill_label} (UI knowledge + execution strategy)]")
                 else:
-                    typer.echo(f"  [Loaded skill: {skill_label}]")
+                    typer.echo(f"  [Loaded skill: {skill_label} (execution strategy only)]")
             else:
                 skill_app_name = None
                 typer.echo("  [Skill skipped]")
@@ -863,9 +864,10 @@ async def _plan_command_async(
     if not is_file and len(prd_text) < 200:
         enhanced_prd = (
             f"# 测试范围限定\n\n"
-            f"**严格约束**：只为以下需求描述中明确提到的功能生成测试用例。\n"
-            f"不要为需求中未提到的功能（如搜索、直播、个人中心等）生成用例。\n"
-            f"历史用例仅供参考格式和写法，不要照搬其功能范围。\n\n"
+            f"**约束**：只为以下需求描述所属的功能域生成测试用例，"
+            f"不要为无关功能生成用例。\n"
+            f"**重要**：需求描述较短，你必须基于通用测试常识，"
+            f"完整覆盖该功能域的核心交互路径，包括正向操作、逆向操作和异常场景。\n\n"
             f"## 用户需求\n\n{prd_text}"
         )
 
@@ -893,13 +895,15 @@ async def _plan_command_async(
     if ui_context_string:
         enhanced_prd += "\n\n## App 界面信息\n\n以下是通过自动化探索获取的 App 实际界面信息，包括各页面的可交互元素和导航路径。请基于这些真实信息生成测试用例步骤，不要猜测元素名称。\n\n" + ui_context_string
 
-    # ── Inject App Skill knowledge ───────────────────────────────────────
-    if skill_summary:
+    # ── Inject App UI knowledge (visual features + element names only) ──
+    # 注入 UI 知识层：告诉 LLM "有哪些 UI 元素"，但不告诉它 "怎么操作"。
+    # 执行策略（tap_first、弹窗处理等）由 ExecutionEngine 在执行阶段自行加载。
+    if skill_ui_knowledge:
         enhanced_prd += (
-            f"\n\n## App 测试技能（来自 {skill_app_name} skill）\n\n"
-            f"**范围约束**：以下 Skill 仅供参考该 App 的 UI 特征和交互模式。"
-            f"你必须严格按照用户的核心意图生成用例，不要为 Skill 中提到但用户未要求的功能生成用例。\n\n"
-            f"{skill_summary}"
+            f"\n\n## App UI 知识（来自 {skill_app_name} skill）\n\n"
+            f"以下是该 App 的视觉特征和可用 UI 元素名称。"
+            f"请在生成测试步骤时使用这些**准确的元素名称**，不要自行编造。\n\n"
+            f"{skill_ui_knowledge}"
         )
 
     # ── Phase 2.5: Retrieve historical cases from App Context Memory ──────

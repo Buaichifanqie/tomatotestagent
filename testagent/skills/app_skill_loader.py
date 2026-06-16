@@ -153,6 +153,61 @@ class AppSkillLoader:
 
         return "\n\n---\n\n".join(matched_parts)
 
+    def get_ui_knowledge(self, app_name: str, user_intent: str) -> str:
+        """根据用户意图返回 UI 知识层内容（视觉特征库 + 元素名称 + 交互快捷方式），不包含执行策略。
+
+        用于 TC 生成阶段：告诉 LLM "有哪些 UI 元素"以及"有哪些快捷交互方式"，但不告诉它详细的执行流程。
+        具体来说：
+        - 提取：视觉特征库、交互快捷方式（标题含"快捷方式"的子章节）、常见弹窗处理、toggle_groups
+        - 跳过：核心业务流中的详细步骤、已知陷阱、控制栏交互的关键知识（含 tap_first 示例）
+        """
+        files = self.load_app(app_name)
+        if not files:
+            return ""
+
+        intent_lower = user_intent.lower()
+        matched_parts: list[str] = []
+
+        for f in files:
+            if not f.body.strip():
+                continue
+
+            # 子 skill：只处理与用户意图匹配的
+            if not f.is_main:
+                trigger = str(f.meta.get("trigger", ""))
+                if not trigger:
+                    continue
+                keywords = [kw.strip() for kw in trigger.split("|") if kw.strip()]
+                if not any(kw in intent_lower for kw in keywords):
+                    continue
+
+            # 提取视觉特征库（包含所有子章节：播放页、控制栏、全屏模式等）
+            visual_section = self._extract_section(f.body, "视觉特征库")
+            if visual_section:
+                header = f"## {f.file_path.stem} - 视觉特征" if not f.is_main else f"## {app_name} - 视觉特征"
+                matched_parts.append(f"{header}\n\n{visual_section}")
+
+            # 提取核心业务流中的交互快捷方式（标题含"快捷方式"的子章节）
+            shortcuts = self._extract_sections_by_keyword(f.body, "核心业务流", "快捷方式")
+            if shortcuts:
+                header = f"## {f.file_path.stem} - 交互快捷方式" if not f.is_main else f"## {app_name} - 交互快捷方式"
+                matched_parts.append(f"{header}\n\n{shortcuts}")
+
+            # 主 skill 额外提取弹窗处理规则（UI 层知识）
+            if f.is_main:
+                popup_section = self._extract_section(f.body, "常见弹窗处理")
+                if popup_section:
+                    matched_parts.append(f"## 常见弹窗处理\n\n{popup_section}")
+
+            # 提取 toggle_groups（状态翻转对）
+            toggle_groups = f.meta.get("toggle_groups")
+            if isinstance(toggle_groups, list) and toggle_groups:
+                pairs = "\n".join(f"  - {' / '.join(str(item) for item in group)}" for group in toggle_groups if isinstance(group, list))
+                if pairs:
+                    matched_parts.append(f"## 状态翻转对（toggle_groups）\n\n{pairs}")
+
+        return "\n\n---\n\n".join(matched_parts)
+
     def find_app_by_package(self, package_name: str) -> str | None:
         """根据包名查找对应的 app skill 名称。"""
         for app_name in self.list_apps():
@@ -232,3 +287,53 @@ class AppSkillLoader:
                 section_lines.append(line)
 
         return "\n".join(section_lines).strip()
+
+    def _extract_sections_by_keyword(self, body: str, parent_title: str, keyword: str) -> str:
+        """从指定父章节中提取标题包含 keyword 的所有子章节。"""
+        lines = body.split("\n")
+        in_parent = False
+        parent_level = 0
+        results: list[str] = []
+        current_sub: list[str] = []
+        current_sub_level = 0
+        in_matching_sub = False
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                level = len(stripped) - len(stripped.lstrip("#"))
+                heading = stripped.lstrip("#").strip()
+
+                if not in_parent:
+                    # 还没进入父章节，等待匹配
+                    if heading == parent_title:
+                        in_parent = True
+                        parent_level = level
+                    continue
+
+                # 已在父章节内
+                if level <= parent_level:
+                    # 遇到同级或更高级标题，父章节结束
+                    if in_matching_sub and current_sub:
+                        results.append("\n".join(current_sub))
+                    break
+
+                # 遇到子章节标题
+                if in_matching_sub and current_sub:
+                    results.append("\n".join(current_sub))
+
+                if keyword in heading:
+                    in_matching_sub = True
+                    current_sub = [line]
+                    current_sub_level = level
+                else:
+                    in_matching_sub = False
+                    current_sub = []
+            elif in_parent and in_matching_sub:
+                current_sub.append(line)
+
+        # 处理最后一个子章节
+        if in_matching_sub and current_sub:
+            results.append("\n".join(current_sub))
+
+        return "\n\n".join(results).strip()
