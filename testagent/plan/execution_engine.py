@@ -358,7 +358,14 @@ class ExecutionEngine:
         self._tap_first_chain_cache[chain_key] = chain
 
         # ── 执行阶段：用刚获取的坐标立即执行快速链条 ──
-        return await self._execute_tap_first_chain(chain, appium_url, session_id)
+        result = await self._execute_tap_first_chain(chain, appium_url, session_id)
+
+        # ── toggle 操作后清除链缓存：全屏切换会改变屏幕布局，播放/暂停会改变按钮状态 ──
+        if self._is_toggle_target(step.target):
+            self._tap_first_chain_cache.clear()
+            self._log(f"  [Chain cache cleared: toggle target '{step.target}' may change screen layout]")
+
+        return result
 
     async def _execute_tap_first_chain(
         self, chain: dict, appium_url: str, session_id: str
@@ -587,6 +594,13 @@ class ExecutionEngine:
             if target in group:
                 return group[0]  # 用组内第一个作为缓存键
         return target
+
+    def _is_toggle_target(self, target: str) -> bool:
+        """判断 target 是否属于某个 toggle 组。"""
+        for group in self._toggle_groups:
+            if target in group:
+                return True
+        return False
 
     async def _try_keycode_back(self) -> bool:
         """Send KEYCODE_BACK via ADB. Returns True if succeeded."""
@@ -989,11 +1003,19 @@ class ExecutionEngine:
                     status = tc.execution.status.value if tc.execution.status else "UNKNOWN"
                     verdict = tc.execution.verdict.value if tc.execution.verdict else ""
                     if verdict == "PASS":
-                        print(f" ✅ {verdict}")
+                        print(f" \033[32m✅ {verdict}\033[0m")   # green
                     elif verdict == "FAIL":
-                        print(f" ❌ {verdict}")
+                        print(f" \033[31m❌ {verdict}\033[0m")   # red
+                    elif status == "EXECUTED":
+                        print(f" \033[32m{status}\033[0m")       # green
+                    elif status == "FAILED":
+                        print(f" \033[31m{status}\033[0m")       # red
                     else:
-                        print(f" {status}")
+                        print(f" \033[33m{status}\033[0m")       # yellow (SKIPPED, ABORTED, etc.)
+
+                    # ── Kill app after each TC to ensure clean state ──
+                    await self._teardown_app()
+                    current_app_state = set()
 
                     self._update_consecutive_blocked(tc)
 

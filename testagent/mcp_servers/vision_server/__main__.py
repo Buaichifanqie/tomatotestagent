@@ -1,6 +1,7 @@
-"""MCP stdio server entry point for Vision analysis (GLM-4.6V-Flash).
+"""MCP stdio server entry point for Vision analysis.
 
 This wraps the VisionMCPServer as a proper MCP stdio server.
+Configuration is loaded from testagent config (vision_api_key, vision_api_url, vision_model).
 
 Usage:
     python -m testagent.mcp_servers.vision_server
@@ -14,11 +15,7 @@ import mcp.types as types
 
 from testagent.mcp_servers.vision_server.server import VisionMCPServer
 
-_vision_server = VisionMCPServer(
-    api_key="",
-    api_url="https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    model="glm-4.6v-flash",
-)
+_vision_server = VisionMCPServer.from_settings()
 mcp = server.Server("vision_server")
 
 

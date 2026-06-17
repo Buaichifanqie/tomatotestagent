@@ -636,7 +636,7 @@ async def _get_device_screen_size(session_id: str) -> tuple[int, int]:
 
 def _register_tool_handlers(
     session_id: str,
-    glm_client: Any = None,
+    vision_client: Any = None,
     device_width: int | None = None,
     device_height: int | None = None,
 ) -> Callable[[str, dict[str, Any]], Any]:
@@ -819,7 +819,7 @@ def _register_tool_handlers(
     register_tool_handler("run_single_plan", _handler_run_single_plan)
 
     # ── Vision tool handlers ────────────────────────────────────
-    if glm_client is not None:
+    if vision_client is not None:
 
         async def _handler_vision_find(input_data: dict[str, Any]) -> dict[str, Any]:
             from testagent.mcp_servers.vision_server.tools import vision_find_element
@@ -829,7 +829,7 @@ def _register_tool_handlers(
                 image=input_data.get("image"),
                 target=str(input_data.get("target", "")),
                 context=input_data.get("context"),
-                vision_client=glm_client,
+                vision_client=vision_client,
                 device_width=dw,
                 device_height=dh,
             )
@@ -841,7 +841,7 @@ def _register_tool_handlers(
             result = await vision_describe_screen(
                 screenshot_id=input_data.get("screenshot_id"),
                 image=input_data.get("image"),
-                vision_client=glm_client,
+                vision_client=vision_client,
                 device_width=dw,
                 device_height=dh,
             )
@@ -884,7 +884,7 @@ def _register_tool_handlers(
 async def _recover_and_retry(
     tool_name: str,
     tool_input: dict[str, Any],
-    glm_client: Any,
+    vision_client: Any,
 ) -> tuple[dict[str, Any], str | None, object]:
     """Close dead session, create new one, re-register handlers, retry tool call."""
     logger.info("Session dead, attempting auto-recovery...")
@@ -894,7 +894,7 @@ async def _recover_and_retry(
     await asyncio.sleep(2)
     global _device_width, _device_height
     _device_width, _device_height = await _get_device_screen_size(new_sid)
-    new_dispatch_fn = _register_tool_handlers(new_sid, glm_client=glm_client)
+    new_dispatch_fn = _register_tool_handlers(new_sid, vision_client=vision_client)
 
     # Retry the failed call with fresh session
     handler = None
@@ -914,7 +914,7 @@ async def _recover_and_retry(
 def _wrap_with_session_recovery(
     dispatch_fn: object,
     session_id: str | None,
-    glm_client: Any,
+    vision_client: Any,
 ) -> object:
     """Wrap dispatch function with automatic session recovery.
 
@@ -938,7 +938,7 @@ def _wrap_with_session_recovery(
         )
         if any(p in result_str for p in _session_dead_patterns):
             retry_result, new_sid, new_dispatch = await _recover_and_retry(
-                tool_name, tool_input, glm_client
+                tool_name, tool_input, vision_client
             )
             if new_sid:
                 session_id = new_sid
@@ -1005,7 +1005,7 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
     # 获取设备分辨率并注册工具处理器
     global _device_width, _device_height
     _device_width, _device_height = await _get_device_screen_size(session_id)
-    dispatch_fn = _register_tool_handlers(session_id, glm_client=vision_client,
+    dispatch_fn = _register_tool_handlers(session_id, vision_client=vision_client,
                                           device_width=_device_width, device_height=_device_height)
 
     # 构建消息
@@ -1084,7 +1084,7 @@ async def _check_session_alive(session_id: str) -> bool:
 
 async def _recover_session(
     session_id: str | None,
-    glm_client: Any = None,
+    vision_client: Any = None,
 ) -> tuple[str | None, Callable | None, Any]:
     """Close dead session and create a new one."""
     if session_id:
@@ -1095,10 +1095,10 @@ async def _recover_session(
         await asyncio.sleep(2)
         global _device_width, _device_height
         _device_width, _device_height = await _get_device_screen_size(new_sid)
-        dispatch_fn = _register_tool_handlers(new_sid, glm_client=glm_client)
+        dispatch_fn = _register_tool_handlers(new_sid, vision_client=vision_client)
         print(f"  [会话已自动恢复: {new_sid[:8]}...]")
-        return new_sid, dispatch_fn, glm_client
-    return None, None, glm_client
+        return new_sid, dispatch_fn, vision_client
+    return None, None, vision_client
 
 
 def _clean_orphan_tool_messages(messages: list[dict[str, Any]]) -> None:
@@ -1266,7 +1266,7 @@ async def interactive_chat() -> None:
             if session_id:
                 await asyncio.sleep(2)
                 _device_width, _device_height = await _get_device_screen_size(session_id)
-                dispatch_fn = _register_tool_handlers(session_id, glm_client=vision_client)
+                dispatch_fn = _register_tool_handlers(session_id, vision_client=vision_client)
                 print(f"  [Appium 会话已创建: {session_id[:8]}...]")
             else:
                 # 可能是旧 Appium 没杀死，尝试重启
@@ -1282,7 +1282,7 @@ async def interactive_chat() -> None:
                     if session_id:
                         await asyncio.sleep(2)
                         _device_width, _device_height = await _get_device_screen_size(session_id)
-                        dispatch_fn = _register_tool_handlers(session_id, glm_client=vision_client)
+                        dispatch_fn = _register_tool_handlers(session_id, vision_client=vision_client)
                         print(f"  [Appium 会话已创建: {session_id[:8]}...]")
                     else:
                         print("  [仍无法创建 Appium 会话，将以对话模式运行]")
@@ -1400,7 +1400,7 @@ async def interactive_chat() -> None:
         if session_id and dispatch_fn and not await _check_session_alive(session_id):
             print("  [UiAutomator2 进程已崩溃，正在自动恢复会话...]")
             new_sid, new_dispatch_fn, vision_client = await _recover_session(
-                session_id, glm_client=vision_client
+                session_id, vision_client=vision_client
             )
             session_id = new_sid
             dispatch_fn = new_dispatch_fn

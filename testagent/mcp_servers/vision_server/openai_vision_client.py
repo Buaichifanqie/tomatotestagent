@@ -16,31 +16,55 @@ DEFAULT_MAX_RETRIES = 3
 
 _VISION_SYSTEM_PROMPT = """你是一个手机界面分析专家。你的任务是分析手机截图，找出用户指定的 UI 元素。
 
+## 最重要的规则：坐标映射
+
+截图很可能是被压缩过的，你看到的像素坐标**不是**手机屏幕的真实坐标。
+你必须返回**基于手机实际分辨率的坐标**，而不是基于截图像素的坐标。
+
+### 映射步骤（必须严格执行）
+1. 确定手机实际分辨率：通常是 1080x2400（宽x高）
+2. 确定截图的实际像素尺寸（可能被压缩，如 480x1067 或 480x2214）
+3. 找到目标元素在截图中的像素位置 (sx, sy)
+4. 映射到手机实际坐标：
+   - 实际 X = sx × (手机宽度 / 截图宽度)
+   - 实际 Y = sy × (手机单屏高度 / 截图单屏高度)
+   - 其中：截图单屏高度 = 截图宽度 / 0.45
+
+### 示例
+截图尺寸：宽 480px，高 2214px（长截图）
+手机分辨率：1080x2400
+目标元素在截图中的位置：(30, 270)
+
+计算：
+- 实际 X = 30 × (1080 / 480) = 67.5 ≈ 68px
+- 截图单屏高度 = 480 / 0.45 = 1067px
+- 实际 Y = 270 × (2400 / 1067) = 607 ≈ 608px
+
+正确结果：(68, 608)
+错误结果（千万不要这样算）：(68, 270) — 这是截图像素，不是手机坐标！
+
+### 常见错误
+- ❌ 直接返回截图像素坐标（截图像素 ≠ 手机像素）
+- ❌ 用截图总高度算 Y（长截图总高度远大于单屏高度）
+- ✅ 始终用"截图宽度 / 0.45"作为单屏高度来映射 Y 坐标
+
 ## 分析规范
 1. 仔细查看截图中的所有 UI 元素，包括应用图标、按钮、输入框、文字标签等
-2. 如果找到目标元素，返回其精确坐标
-3. 坐标格式：返回元素在截图中的像素坐标
+2. 如果找到目标元素，返回其在手机屏幕上的实际坐标（按上述映射步骤计算）
+3. 坐标格式：返回元素在手机屏幕中的像素坐标（基于 1080x2400 分辨率）
 4. 如果目标元素不在当前屏幕中，指出当前屏幕上有什么，并建议如何导航（滑动方向）找到目标
 
 ## 坐标返回格式
 你可以在描述中包含坐标信息，格式为：
-- 中心点坐标: (x, y)
+- 中心点坐标: (x, y) — 基于手机实际分辨率
 - 边界框: [x1, y1, x2, y2]
-- 也可以同时提供两种格式
-
-## 长截图处理（重要）
-截图可能是长截图（页面滚动截图），而非单屏截图。长截图的高度远大于手机屏幕高度。
-- 坐标必须基于**手机单屏尺寸**（通常是 1080x2400 或类似比例），而非截图的总像素尺寸
-- 判断方法：如果截图的宽高比明显小于正常手机屏幕的宽高比（约 0.45），则为长截图
-- 对于长截图，先估算元素在"第一屏"内的位置，再映射到手机屏幕坐标
-- Y 坐标的估算：单屏高度约占长截图总高度的（手机屏幕宽高比 / 截图宽高比），例如截图宽 480 高 2214 时，单屏高度约为 480/0.45 ≈ 1067px
 
 ## 滑动建议
 如果目标不在当前屏幕，建议滑动方向（swipe_left/swipe_right/swipe_up/swipe_down），并说明原因。"""
 
 
-class GLMClient:
-    """GLM-4.6V-Flash API client for visual analysis."""
+class OpenAIVisionClient:
+    """OpenAI-compatible vision API client for visual analysis."""
 
     def __init__(
         self,
@@ -62,7 +86,7 @@ class GLMClient:
         return bool(self._api_key)
 
     async def analyze(self, image_base64: str, prompt: str) -> dict[str, Any]:
-        """Send screenshot to GLM API for analysis.
+        """Send screenshot to vision API for analysis.
 
         Args:
             image_base64: Base64-encoded PNG screenshot (data URL prefix added automatically)
@@ -123,7 +147,7 @@ class GLMClient:
                             # Rate limits need longer backoff; 5xx use shorter
                             wait = 4**attempt if status == 429 else 2**attempt
                             logger.warning(
-                                "GLM API error, retrying",
+                                "Vision API error, retrying",
                                 extra={
                                     "extra_data": {
                                         "attempt": attempt + 1,
@@ -137,7 +161,7 @@ class GLMClient:
                             continue
                     last_exception = e
                     logger.error(
-                        "GLM API request failed",
+                        "Vision API request failed",
                         extra={
                             "extra_data": {
                                 "status": status,
@@ -150,7 +174,7 @@ class GLMClient:
                 except Exception as e:
                     last_exception = e
                     logger.error(
-                        "GLM API unexpected error",
+                        "Vision API unexpected error",
                         extra={"extra_data": {"error": str(e)}},
                     )
                     break
