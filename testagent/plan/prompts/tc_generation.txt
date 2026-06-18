@@ -303,7 +303,7 @@
 - `launch` 步骤的 `target` 固定写 `${app_package}`，执行层会替换为真实包名。
 - `exec` 步骤的 `value` 写设备级 shell 命令（不含 `adb shell` 前缀），常用示例：
   - 断网/开网：`svc wifi disable` / `svc wifi enable` / `svc data disable` / `svc data enable`
-  - 切后台再返回（仅 PRD 明确要求时使用）：切后台用 `input keyevent 3`（HOME 键），返回前台用 `monkey -p ${app_package} -c android.intent.category.LAUNCHER 1`（不要用 `am start -n`，因为 Activity 名称可能不正确）
+  - 切后台再返回（仅 PRD 明确要求时使用）：切后台用 `input keyevent 3`（HOME 键），返回前台直接用 `launch` 步骤重新启动 App（比 `monkey` 或 `am start` 更可靠）
 - 系统弹窗（权限、隐私、更新提示）由执行框架自动处理，无需在 steps 中手写「点击同意」。
 
 ### iOS（暂未实现 — 预留段）

@@ -9,7 +9,7 @@ _FIND_ELEMENT_PROMPT_TEMPLATE = """请在截图中找到以下目标：{target}
 
 请分析：
 1. 目标是否在当前屏幕中可见？
-2. 如果可见，返回元素的百分比坐标（中心点和边界框）
+2. 如果可见，返回元素在截图中的百分比坐标（中心点和边界框）
 3. 如果不可见，当前屏幕主要有什么内容？建议向哪个方向滑动来寻找目标？
 
 请按以下格式回复：
@@ -27,8 +27,18 @@ _DESCRIBE_SCREEN_PROMPT = """请详细描述当前手机屏幕的内容，包括
 请以结构化的方式列出所有元素。对于每个元素，提供百分比坐标 (pct_x%, pct_y%)。"""
 
 
-def _parse_percentage_coordinates(text: str, device_w: int, device_h: int) -> dict[str, Any]:
-    """Parse percentage coordinates from model response and convert to device pixels.
+def _parse_percentage_coordinates(
+    text: str,
+    device_w: int,
+    device_h: int,
+    image_w: int = 0,
+    image_h: int = 0,
+) -> dict[str, Any]:
+    """Parse image-relative percentage coordinates and convert to device pixels.
+
+    The vision model returns percentages relative to the screenshot image.
+    This function converts them to device-pixel coordinates using the actual
+    image dimensions (not device dimensions) for accurate mapping.
 
     Handles formats:
     - Center point: (45%, 50%) or (45 %, 50 %)
@@ -36,18 +46,25 @@ def _parse_percentage_coordinates(text: str, device_w: int, device_h: int) -> di
     """
     result: dict[str, Any] = {}
 
+    # Use image dimensions for conversion (model returns image-relative %)
+    # Fall back to device dimensions if image dimensions unavailable
+    ref_w = image_w if image_w > 0 else device_w
+    ref_h = image_h if image_h > 0 else device_h
+
     # Center point: (pct_x%, pct_y%)
     center_match = re.search(
         r"[（(]\s*(\d+(?:\.\d+)?)\s*%\s*[，,]\s*(\d+(?:\.\d+)?)\s*%\s*[）)]", text
     )
     if center_match:
-        pct_x = float(center_match.group(1))
-        pct_y = float(center_match.group(2))
-        result["center"] = {
-            "x": round(device_w * pct_x / 100),
-            "y": round(device_h * pct_y / 100),
-        }
-        result["center_pct"] = {"x": pct_x, "y": pct_y}
+        img_pct_x = float(center_match.group(1))
+        img_pct_y = float(center_match.group(2))
+        # Convert image-relative % to device pixels
+        # X: image width ≈ device width, so pct is the same
+        # Y: image may be taller than device screen, need scaling
+        device_x = round(device_w * img_pct_x / 100)
+        device_y = round(device_h * (img_pct_y * ref_h / device_h) / 100)
+        result["center"] = {"x": device_x, "y": device_y}
+        result["center_pct"] = {"x": img_pct_x, "y": img_pct_y}
 
     # Bounding box: [pct_x1%, pct_y1%, pct_x2%, pct_y2%]
     bounds_match = re.search(
@@ -55,17 +72,20 @@ def _parse_percentage_coordinates(text: str, device_w: int, device_h: int) -> di
         text,
     )
     if bounds_match:
-        pct_x1 = float(bounds_match.group(1))
-        pct_y1 = float(bounds_match.group(2))
-        pct_x2 = float(bounds_match.group(3))
-        pct_y2 = float(bounds_match.group(4))
+        img_pct_x1 = float(bounds_match.group(1))
+        img_pct_y1 = float(bounds_match.group(2))
+        img_pct_x2 = float(bounds_match.group(3))
+        img_pct_y2 = float(bounds_match.group(4))
         result["bounds"] = {
-            "x1": round(device_w * pct_x1 / 100),
-            "y1": round(device_h * pct_y1 / 100),
-            "x2": round(device_w * pct_x2 / 100),
-            "y2": round(device_h * pct_y2 / 100),
+            "x1": round(device_w * img_pct_x1 / 100),
+            "y1": round(device_h * (img_pct_y1 * ref_h / device_h) / 100),
+            "x2": round(device_w * img_pct_x2 / 100),
+            "y2": round(device_h * (img_pct_y2 * ref_h / device_h) / 100),
         }
-        result["bounds_pct"] = {"x1": pct_x1, "y1": pct_y1, "x2": pct_x2, "y2": pct_y2}
+        result["bounds_pct"] = {
+            "x1": img_pct_x1, "y1": img_pct_y1,
+            "x2": img_pct_x2, "y2": img_pct_y2,
+        }
 
     return result
 
@@ -155,7 +175,10 @@ async def vision_find_element(
 
     content = result.get("content", "")
 
-    coords = _parse_percentage_coordinates(content, dw, dh)
+    # Extract actual image dimensions from vision result for coordinate conversion
+    img_w = result.get("image_width", 0)
+    img_h = result.get("image_height", 0)
+    coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
     found = _parse_found_status(content)
     suggestion = _parse_suggestion(content)
 

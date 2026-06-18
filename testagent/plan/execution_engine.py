@@ -913,6 +913,16 @@ class ExecutionEngine:
                     # ── Determine if teardown is needed ─────────────────────────
                     tc_needed = _infer_state(tc)
 
+                    # Force teardown if session is dead (e.g. from previous TC's post-teardown)
+                    if not self.session_manager.is_connected():
+                        needs_teardown = True
+                    else:
+                        tc_missing = tc_needed - current_app_state
+                        needs_teardown = (
+                            tc != test_cases[0]
+                            and (bool(tc_missing) or _has_state_conflict(current_app_state, tc_needed))
+                        )
+
                     # ── Pre-check: skip TC early if required states are unsatisfiable ──
                     # Avoids wasting time on teardown + session recreation for TCs
                     # that will be SKIPPED anyway (e.g. needs login but no config).
@@ -925,13 +935,6 @@ class ExecutionEngine:
                             tc.execution.verdict = "SKIP"
                             tc.execution.error_message = f"No login config for {pkg}"
                             continue
-
-                    tc_missing = tc_needed - current_app_state
-
-                    needs_teardown = (
-                        tc != test_cases[0]
-                        and (bool(tc_missing) or _has_state_conflict(current_app_state, tc_needed))
-                    )
 
                     # ── Environment reset before each TC ──────────────────────────
                     if needs_teardown:
@@ -1844,24 +1847,14 @@ class ExecutionEngine:
     async def _teardown_app(self) -> None:
         """Force-stop the app between test cases using direct ADB.
 
-        Using ``adb shell am force-stop`` directly (not through the Appium
-        session) ensures the app is killed even when the UiAutomator2
-        instrumentation has crashed. Each TC must start from a clean app
-        state to prevent cascading failures from stale navigation state
-        (e.g. TC-A navigates to a sub-page, TC-B starts on that sub-page
-        instead of the home screen).
+        Only kills the app process — does NOT close the Appium session.
+        The session is kept alive to avoid costly UiAutomator2 re-initialization
+        (10-20s) and session recreation failures. If the session truly dies,
+        the step-level recovery logic in _execute_step_async will handle it.
 
-        **Also explicitly closes the Appium session** so the next TC creates
-        a fresh one — the zombie detection in ``execute_all()`` is unreliable
-        because ``is_connected()`` only checks the Appium HTTP endpoint
-        (which stays alive) rather than the instrumentation (which force-stop
-        kills).
+        ``force-stop`` clears all in-memory state (page stack, runtime vars,
+        caches), so the next TC's ``launch`` starts from a cold boot.
         """
-        # Explicitly close the session. is_connected() returns True even
-        # when UiAutomator2 is dead (it only checks the Appium HTTP), so
-        # we can't rely on the zombie detection in execute_all().
-        self.session_manager.close_session()
-
         import subprocess
 
         pkg = self.config.app_package or ""
@@ -2047,7 +2040,11 @@ class ExecutionEngine:
         return True
 
     async def _vision_tap_element(self, description: str, _depth: int = 0) -> bool:
-        """Use vision to find and tap a UI element by description."""
+        """Use vision to find and tap a UI element by description.
+
+        Uses the standard vision pipeline (image-relative coordinates + code conversion).
+        Only swipes when the element is genuinely not visible on screen.
+        """
         if _depth >= 3:
             self._log(f"    [Swipe retry limit reached for '{description}']")
             return False
@@ -2071,9 +2068,16 @@ class ExecutionEngine:
 
         dw, dh = await self._get_screen_size()
         prompt = (
-            f"请在当前屏幕截图中找到 \"{description}\" 这个元素。\n"
-            f"如果找到，返回其点击坐标；如果未找到，返回 suggestion=\"swipe_up\" 建议滑动查找。\n\n"
-            '用以下 JSON 格式回复：{{"x": 数字, "y": 数字}} 或 {{"suggestion": "swipe_up"}}'
+            f"请在截图中找到以下目标：{description}\n\n"
+            "请分析：\n"
+            "1. 目标是否在当前屏幕中可见？\n"
+            "2. 如果可见，返回元素在截图中的百分比坐标（中心点）\n"
+            "3. 如果不可见，建议向哪个方向滑动来寻找目标？\n\n"
+            "请按以下格式回复：\n"
+            "- found: true/false\n"
+            "- 如果找到，提供 center 百分比坐标 (pct_x%, pct_y%)\n"
+            "- 如果没找到，提供 suggestion 滑动方向\n"
+            "- 简要描述你看到的内容"
         )
 
         try:
@@ -2081,29 +2085,48 @@ class ExecutionEngine:
         except Exception:
             return False
 
+        if "error" in result:
+            return False
+
         content = result.get("content", "")
-        try:
-            import json as _json
-            start = content.find("{")
-            end = content.rfind("}")
-            if start >= 0 and end > start:
-                parsed = _json.loads(content[start:end + 1])
-                if "x" in parsed and "y" in parsed:
-                    await app_tap(
-                        x=int(parsed["x"]),
-                        y=int(parsed["y"]),
-                        appium_url=self.session_manager.appium_url,
-                        session_id=self.session_manager.session_id,
-                    )
-                    return True
-                # Handle swipe suggestion
-                if parsed.get("suggestion", "").startswith("swipe"):
-                    await self._execute_vision_swipe(parsed["suggestion"])
-                    await asyncio.sleep(1)
-                    # Retry after swipe (with depth limit to prevent infinite loop)
-                    return await self._vision_tap_element(description, _depth=_depth + 1)
-        except Exception:
-            pass
+
+        # Use standard coordinate parsing (image-relative → device pixels)
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_found_status,
+            _parse_percentage_coordinates,
+            _parse_suggestion,
+        )
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
+        found = _parse_found_status(content)
+        suggestion = _parse_suggestion(content)
+
+        # Found → tap
+        if found and coords.get("center"):
+            center = coords["center"]
+            self._log(f"    [Vision found '{description}' at ({center['x']}, {center['y']})]")
+            await app_tap(
+                x=center["x"],
+                y=center["y"],
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            return True
+
+        # Not found + has swipe suggestion → swipe and retry
+        if suggestion and suggestion.startswith("swipe"):
+            self._log(f"    [Vision suggests {suggestion} to find '{description}']")
+            await self._execute_vision_swipe(suggestion)
+            await asyncio.sleep(1.5)
+            return await self._vision_tap_element(description, _depth=_depth + 1)
+
+        # Not found + has "tap to reveal" suggestion → follow it
+        if suggestion and not suggestion.startswith("swipe"):
+            self._log(f"    [Vision nav: {suggestion[:80]}]")
+            return False
+
+        self._log(f"    [Vision didn't find '{description}']")
         return False
 
     async def _perform_login(self, account: str, password: str) -> bool:
@@ -2480,7 +2503,9 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, dw, dh)
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found:
@@ -2561,7 +2586,9 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, dw, dh)
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found:
@@ -2896,7 +2923,7 @@ class ExecutionEngine:
             "- 如果目标在底部导航栏中可见，直接返回其坐标即可，不要建议滑动\n\n"
             "请分析：\n"
             "1. 目标是否在当前屏幕中可见？\n"
-            "2. 如果可见，返回元素的百分比坐标（中心点和边界框）\n"
+            "2. 如果可见，返回元素在截图中的百分比坐标（中心点和边界框）\n"
             "3. 如果不可见，当前屏幕主要有什么内容？建议向哪个方向滑动来寻找目标？\n\n"
             "请按以下格式回复：\n"
             "- found: true/false\n"
@@ -2942,7 +2969,9 @@ class ExecutionEngine:
             _parse_suggestion,
         )
 
-        coords = _parse_percentage_coordinates(content, dw, dh)
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         # Debug: log raw vision response and parsed coordinates
@@ -3040,7 +3069,9 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, dw, dh)
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found or not coords.get("center"):
@@ -3330,7 +3361,9 @@ class ExecutionEngine:
             _parse_percentage_coordinates,
         )
 
-        coords = _parse_percentage_coordinates(content, dw, dh)
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
         if not found or not coords.get("center"):
