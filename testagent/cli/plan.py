@@ -1101,18 +1101,40 @@ async def _plan_command_async(
     typer.echo(f"Generated {len(test_cases)} test case(s).")
 
     # ── Fix LLM-hallucinated package names in generated TCs ─────────────────
-    # The LLM sometimes hallucinates package names (e.g. typos).
-    # Override launch targets with the correct package and fix exec commands.
+    # The LLM sometimes hallucinates package names (e.g. typos) or copies
+    # the template variable ${app_package} literally. Fix all of these.
     if app_package:
         for tc in test_cases:
             for step in tc.steps:
                 if step.action == "launch":
                     step.target = app_package
                 else:
+                    # Replace template variable ${app_package} with actual package
+                    step.target = step.target.replace("${app_package}", app_package)
+                    step.value = step.value.replace("${app_package}", app_package)
+                    # Replace hallucinated package names
                     for wrong in _HALLUCINATED_PACKAGES:
                         if wrong != app_package:
                             step.target = step.target.replace(wrong, app_package)
                             step.value = step.value.replace(wrong, app_package)
+
+    # ── Auto-inject tap_first for hidden controls ──────────────────────────
+    # LLM often generates plain `tap` for hidden controls instead of `tap_first`.
+    # Post-process: if a step targets a hidden control (from skill's hidden_controls
+    # config) and doesn't have tap_first, inject it automatically.
+    if skill_app_name and _skill_loader is not None:
+        hidden = _skill_loader.get_hidden_controls(skill_app_name)
+        if hidden and hidden.get("targets") and hidden.get("trigger_area"):
+            trigger_area = hidden["trigger_area"]
+            hidden_targets = set(hidden["targets"])
+            for tc in test_cases:
+                for step in tc.steps:
+                    if (step.action == "tap"
+                            and step.target in hidden_targets
+                            and not step.tap_first):
+                        step.tap_first = trigger_area
+                        typer.echo(f"  [Auto tap_first] {tc.id} step {step.step}: "
+                                   f"'{step.target}' → tap_first='{trigger_area}'")
 
     # ── Phase 3: Present to user ────────────────────────────────────────────
     from testagent.plan.scheduler import reorder_for_execution
@@ -1279,12 +1301,55 @@ async def _plan_command_async(
     if skill_app_name and _skill_loader is not None:
         skill_toggle_groups = _skill_loader.get_toggle_groups(skill_app_name)
 
+    # ── Init per-TC evaluator and judge ───────────────────────────────
+    evaluator = PerTCEvaluator()
+    judge = None
+    try:
+        from testagent.judge import CaseJudgeAgent, should_invoke_judge
+        judge = CaseJudgeAgent(output_dir=output_dir)
+    except Exception as exc:
+        typer.echo(f"  [CaseJudgeAgent init failed: {exc}]")
+
+    async def _on_tc_judged(tc):
+        """Evaluate and judge a TC immediately after execution."""
+        # 1. Save checkpoint
+        ckpt.save(name, config, test_cases)
+
+        # 2. Skip evaluation for aborted TCs
+        if tc.execution.status == ExecutionStatus.ABORTED:
+            return
+
+        # 3. PerTCEvaluator step-level evaluation
+        evaluation = evaluator.evaluate(tc)
+        tc.execution.verdict = evaluation.verdict
+        tc.execution.confidence = evaluation.confidence
+        tc.execution.reason = evaluation.reason
+
+        # 4. CaseJudgeAgent semantic evaluation (immediately, per-TC)
+        if judge is not None:
+            needs_judge, level = should_invoke_judge(tc)
+            if needs_judge:
+                try:
+                    judge_result = await judge.evaluate(tc, level)
+                    tc.execution.verdict = judge_result.verdict
+                    tc.execution.confidence = judge_result.confidence
+                    tc.execution.reason = judge_result.reasoning or judge_result.failure_root_cause
+                    tc.execution.failure_category = judge_result.failure_category
+                    tc.execution.failure_root_cause = judge_result.failure_root_cause
+                    tc.execution.judge_evidence = judge_result.evidence
+                    tc.execution.judge_confidence = judge_result.confidence
+                    tc.execution.judge_reasoning = judge_result.reasoning
+                    _c = f" (confidence={judge_result.confidence:.2f})" if judge_result.confidence else ""
+                    typer.echo(f"  [🤖 Judge: {tc.id} → {judge_result.verdict.value}{_c}, category={judge_result.failure_category}]")
+                except Exception as exc:
+                    typer.echo(f"  [Judge error for {tc.id}: {exc}]")
+
     engine = ExecutionEngine(
         config,
         llm_provider=llm_provider,
         app_skill_context=skill_full_content,
         toggle_groups=skill_toggle_groups,
-        on_tc_complete=lambda tc: ckpt.save(name, config, test_cases),
+        on_tc_complete=_on_tc_judged,
     )
     executed_tcs = await engine.execute_all(test_cases)
     was_interrupted = engine._interrupted
@@ -1296,19 +1361,26 @@ async def _plan_command_async(
     except Exception as exc:
         typer.echo(f"  [Teardown warning: {exc}]")
 
-    # ── Phase 5: Per-TC evaluation ──────────────────────────────────────────
-    typer.echo("Evaluating test case results...")
-    evaluator = PerTCEvaluator()
-    for tc in executed_tcs:
-        if tc.execution.status == ExecutionStatus.ABORTED:
-            continue  # Don't evaluate — never ran
-        evaluation = evaluator.evaluate(tc)
-        tc.execution.verdict = evaluation.verdict
-        tc.execution.confidence = evaluation.confidence
-        tc.execution.reason = evaluation.reason
+    # ── Phase 5: Evaluation + Judgment (runs per-TC during execution) ─────
+    # Note: Per-TC evaluation and CaseJudgeAgent judgment happen inside the
+    # on_tc_complete callback (see _on_tc_judged below), NOT in a separate loop.
+    # executed_tcs are already evaluated by the time execute_all() returns.
 
     # ── Phase 5.5: Retry failed cases ──────────────────────────────────────
-    failed_tcs = [tc for tc in executed_tcs if tc.execution.verdict in ("FAIL", "NEED_REVIEW")]
+    # Filter: only retry FAIL cases that are NOT BUG (BUG failures are real defects)
+    failed_tcs = [
+        tc for tc in executed_tcs
+        if tc.execution.verdict == "FAIL" and tc.execution.failure_category != "BUG"
+    ]
+    bug_tcs = [
+        tc for tc in executed_tcs
+        if tc.execution.verdict == "FAIL" and tc.execution.failure_category == "BUG"
+    ]
+    need_review_tcs = [tc for tc in executed_tcs if tc.execution.verdict == "NEED_REVIEW"]
+    if bug_tcs:
+        typer.echo(f"  [Skipping retry of {len(bug_tcs)} BUG case(s) — reported as defects]")
+    if need_review_tcs:
+        typer.echo(f"  [Skipping retry of {len(need_review_tcs)} NEED_REVIEW case(s) — will be in report for manual review]")
     if was_interrupted and failed_tcs:
         typer.echo(f"  [Interrupted — skipping retry of {len(failed_tcs)} failed case(s)]")
     if failed_tcs and not was_interrupted:

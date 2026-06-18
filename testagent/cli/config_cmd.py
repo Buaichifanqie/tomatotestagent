@@ -85,6 +85,9 @@ _ENV_KEY_MAP = {
     "vision_api_key": "TESTAGENT_VISION_API_KEY",
     "vision_api_url": "TESTAGENT_VISION_API_URL",
     "vision_model": "TESTAGENT_VISION_MODEL",
+    "judge_api_key": "TESTAGENT_JUDGE_API_KEY",
+    "judge_api_url": "TESTAGENT_JUDGE_API_URL",
+    "judge_model": "TESTAGENT_JUDGE_MODEL",
 }
 
 _DISPLAY_LABELS = {
@@ -95,11 +98,15 @@ _DISPLAY_LABELS = {
     "vision_api_key": "API Key",
     "vision_api_url": "API URL",
     "vision_model": "Model",
+    "judge_api_key": "API Key",
+    "judge_api_url": "API URL",
+    "judge_model": "Model",
 }
 
 _KEY_GROUP = {
     "LLM": ["llm_provider", "openai_api_key", "openai_base_url", "openai_model"],
     "Vision / 多模态": ["vision_api_key", "vision_api_url", "vision_model"],
+    "AI 裁判 (Judge)": ["judge_api_key", "judge_api_url", "judge_model"],
 }
 
 
@@ -185,6 +192,15 @@ def configure(
     vision_model: str | None = typer.Option(
         None, "--vision-model", help="Vision 模型名称"
     ),
+    judge_api_key: str | None = typer.Option(
+        None, "--judge-api-key", help="AI 裁判 API Key"
+    ),
+    judge_api_url: str | None = typer.Option(
+        None, "--judge-api-url", help="AI 裁判 API URL"
+    ),
+    judge_model: str | None = typer.Option(
+        None, "--judge-model", help="AI 裁判模型名称"
+    ),
 ) -> None:
     """配置 LLM 和 Vision 多模态模型的 API 信息。
 
@@ -202,6 +218,7 @@ def configure(
     has_flags = any([
         llm_provider, llm_api_key, llm_base_url, llm_model,
         vision_api_key, vision_api_url, vision_model,
+        judge_api_key, judge_api_url, judge_model,
     ])
 
     if has_flags:
@@ -219,6 +236,12 @@ def configure(
             updates["TESTAGENT_VISION_API_URL"] = vision_api_url
         if vision_model is not None:
             updates["TESTAGENT_VISION_MODEL"] = vision_model
+        if judge_api_key is not None:
+            updates["TESTAGENT_JUDGE_API_KEY"] = judge_api_key
+        if judge_api_url is not None:
+            updates["TESTAGENT_JUDGE_API_URL"] = judge_api_url
+        if judge_model is not None:
+            updates["TESTAGENT_JUDGE_MODEL"] = judge_model
     else:
         # ── 交互模式 ─────────────────────────────────
         typer.echo("配置 LLM 和 Vision 多模态模型 API")
@@ -241,7 +264,7 @@ def configure(
         updates["TESTAGENT_LLM_PROVIDER"] = val
 
         current_key = _current("openai_api_key")
-        val = typer.prompt("  API Key", default=current_key or "", show_default=False, hide_input=True)
+        val = typer.prompt("  API Key", default=current_key or "", show_default=False, hide_input=False)
         if val:
             updates["TESTAGENT_OPENAI_API_KEY"] = val
 
@@ -262,7 +285,7 @@ def configure(
         typer.echo("")
         typer.echo("── Vision / 多模态配置 ──")
         current_key = _current("vision_api_key")
-        val = typer.prompt("  API Key", default=current_key or "", show_default=False, hide_input=True)
+        val = typer.prompt("  API Key", default=current_key or "", show_default=False, hide_input=False)
         if val:
             updates["TESTAGENT_VISION_API_KEY"] = val
 
@@ -279,6 +302,30 @@ def configure(
             show_default=False,
         )
         updates["TESTAGENT_VISION_MODEL"] = val
+
+        typer.echo("")
+        typer.echo("── AI 裁判 (Judge) 配置 ──")
+        typer.echo("  （可选，不设置则 fallback 到 Vision 配置）")
+        current_key = _current("judge_api_key")
+        val = typer.prompt("  API Key（留空跳过）", default=current_key or "", show_default=False)
+        if val:
+            updates["TESTAGENT_JUDGE_API_KEY"] = val
+
+        val = typer.prompt(
+            "  API URL",
+            default=_current("judge_api_url", "https://ark.cn-beijing.volces.com/api/v3"),
+            show_default=False,
+        )
+        if val:
+            updates["TESTAGENT_JUDGE_API_URL"] = val
+
+        val = typer.prompt(
+            "  Model",
+            default=_current("judge_model", "doubao-seed-2-0-lite-260215"),
+            show_default=False,
+        )
+        if val:
+            updates["TESTAGENT_JUDGE_MODEL"] = val
 
     _write_env(updates)
 

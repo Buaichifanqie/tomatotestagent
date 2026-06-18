@@ -354,7 +354,7 @@ async def app_start_recording(
     """Start screen recording on the device."""
     payload: dict[str, object] = {
         "options": {
-            "timeLimit": 180,
+            "timeLimit": 600,
             "videoType": "h264",
             "videoQuality": "medium",
             "bitRate": 4000000,

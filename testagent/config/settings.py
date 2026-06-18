@@ -71,6 +71,13 @@ class TestAgentSettings(BaseSettings):
     vision_timeout: int = 60
     vision_max_retries: int = 2
 
+    # AI 裁判视觉模型配置（CaseJudgeAgent 使用，独立于执行引擎的 vision 配置）
+    judge_api_key: SecretStr = SecretStr("")
+    judge_api_url: str = ""
+    judge_model: str = ""
+    judge_timeout: int = 120
+    judge_fps: float = 1.0  # 视频抽帧频率，1.0 = 每秒1帧
+
     # 被测应用数据库（db_toolkit 使用）
     app_db_url: str = ""
 

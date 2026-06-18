@@ -242,6 +242,22 @@ class AppSkillLoader:
                     merged.append([str(item) for item in group])
         return merged
 
+    def get_hidden_controls(self, app_name: str) -> dict[str, list[str]]:
+        """获取需要 tap_first 的隐藏控件配置。
+
+        返回格式: {"trigger_area": "视频区域", "targets": ["暂停按钮", "全屏按钮", ...]}
+        空 dict 表示没有配置 hidden_controls。
+        """
+        files = self.load_app(app_name)
+        for f in files:
+            hc = (f.meta or {}).get("hidden_controls")
+            if isinstance(hc, dict) and hc.get("targets"):
+                return {
+                    "trigger_area": str(hc.get("trigger_area", "")),
+                    "targets": [str(t) for t in hc["targets"]],
+                }
+        return {}
+
     def _load_file(self, path: Path, is_main: bool = False) -> AppSkillFile | None:
         """解析单个 Skill 文件。"""
         try:

@@ -992,14 +992,8 @@ class ExecutionEngine:
                     self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
                     self._logcat_start(tc.id)
 
-                    # ── Start screen recording for this TC ───────────────────────
-                    await self._start_recording(tc)
-
-                    try:
-                        await self._execute_single(tc)
-                    finally:
-                        # ── Stop recording for this TC (always, even on error) ───
-                        await self._stop_recording(tc)
+                    # ── Execute TC (recording is handled inside _execute_single) ──
+                    await self._execute_single(tc)
 
                     self._logcat_stop(tc)
 
@@ -1037,7 +1031,9 @@ class ExecutionEngine:
                 finally:
                     # ── Checkpoint callback (fires for every TC, including aborted) ──
                     if self._on_tc_complete is not None:
-                        self._on_tc_complete(tc)
+                        result = self._on_tc_complete(tc)
+                        if hasattr(result, "__await__"):
+                            await result
 
         finally:
             # ── Restore original signal handlers ────────────────────────
@@ -1094,40 +1090,51 @@ class ExecutionEngine:
         except Exception as exc:
             self._log(f"  [DB setup error (non-fatal): {exc}]")
 
-        for step in tc.steps:
-            if self.should_abort():
-                self._mark_aborted(tc, "Abort during execution")
-                return
+        # ── Start recording AFTER setup, BEFORE actual test steps ────
+        await self._start_recording(tc)
 
-            await self._handle_popups(tc)
-            step_exec = await self._execute_step_async(tc, step)
-            tc.execution.steps.append(step_exec)
-
-            # Track assert warnings from step results
-            if step_exec.warning:
-                tc.execution.assert_warnings.append(
-                    f"Step {step.step} ({step.target}): {step_exec.warning}"
-                )
-
-            if not step_exec.success:
-                tc.execution.status = ExecutionStatus.FAILED
-                tc.execution.failed_step = step.step
-                tc.execution.failure_type = step_exec.failure_type
-                tc.execution.error_message = step_exec.error_message
-                # ── Phase B2: DB verify even on failure ─────────────
-                try:
-                    await self._execute_db_phase(tc, "verify")
-                except Exception as exc:
-                    self._log(f"  [DB verify error (non-fatal): {exc}]")
-                return
-
-        tc.execution.status = ExecutionStatus.EXECUTED
-
-        # ── Phase B2: DB verify/cleanup after steps ─────────────────
         try:
-            await self._execute_db_phase(tc, "verify")
-        except Exception as exc:
-            self._log(f"  [DB verify error (non-fatal): {exc}]")
+            for step in tc.steps:
+                if self.should_abort():
+                    self._mark_aborted(tc, "Abort during execution")
+                    return
+
+                await self._handle_popups(tc)
+                step_exec = await self._execute_step_async(tc, step)
+                tc.execution.steps.append(step_exec)
+
+                # Track assert warnings from step results
+                if step_exec.warning:
+                    tc.execution.assert_warnings.append(
+                        f"Step {step.step} ({step.target}): {step_exec.warning}"
+                    )
+
+                if not step_exec.success:
+                    tc.execution.status = ExecutionStatus.FAILED
+                    tc.execution.failed_step = step.step
+                    tc.execution.failure_type = step_exec.failure_type
+                    tc.execution.error_message = step_exec.error_message
+                    # ── Phase B2: DB verify even on failure ─────────────
+                    try:
+                        await self._execute_db_phase(tc, "verify")
+                    except Exception as exc:
+                        self._log(f"  [DB verify error (non-fatal): {exc}]")
+                    return
+
+            tc.execution.status = ExecutionStatus.EXECUTED
+
+            # ── Phase B2: DB verify/cleanup after steps ─────────────────
+            try:
+                await self._execute_db_phase(tc, "verify")
+            except Exception as exc:
+                self._log(f"  [DB verify error (non-fatal): {exc}]")
+
+            # ── Ending buffer: wait for UI to stabilize after last step ──
+            await asyncio.sleep(3)
+
+        finally:
+            # ── Always stop recording, even on exception ─────────────
+            await self._stop_recording(tc)
 
         # ── Phase C: Execute cross-source assertions ──────────────────
         if tc.assertions and self._rule_engine is not None:

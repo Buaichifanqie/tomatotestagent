@@ -226,6 +226,23 @@ class ReportGenerator:
                 lines.append("无详细步骤记录。")
             lines.append("")
 
+            # ── CaseJudgeAgent 裁判结果 ────────────────────────────────
+            if tc.execution.judge_reasoning:
+                lines.append("**🤖 AI 裁判评估:**")
+                lines.append("")
+                if tc.execution.failure_category and tc.execution.failure_category != "NONE":
+                    lines.append(f"- 失败分类: `{tc.execution.failure_category}`")
+                if tc.execution.failure_root_cause:
+                    lines.append(f"- 根因分析: {tc.execution.failure_root_cause}")
+                if tc.execution.judge_confidence:
+                    lines.append(f"- 置信度: {tc.execution.judge_confidence:.2f}")
+                lines.append(f"- 推理过程: {tc.execution.judge_reasoning[:500]}")
+                if tc.execution.judge_evidence:
+                    lines.append("- 证据:")
+                    for ev in tc.execution.judge_evidence[:5]:
+                        lines.append(f"  - {ev}")
+                lines.append("")
+
         # ── 需人工复查的用例 ────────────────────────────────────────────────
         lines.append("## 需人工复查的用例")
         lines.append("")

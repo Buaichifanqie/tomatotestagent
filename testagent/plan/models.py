@@ -141,6 +141,13 @@ class TCExecution(BaseModel):
     assert_warnings: list[str] = Field(default_factory=list)
     cross_source_results: list[dict[str, object]] = Field(default_factory=list)
 
+    # CaseJudgeAgent output fields
+    failure_category: str = ""  # BUG / ENVIRONMENT / TEST_ISSUE / FLAKY / NONE
+    failure_root_cause: str = ""
+    judge_evidence: list[str] = Field(default_factory=list)
+    judge_confidence: float = 0.0
+    judge_reasoning: str = ""
+
 
 class TestCase(BaseModel):
     __test__ = False
