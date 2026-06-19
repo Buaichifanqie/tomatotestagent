@@ -81,13 +81,16 @@ class ExecutionEngine:
         llm_provider: Any = None,
         app_skill_context: str = "",
         toggle_groups: list[list[str]] | None = None,
-        on_tc_complete: Callable[[TestCase], None] | None = None,
+        on_tc_start: Callable[[TestCase], Any] | None = None,
+        on_tc_complete: Callable[[TestCase], Any] | None = None,
         on_all_complete: Callable[[list[TestCase]], None] | None = None,
+        token_tracker: Any = None,
     ) -> None:
         self.config = config
         self.popup_handler = popup_handler or PopupHandler()
         self._app_skill_context = app_skill_context
         self._toggle_groups = toggle_groups or []
+        self._token_tracker = token_tracker
         self.session_manager = session_manager or SessionManager(
             retry_limit=config.retry.session,
         )
@@ -107,6 +110,7 @@ class ExecutionEngine:
         self._context_depth: int = 2
         self._rule_engine: Any | None = None
         self._consecutive_session_failures: int = 0
+        self._on_tc_start = on_tc_start
         self._on_tc_complete = on_tc_complete
         self._on_all_complete = on_all_complete
         self._interrupted: bool = False
@@ -199,16 +203,6 @@ class ExecutionEngine:
                     x=cache_entry.coord["x"], y=cache_entry.coord["y"],
                     appium_url=appium_url, session_id=session_id,
                 )
-                if (
-                    not res.get("error")
-                    and self.config.cache_verify_after_tap
-                    and cache_entry.page_hash_after is not None
-                ):
-                    await self._wait_for_ui_stable()
-                    page_hash_after = await self._get_current_page_hash()
-                    if page_hash_after and page_hash_after != cache_entry.page_hash_after:
-                        self._log("  [Cache verify failed, falling back to vision]")
-                        return await self._fallback_to_vision(step, tc_id, context_hash)
                 if not res.get("error"):
                     res["_source"] = f"cache:{cache_entry.tc_id}/step{cache_entry.step}"
                     return res
@@ -770,6 +764,7 @@ class ExecutionEngine:
                 model=settings.vision_model,
                 timeout=settings.vision_timeout,
                 max_retries=settings.vision_max_retries,
+                token_tracker=self._token_tracker,
             )
             return self._vision_client
         except Exception:
@@ -992,23 +987,20 @@ class ExecutionEngine:
                     self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
                     self._logcat_start(tc.id)
 
+                    # ── Notify TC start (e.g. set token tracker context) ──
+                    if self._on_tc_start is not None:
+                        result = self._on_tc_start(tc)
+                        if hasattr(result, "__await__"):
+                            await result
+
                     # ── Execute TC (recording is handled inside _execute_single) ──
                     await self._execute_single(tc)
 
                     self._logcat_stop(tc)
 
-                    status = tc.execution.status.value if tc.execution.status else "UNKNOWN"
-                    verdict = tc.execution.verdict.value if tc.execution.verdict else ""
-                    if verdict == "PASS":
-                        print(f" \033[32m✅ {verdict}\033[0m")   # green
-                    elif verdict == "FAIL":
-                        print(f" \033[31m❌ {verdict}\033[0m")   # red
-                    elif status == "EXECUTED":
-                        print(f" \033[32m{status}\033[0m")       # green
-                    elif status == "FAILED":
-                        print(f" \033[31m{status}\033[0m")       # red
-                    else:
-                        print(f" \033[33m{status}\033[0m")       # yellow (SKIPPED, ABORTED, etc.)
+                    # Status is printed by the on_tc_complete callback (_on_tc_judged)
+                    # which runs the judge and prints the final verdict with colors.
+                    # No step-level print here to avoid redundancy.
 
                     # ── Kill app after each TC to ensure clean state ──
                     await self._teardown_app()
@@ -1090,8 +1082,24 @@ class ExecutionEngine:
         except Exception as exc:
             self._log(f"  [DB setup error (non-fatal): {exc}]")
 
-        # ── Start recording AFTER setup, BEFORE actual test steps ────
-        await self._start_recording(tc)
+        # ── Execute steps with screen recording ───────────────────────
+        # Recording starts right after DB setup (before any step execution)
+        # and stops after the last step + 3s buffer. Captures the full TC flow.
+        from testagent.plan.segmented_recorder import SegmentedRecorder
+
+        _recorder = SegmentedRecorder(
+            start_fn=lambda: app_start_recording(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            ),
+            stop_fn=lambda: app_stop_recording(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            ),
+            output_dir=self.config.output_dir,
+            tc_id=tc.id,
+        )
+        await _recorder.start()
 
         try:
             for step in tc.steps:
@@ -1102,6 +1110,9 @@ class ExecutionEngine:
                 await self._handle_popups(tc)
                 step_exec = await self._execute_step_async(tc, step)
                 tc.execution.steps.append(step_exec)
+
+                # Check if we need to split the recording (180s limit)
+                await _recorder.check_and_split()
 
                 # Track assert warnings from step results
                 if step_exec.warning:
@@ -1129,12 +1140,19 @@ class ExecutionEngine:
             except Exception as exc:
                 self._log(f"  [DB verify error (non-fatal): {exc}]")
 
-            # ── Ending buffer: wait for UI to stabilize after last step ──
-            await asyncio.sleep(3)
-
         finally:
-            # ── Always stop recording, even on exception ─────────────
-            await self._stop_recording(tc)
+            # ── Stop recording and concatenate segments ─────────────
+            # Wait 3s to capture final UI state before stopping
+            await asyncio.sleep(3)
+            if _recorder is not None:
+                await _recorder.stop()
+                final_path = await _recorder.concat()
+                if final_path:
+                    from testagent.plan.models import EvidenceItem
+                    tc.execution.evidence.append(
+                        EvidenceItem(type="recording", path=final_path)
+                    )
+                    self._log(f"  [Recording saved: {Path(final_path).name}]")
 
         # ── Phase C: Execute cross-source assertions ──────────────────
         if tc.assertions and self._rule_engine is not None:

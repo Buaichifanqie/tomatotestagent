@@ -14,7 +14,7 @@ from rich.console import Console
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.session_manager import SessionManager
 from testagent.plan.evaluator import PerTCEvaluator
-from testagent.plan.models import ExecutionStatus, OverallEvaluation, PlanConfig, TestCase, TestStep
+from testagent.plan.models import ExecutionStatus, ExecutionVerdict, OverallEvaluation, PlanConfig, TestCase, TestStep
 from testagent.plan.overall_evaluator import OverallEvaluator
 from testagent.plan.prd_parser import PrdParser
 from testagent.plan.report_generator import ReportGenerator
@@ -757,9 +757,13 @@ async def _plan_command_async(
     # Create LLM provider once — shared between exploration, TC generation and execution
     from testagent.config.settings import get_settings
     from testagent.llm.local_provider import LLMProviderFactory
+    from testagent.common.token_tracker import TokenTracker
+    from testagent.common.tracking_provider import TrackingLLMProvider
 
     settings = get_settings()
-    llm_provider = LLMProviderFactory.create(settings)
+    _raw_llm_provider = LLMProviderFactory.create(settings)
+    token_tracker = TokenTracker()
+    llm_provider = TrackingLLMProvider(_raw_llm_provider, token_tracker, category="llm")
 
     def _build_llm_callable() -> Any:
         """Build a callable (async) that wraps the shared LLM provider."""
@@ -1087,8 +1091,10 @@ async def _plan_command_async(
 
     _console = Console()
 
+    token_tracker.start_generation()
     with _console.status("[bold green]Generating test cases, please wait...", spinner="dots"):
         test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
+    token_tracker.end_generation()
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")
@@ -1306,7 +1312,7 @@ async def _plan_command_async(
     judge = None
     try:
         from testagent.judge import CaseJudgeAgent, should_invoke_judge
-        judge = CaseJudgeAgent(output_dir=output_dir)
+        judge = CaseJudgeAgent(output_dir=output_dir, token_tracker=token_tracker)
     except Exception as exc:
         typer.echo(f"  [CaseJudgeAgent init failed: {exc}]")
 
@@ -1326,6 +1332,7 @@ async def _plan_command_async(
         tc.execution.reason = evaluation.reason
 
         # 4. CaseJudgeAgent semantic evaluation (immediately, per-TC)
+        judge_ran = False
         if judge is not None:
             needs_judge, level = should_invoke_judge(tc)
             if needs_judge:
@@ -1339,17 +1346,52 @@ async def _plan_command_async(
                     tc.execution.judge_evidence = judge_result.evidence
                     tc.execution.judge_confidence = judge_result.confidence
                     tc.execution.judge_reasoning = judge_result.reasoning
-                    _c = f" (confidence={judge_result.confidence:.2f})" if judge_result.confidence else ""
-                    typer.echo(f"  [🤖 Judge: {tc.id} → {judge_result.verdict.value}{_c}, category={judge_result.failure_category}]")
+                    judge_ran = True
                 except Exception as exc:
                     typer.echo(f"  [Judge error for {tc.id}: {exc}]")
+
+        # 5. Print final verdict with colors
+        verdict = tc.execution.verdict
+        status = tc.execution.status
+        if judge_ran:
+            _c = f" (confidence={tc.execution.judge_confidence:.2f})" if tc.execution.judge_confidence else ""
+            _cat = f", category={tc.execution.failure_category}" if tc.execution.failure_category and tc.execution.failure_category != "NONE" else ""
+            if verdict == ExecutionVerdict.PASS:
+                typer.echo(f"  \033[32m🤖 {tc.id} → PASS{_c}{_cat}\033[0m")
+            elif verdict == ExecutionVerdict.FAIL:
+                typer.echo(f"  \033[31m🤖 {tc.id} → FAIL{_c}{_cat}\033[0m")
+            elif verdict == ExecutionVerdict.NEED_REVIEW:
+                typer.echo(f"  \033[33m🤖 {tc.id} → NEED_REVIEW{_c}{_cat}\033[0m")
+            else:
+                typer.echo(f"  \033[33m🤖 {tc.id} → {getattr(verdict, 'value', verdict)}{_c}{_cat}\033[0m")
+        else:
+            # No judge ran, print step-level status
+            if verdict == ExecutionVerdict.PASS:
+                typer.echo(f"  \033[32m✅ {tc.id} → PASS\033[0m")
+            elif verdict == ExecutionVerdict.FAIL:
+                typer.echo(f"  \033[31m❌ {tc.id} → FAIL\033[0m")
+            elif status == ExecutionStatus.EXECUTED:
+                typer.echo(f"  \033[32m✅ {tc.id} → EXECUTED\033[0m")
+            elif status == ExecutionStatus.FAILED:
+                typer.echo(f"  \033[31m❌ {tc.id} → FAILED\033[0m")
+            else:
+                typer.echo(f"  \033[33m{tc.id} → {status.value}\033[0m")
+
+        # 6. Print token usage for this TC
+        token_tracker.print_tc_summary()
+
+    def _on_tc_start(tc):
+        """Set token tracker context before TC execution begins."""
+        token_tracker.set_current_tc(tc.id)
 
     engine = ExecutionEngine(
         config,
         llm_provider=llm_provider,
         app_skill_context=skill_full_content,
         toggle_groups=skill_toggle_groups,
+        on_tc_start=_on_tc_start,
         on_tc_complete=_on_tc_judged,
+        token_tracker=token_tracker,
     )
     executed_tcs = await engine.execute_all(test_cases)
     was_interrupted = engine._interrupted
@@ -1389,7 +1431,7 @@ async def _plan_command_async(
         for tc in failed_tcs:
             # Save first attempt data before clearing
             first_attempt = {
-                "verdict": tc.execution.verdict.value if tc.execution.verdict else "FAIL",
+                "verdict": tc.execution.verdict.value if hasattr(tc.execution.verdict, 'value') else str(tc.execution.verdict) if tc.execution.verdict else "FAIL",
                 "error_message": tc.execution.error_message or "",
                 "failed_step": tc.execution.failed_step,
                 "failure_type": tc.execution.failure_type.value if tc.execution.failure_type else None,
@@ -1407,12 +1449,44 @@ async def _plan_command_async(
 
         retried_tcs = await retry_engine.execute_all(failed_tcs)
 
-        # Re-evaluate retried cases
+        # Re-evaluate retried cases (step-level + judge)
         for tc in retried_tcs:
             evaluation = evaluator.evaluate(tc)
             tc.execution.verdict = evaluation.verdict
             tc.execution.confidence = evaluation.confidence
             tc.execution.reason = evaluation.reason
+
+            # CaseJudgeAgent for retried TCs
+            if judge is not None:
+                needs_judge, level = should_invoke_judge(tc)
+                if needs_judge:
+                    try:
+                        judge_result = await judge.evaluate(tc, level)
+                        tc.execution.verdict = judge_result.verdict
+                        tc.execution.confidence = judge_result.confidence
+                        tc.execution.reason = judge_result.reasoning or judge_result.failure_root_cause
+                        tc.execution.failure_category = judge_result.failure_category
+                        tc.execution.failure_root_cause = judge_result.failure_root_cause
+                        tc.execution.judge_evidence = judge_result.evidence
+                        tc.execution.judge_confidence = judge_result.confidence
+                        tc.execution.judge_reasoning = judge_result.reasoning
+                    except Exception as exc:
+                        typer.echo(f"  [Judge error for {tc.id}: {exc}]")
+
+            # Print verdict with color
+            verdict = tc.execution.verdict
+            if hasattr(verdict, 'value'):
+                verdict_str = verdict.value
+            else:
+                verdict_str = str(verdict) if verdict else "UNKNOWN"
+            if verdict == ExecutionVerdict.PASS:
+                typer.echo(f"  \033[32m🤖 {tc.id} → PASS (retry)\033[0m")
+            elif verdict == ExecutionVerdict.FAIL:
+                typer.echo(f"  \033[31m❌ {tc.id} → FAIL (retry)\033[0m")
+            elif verdict == ExecutionVerdict.NEED_REVIEW:
+                typer.echo(f"  \033[33m🤖 {tc.id} → NEED_REVIEW (retry)\033[0m")
+            else:
+                typer.echo(f"  {tc.id} → {verdict_str} (retry)")
 
         # Count results
         retry_passed = sum(1 for tc in retried_tcs if tc.execution.verdict == "PASS")
@@ -1434,6 +1508,15 @@ async def _plan_command_async(
     report_path = report_gen.generate(name, executed_tcs, overall, config)
 
     typer.echo(f"Report generated: {report_path}")
+
+    # ── Token usage summary and chart ──────────────────────────────────
+    try:
+        token_tracker.print_global_summary()
+        chart_path = token_tracker.generate_chart(output_dir)
+        if chart_path:
+            typer.echo(f"  Token chart: {chart_path}")
+    except Exception as exc:
+        typer.echo(f"  [Token chart generation failed: {exc}]")
 
     # ── Cleanup checkpoint only on successful (non-interrupted) completion ──
     if not was_interrupted:

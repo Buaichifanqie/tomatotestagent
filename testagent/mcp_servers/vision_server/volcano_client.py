@@ -91,12 +91,14 @@ class VolcanoVisionClient:
         model: str = DEFAULT_MODEL,
         timeout: int = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        token_tracker: Any = None,
     ) -> None:
         self._api_key = api_key
         self._api_url = api_url
         self._model = model
         self._timeout = timeout
         self._max_retries = max_retries
+        self._token_tracker = token_tracker
 
     @property
     def is_configured(self) -> bool:
@@ -166,6 +168,24 @@ class VolcanoVisionClient:
                     response.raise_for_status()
                     result = response.json()
                     content = result["choices"][0]["message"]["content"]
+
+                    # Record token usage and print immediately
+                    if self._token_tracker:
+                        usage = result.get("usage", {})
+                        if usage:
+                            pt = usage.get("prompt_tokens", 0)
+                            ct = usage.get("completion_tokens", 0)
+                            tt = usage.get("total_tokens", 0)
+                            self._token_tracker.record(
+                                category="vision",
+                                prompt_tokens=pt,
+                                completion_tokens=ct,
+                                total_tokens=tt,
+                            )
+                            if tt > 0:
+                                _detail = f"{pt}↑ {ct}↓ = {tt}" if pt and ct else str(tt)
+                                print(f"      \033[35m[Vision tokens] {_detail}\033[0m")
+
                     return {
                         "content": content,
                         "finish_reason": result["choices"][0].get("finish_reason", ""),

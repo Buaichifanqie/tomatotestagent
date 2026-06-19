@@ -58,9 +58,11 @@ class CaseJudgeAgent:
         self,
         output_dir: str = "",
         confidence_threshold: float = CONFIDENCE_THRESHOLD,
+        token_tracker: Any = None,
     ) -> None:
         self._output_dir = output_dir
         self._confidence_threshold = confidence_threshold
+        self._token_tracker = token_tracker
         self._api_key: str = ""
         self._api_url: str = _DEFAULT_API_URL
         self._model: str = _DEFAULT_MODEL
@@ -234,6 +236,22 @@ class CaseJudgeAgent:
                 ],
             )
 
+            # Record token usage and print immediately
+            if self._token_tracker and hasattr(response, "usage") and response.usage:
+                usage = response.usage
+                pt = getattr(usage, "input_tokens", 0) or 0
+                ct = getattr(usage, "output_tokens", 0) or 0
+                tt = getattr(usage, "total_tokens", 0) or 0
+                self._token_tracker.record(
+                    category="judge",
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    total_tokens=tt,
+                )
+                if tt > 0:
+                    _detail = f"{pt}↑ {ct}↓ = {tt}" if pt and ct else str(tt)
+                    print(f"      \033[33m[Judge tokens] {_detail}\033[0m")
+
             # Extract text from response
             if hasattr(response, "output") and response.output:
                 for item in response.output:
@@ -389,29 +407,17 @@ class CaseJudgeAgent:
 def should_invoke_judge(tc: TestCase) -> tuple[bool, str]:
     """Determine if a test case needs CaseJudgeAgent evaluation.
 
+    All executed TCs are judged (no exceptions). Only ABORTED TCs are skipped.
+
     Returns (should_invoke, level) where level is "light" or "deep".
-    Trigger logic is based entirely on execution results, not case attributes.
     """
-    # Layer 1: Clear failure → don't invoke
-    if tc.execution.status == ExecutionStatus.FAILED:
+    # Only skip ABORTED TCs (they never ran, nothing to judge)
+    if tc.execution.status == ExecutionStatus.ABORTED:
         return False, ""
 
-    # Layer 1: All steps passed + no warning + low priority → don't invoke
-    if (tc.execution.status == ExecutionStatus.EXECUTED
-            and not tc.execution.assert_warnings
-            and tc.priority not in ("P0", "P1")):
-        return False, ""
-
-    # Layer 3: Had retries → deep judgment
+    # Had retries → deep judgment (more complex analysis needed)
     if tc.execution.retries > 0:
         return True, "deep"
 
-    # Layer 2: Has assert_warnings → light judgment
-    if tc.execution.assert_warnings:
-        return True, "light"
-
-    # Layer 2: P0/P1 case + all steps passed → light judgment
-    if tc.priority in ("P0", "P1"):
-        return True, "light"
-
-    return False, ""
+    # Everything else → light judgment
+    return True, "light"
