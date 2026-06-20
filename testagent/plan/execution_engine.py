@@ -1020,6 +1020,16 @@ class ExecutionEngine:
                     # ── Pause between TCs for visual pacing ───────────────────────
                     await asyncio.sleep(2)
 
+                except Exception as exc:
+                    # ── Catch unexpected TC errors so the plan doesn't crash ──
+                    err_msg = str(exc) or "Unhandled exception (empty error)"
+                    self._log(f"  [TC {tc.id} crashed: {err_msg}]")
+                    if tc.execution.status in (None, ExecutionStatus.RUNNING):
+                        tc.execution.status = ExecutionStatus.FAILED
+                        tc.execution.error_message = err_msg
+                    self._consecutive_blocked += 1
+                    current_app_state = set()
+
                 finally:
                     # ── Checkpoint callback (fires for every TC, including aborted) ──
                     if self._on_tc_complete is not None:
@@ -1085,17 +1095,10 @@ class ExecutionEngine:
         # ── Execute steps with screen recording ───────────────────────
         # Recording starts right after DB setup (before any step execution)
         # and stops after the last step + 3s buffer. Captures the full TC flow.
+        # Uses ADB direct mode with 180s segments — no ffmpeg concat needed.
         from testagent.plan.segmented_recorder import SegmentedRecorder
 
         _recorder = SegmentedRecorder(
-            start_fn=lambda: app_start_recording(
-                appium_url=self.session_manager.appium_url,
-                session_id=self.session_manager.session_id,
-            ),
-            stop_fn=lambda: app_stop_recording(
-                appium_url=self.session_manager.appium_url,
-                session_id=self.session_manager.session_id,
-            ),
             output_dir=self.config.output_dir,
             tc_id=tc.id,
         )
@@ -1108,11 +1111,54 @@ class ExecutionEngine:
                     return
 
                 await self._handle_popups(tc)
+
+                # ── Screenshot BEFORE step (captures UI state before action) ──
+                try:
+                    scr_result = await app_screenshot(
+                        appium_url=self.session_manager.appium_url,
+                        session_id=self.session_manager.session_id,
+                    )
+                    scr_id = scr_result.get("screenshot_id", "")
+                    if scr_id:
+                        from testagent.mcp_servers.shared_cache import get_screenshot
+                        b64_data = get_screenshot(scr_id)
+                        if b64_data:
+                            scr_rel = f"screenshots/{tc.id}/{step.step:03d}_before.png"
+                            scr_full = Path(self.config.output_dir) / scr_rel
+                            scr_full.parent.mkdir(parents=True, exist_ok=True)
+                            scr_full.write_bytes(base64.b64decode(b64_data))
+                            tc.execution.evidence.append(
+                                EvidenceItem(type="screenshot", path=scr_rel)
+                            )
+                except Exception as exc:
+                    self._log(f"  [Before screenshot error (non-fatal): {exc}]")
+
                 step_exec = await self._execute_step_async(tc, step)
                 tc.execution.steps.append(step_exec)
 
                 # Check if we need to split the recording (180s limit)
                 await _recorder.check_and_split()
+
+                # ── Screenshot AFTER step (captures UI state after action) ──
+                try:
+                    scr_result = await app_screenshot(
+                        appium_url=self.session_manager.appium_url,
+                        session_id=self.session_manager.session_id,
+                    )
+                    scr_id = scr_result.get("screenshot_id", "")
+                    if scr_id:
+                        from testagent.mcp_servers.shared_cache import get_screenshot
+                        b64_data = get_screenshot(scr_id)
+                        if b64_data:
+                            scr_rel = f"screenshots/{tc.id}/{step.step:03d}_after.png"
+                            scr_full = Path(self.config.output_dir) / scr_rel
+                            scr_full.parent.mkdir(parents=True, exist_ok=True)
+                            scr_full.write_bytes(base64.b64decode(b64_data))
+                            tc.execution.evidence.append(
+                                EvidenceItem(type="screenshot", path=scr_rel)
+                            )
+                except Exception as exc:
+                    self._log(f"  [After screenshot error (non-fatal): {exc}]")
 
                 # Track assert warnings from step results
                 if step_exec.warning:
@@ -1144,15 +1190,40 @@ class ExecutionEngine:
             # ── Stop recording and concatenate segments ─────────────
             # Wait 3s to capture final UI state before stopping
             await asyncio.sleep(3)
+
+            # Take a final screenshot as evidence for Judge fallback
+            try:
+                scr_result = await app_screenshot(
+                    appium_url=self.session_manager.appium_url,
+                    session_id=self.session_manager.session_id,
+                )
+                scr_id = scr_result.get("screenshot_id", "")
+                if scr_id:
+                    from testagent.mcp_servers.shared_cache import get_screenshot
+                    b64_data = get_screenshot(scr_id)
+                    if b64_data:
+                        scr_rel = f"screenshots/{tc.id}/final.png"
+                        scr_full = Path(self.config.output_dir) / scr_rel
+                        scr_full.parent.mkdir(parents=True, exist_ok=True)
+                        scr_full.write_bytes(base64.b64decode(b64_data))
+                        tc.execution.evidence.append(
+                            EvidenceItem(type="screenshot", path=scr_rel)
+                        )
+            except Exception as exc:
+                self._log(f"  [Final screenshot error (non-fatal): {exc}]")
+
             if _recorder is not None:
                 await _recorder.stop()
-                final_path = await _recorder.concat()
-                if final_path:
-                    from testagent.plan.models import EvidenceItem
+                for seg_path in _recorder.get_segments():
+                    seg_rel = f"recordings/{tc.id}/{Path(seg_path).name}"
                     tc.execution.evidence.append(
-                        EvidenceItem(type="recording", path=final_path)
+                        EvidenceItem(type="recording", path=seg_rel)
                     )
-                    self._log(f"  [Recording saved: {Path(final_path).name}]")
+                    self._log(f"  [Recording saved: {seg_rel}]")
+            # Log screenshot count for visibility
+            scr_count = sum(1 for ev in tc.execution.evidence if ev.type == "screenshot")
+            if scr_count:
+                self._log(f"  [Screenshots: {scr_count} captured]")
 
         # ── Phase C: Execute cross-source assertions ──────────────────
         if tc.assertions and self._rule_engine is not None:
@@ -1683,11 +1754,12 @@ class ExecutionEngine:
                                 from testagent.mcp_servers.shared_cache import get_screenshot as _gs
                                 _b64 = _gs(_scr_id)
                                 if _b64:
-                                    _scr_dir = Path(self.config.output_dir) / "screenshots"
-                                    _scr_dir.mkdir(parents=True, exist_ok=True)
-                                    _warning_scr_path = _scr_dir / f"{tc.id}_step{step.step}_warning.png"
-                                    _warning_scr_path.write_bytes(base64.b64decode(_b64))
-                                    result["_warning_screenshot"] = str(_warning_scr_path)
+                                    _scr_rel = f"screenshots/{tc.id}/{step.step:03d}_warning.png"
+                                    _scr_full = Path(self.config.output_dir) / _scr_rel
+                                    _scr_full.parent.mkdir(parents=True, exist_ok=True)
+                                    _scr_full.write_bytes(base64.b64decode(_b64))
+                                    result["_warning_screenshot"] = str(_scr_full)
+                                    result["_warning_screenshot_rel"] = _scr_rel
                     except Exception:
                         pass
                     result = {"passed": True, "warning": _reason, "_warning_screenshot": result.get("_warning_screenshot", "")}
@@ -1729,6 +1801,7 @@ class ExecutionEngine:
         if isinstance(result, dict) and "warning" in result:
             _warning = str(result["warning"])
             _warning_scr = str(result.get("_warning_screenshot", ""))
+            _warning_scr_rel = str(result.get("_warning_screenshot_rel", "")) or _warning_scr
         step_exec = StepExecution(
             step=step.step,
             action=step.action,
@@ -1743,7 +1816,7 @@ class ExecutionEngine:
         if _warning_scr:
             step_exec.screenshot_after = _warning_scr
             tc.execution.evidence.append(
-                EvidenceItem(type="screenshot", path=_warning_scr)
+                EvidenceItem(type="screenshot", path=_warning_scr_rel)
             )
 
         # Push successful action to context stack for cache key generation
@@ -1768,13 +1841,13 @@ class ExecutionEngine:
 
                     b64_data = get_screenshot(scr_id)
                     if b64_data:
-                        scr_dir = Path(self.config.output_dir) / "screenshots"
-                        scr_dir.mkdir(parents=True, exist_ok=True)
-                        scr_path = scr_dir / f"{tc.id}_step{step.step}.png"
-                        scr_path.write_bytes(base64.b64decode(b64_data))
-                        step_exec.screenshot_after = str(scr_path)
+                        scr_rel = f"screenshots/{tc.id}/{step.step:03d}_failure.png"
+                        scr_full = Path(self.config.output_dir) / scr_rel
+                        scr_full.parent.mkdir(parents=True, exist_ok=True)
+                        scr_full.write_bytes(base64.b64decode(b64_data))
+                        step_exec.screenshot_after = str(scr_full)
                         tc.execution.evidence.append(
-                            EvidenceItem(type="screenshot", path=str(scr_path))
+                            EvidenceItem(type="screenshot", path=scr_rel)
                         )
                     else:
                         self._log(f"  [Screenshot data empty for {tc.id} step {step.step}]")
@@ -2000,38 +2073,36 @@ class ExecutionEngine:
         return False
 
     async def _check_logged_in(self) -> bool:
-        """Use vision to check if the user is currently logged in."""
-        client = self._init_vision_client()
-        if not client:
-            return False
-
-        scr_result = await app_screenshot(
-            appium_url=self.session_manager.appium_url,
-            session_id=self.session_manager.session_id,
-        )
-        screenshot_id = scr_result.get("screenshot_id", "")
-        if not screenshot_id:
-            return False
-
-        from testagent.mcp_servers.shared_cache import get_screenshot
-        b64 = get_screenshot(screenshot_id)
-        if not b64:
-            return False
-
-        dw, dh = await self._get_screen_size()
-        prompt = (
-            "请判断当前屏幕是否显示用户已登录状态。\n"
-            "已登录的标志：页面中可见用户头像、昵称、个人信息，或显示\"我的\"页面内容（非登录按钮）。\n"
-            "未登录的标志：显示\"登录\"按钮、\"注册\"按钮、或空白的个人页面。\n\n"
-            '用以下 JSON 格式回复（只输出 JSON）：{{"logged_in": true/false, "reason": "一句话依据"}}'
-        )
-
+        """Check if the user is currently logged in via page source (no Vision API)."""
         try:
-            result = await client.analyze(b64, prompt, device_width=dw, device_height=dh)
-        except Exception:
-            return False
+            src_result = await app_get_source(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+                timeout=10,
+            )
+            source = src_result.get("source", "")
+            if not source:
+                return False
 
-        content = result.get("content", "")
+            # If we see a "登录" or "注册" button in the page source,
+            # the user is NOT logged in.
+            import re as _re
+            texts = _re.findall(r'text="([^"]{1,20})"', source)
+            login_keywords = {"登录", "注册", "sign in", "sign up", "signin", "signup"}
+            for t in texts:
+                if any(kw in t.lower() for kw in login_keywords):
+                    # Found a login/register button — not logged in
+                    return False
+
+            # If the page has logged-in indicators, assume logged in.
+            # App launches to home page, and most users are logged in.
+            # The absence of "登录" button = logged in.
+            self._log("  [Login check: no login button found, assuming logged in]")
+            return True
+
+        except Exception as exc:
+            self._log(f"  [Login check failed: {exc}, assuming NOT logged in]")
+            return False
         try:
             import json as _json
             start = content.find("{")
@@ -2312,18 +2383,18 @@ class ExecutionEngine:
                 self._log(f"  [Recording stop for {tc_id}: {err[:80]}]")
                 return
 
-            video_dir = Path(self.config.output_dir) / "recordings"
-            video_dir.mkdir(parents=True, exist_ok=True)
-            video_path = video_dir / f"{tc_id}.mp4"
-            video_path.write_bytes(base64.b64decode(video_b64))
+            video_rel = f"recordings/{tc_id}/seg001.mp4"
+            video_full = Path(self.config.output_dir) / video_rel
+            video_full.parent.mkdir(parents=True, exist_ok=True)
+            video_full.write_bytes(base64.b64decode(video_b64))
 
             # Add as evidence
             if tc is not None:
                 tc.execution.evidence.append(
-                    EvidenceItem(type="recording", path=str(video_path))
+                    EvidenceItem(type="recording", path=video_rel)
                 )
 
-            self._log(f"[Recording saved: {video_path.name}]")
+            self._log(f"[Recording saved: {video_rel}]")
         except Exception as exc:
             self._log(f"  [Recording save error for {tc_id}: {exc}]")
 

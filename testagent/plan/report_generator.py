@@ -39,12 +39,17 @@ class ReportGenerator:
         config: PlanConfig,
         cache_stats: CacheStats | None = None,
     ) -> str:
-        """Build the report, write to {output_dir}/plan-report.md, return path."""
+        """Build report, write to {output_dir}/plan-report.md and .html, return md path."""
         self._output_dir.mkdir(parents=True, exist_ok=True)
         report = self._build_report(plan_name, test_cases, overall, config, cache_stats)
-        path = self._output_dir / "plan-report.md"
-        path.write_text(report, encoding="utf-8")
-        return str(path)
+        md_path = self._output_dir / "plan-report.md"
+        md_path.write_text(report, encoding="utf-8")
+
+        # Also generate HTML version
+        html_path = self._output_dir / "plan-report.html"
+        html_path.write_text(self._md_to_html(report), encoding="utf-8")
+
+        return str(md_path)
 
     # ── report assembly ─────────────────────────────────────────────────────
 
@@ -165,16 +170,18 @@ class ReportGenerator:
                 lines.append("")
                 for ev in tc.execution.evidence:
                     ev_path = Path(ev.path)
+                    # Path may be relative (from evidence) or absolute (legacy)
+                    if ev_path.is_absolute():
+                        try:
+                            rel = ev_path.relative_to(self._output_dir).as_posix()
+                        except ValueError:
+                            rel = ev_path.name
+                    else:
+                        rel = ev_path.as_posix()
                     if ev.type == "recording":
-                        rel = ev_path.relative_to(self._output_dir)
-                        lines.append(
-                            f"- 🎬 [录屏回放]({rel.as_posix()})"
-                        )
-                    elif ev.type == "screenshot" and ev_path.exists():
-                        rel = ev_path.relative_to(self._output_dir)
-                        lines.append(
-                            f"- 🖼️ <img src=\"{rel.as_posix()}\" width=\"360\">"
-                        )
+                        lines.append(f"- 🎬 [录屏回放]({rel})")
+                    elif ev.type == "screenshot" and Path(self._output_dir, ev.path).exists():
+                        lines.append(f"- 🖼️ <img src=\"{rel}\" width=\"360\">")
                 lines.append("")
 
             steps = tc.execution.steps
@@ -208,13 +215,16 @@ class ReportGenerator:
                     # Screenshot for failed steps and warning steps
                     if (not s.success or s.warning) and s.screenshot_after:
                         scr_path = Path(s.screenshot_after)
-                        try:
-                            rel = scr_path.relative_to(self._output_dir)
-                            lines.append("")
-                            lines.append(f'  <img src="{rel.as_posix()}" width="360" alt="失败截图">')
-                            lines.append("")
-                        except ValueError:
-                            pass
+                        if scr_path.is_absolute():
+                            try:
+                                rel = scr_path.relative_to(self._output_dir).as_posix()
+                            except ValueError:
+                                rel = scr_path.name
+                        else:
+                            rel = scr_path.as_posix()
+                        lines.append("")
+                        lines.append(f'  <img src="{rel}" width="360" alt="失败截图">')
+                        lines.append("")
                     # Vision analysis for failed steps and warning steps
                     if (not s.success or s.warning) and s.vision_analysis:
                         lines.append("")
@@ -275,3 +285,112 @@ class ReportGenerator:
             ExecutionVerdict.PARTIAL: "⚠️ PARTIAL",
         }
         return mapping[verdict]
+
+    @staticmethod
+    def _md_to_html(md: str) -> str:
+        """Convert markdown to a self-contained styled HTML page.
+
+        Handles the patterns used in plan-report.md without external deps.
+        """
+        import html as _html
+        import re
+        lines = md.split("\n")
+        html_lines: list[str] = []
+        in_code = False
+        code_buf: list[str] = []
+        in_table = False
+        table_buf: list[str] = []
+
+        def flush_table():
+            nonlocal table_buf, in_table
+            if not table_buf:
+                return
+            html_lines.append('<table class="data-table">')
+            for i, row in enumerate(table_buf):
+                tag = "th" if i == 0 else "td"
+                cells = [c.strip() for c in row.split("|")[1:-1]]
+                escaped = [_html.escape(c) for c in cells]
+                sep = f"</{tag}><{tag}>"
+                html_lines.append(f"<tr><{tag}>{sep.join(escaped)}</{tag}></tr>")
+            html_lines.append("</table>")
+            table_buf = []
+            in_table = False
+
+        for line in lines:
+            if line.startswith("```"):
+                if in_code:
+                    html_lines.append(f"<pre><code>{_html.escape(chr(10).join(code_buf))}</code></pre>")
+                    code_buf = []
+                    in_code = False
+                else:
+                    flush_table()
+                    in_code = True
+                continue
+            if in_code:
+                code_buf.append(line)
+                continue
+
+            flush_table()
+
+            if not line.strip():
+                html_lines.append("<br>")
+                continue
+
+            if line.startswith("|") and line.endswith("|"):
+                if "---" in line:
+                    continue
+                in_table = True
+                table_buf.append(line)
+                continue
+
+            if line.startswith("# "):
+                html_lines.append(f"<h1>{_html.escape(line[2:])}</h1>")
+            elif line.startswith("## "):
+                html_lines.append(f"<h2>{_html.escape(line[3:])}</h2>")
+            elif line.startswith("### "):
+                html_lines.append(f"<h3>{_html.escape(line[4:])}</h3>")
+            elif line.startswith("#### "):
+                html_lines.append(f"<h4>{_html.escape(line[5:])}</h4>")
+            else:
+                text = _html.escape(line)
+                text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+                text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+                text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+                text = re.sub(r'!\[(.*?)\]\((.+?)\)', r'<img src="\2" alt="\1" style="max-width:360px">', text)
+                text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', text)
+                if text.strip().startswith("- ") or text.strip().startswith("* "):
+                    html_lines.append(f"<li>{text.strip()[2:]}</li>")
+                else:
+                    html_lines.append(f"<p>{text}</p>")
+
+        flush_table()
+
+        body = "\n".join(html_lines)
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TestAgent Report</title>
+<style>
+  body {{ font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+         max-width: 960px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #333; }}
+  h1, h2, h3 {{ color: #1a1a2e; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }}
+  table.data-table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
+  table.data-table th {{ background: #4a6fa5; color: #fff; padding: 8px 12px; text-align: left; }}
+  table.data-table td {{ padding: 8px 12px; border: 1px solid #ddd; }}
+  table.data-table tr:nth-child(even) {{ background: #f2f2f2; }}
+  img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; margin: 8px 0; }}
+  pre {{ background: #1e1e2e; color: #cdd6f4; padding: 14px; border-radius: 6px; overflow-x: auto; }}
+  code {{ background: #e8e8e8; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
+  pre code {{ background: none; padding: 0; }}
+  a {{ color: #4a6fa5; }}
+  li {{ margin: 4px 0; }}
+  p {{ line-height: 1.7; }}
+  br {{ display: block; margin: 4px 0; content: ""; }}
+</style>
+</head>
+<body>
+{body}
+</body>
+</html>"""

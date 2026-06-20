@@ -128,45 +128,51 @@ class CaseJudgeAgent:
                 reasoning="No vision API config available for CaseJudgeAgent",
             )
 
-        # Find the recording video
-        recording_path = self._find_recording(tc)
-        if not recording_path or not Path(recording_path).exists():
-            _logger.warning("CaseJudgeAgent: no recording found for %s", tc.id)
+        # Find recording videos (supporting multiple 180s segments)
+        recording_paths = self._find_recordings(tc)
+
+        # Build prompt with segment info if multiple recordings
+        frames_desc = self._build_frames_description(recording_paths)
+        prompt = self._build_prompt(tc, frames_desc)
+
+        if recording_paths:
+            fps = self._fps if level == "light" else min(self._fps * 2, 3.0)
+            raw = await self._call_vision_api_sdk(recording_paths, prompt, fps)
+            if not raw:
+                _logger.info("CaseJudgeAgent: SDK failed, falling back to httpx + base64")
+                raw = await self._call_vision_api_httpx(recording_paths, prompt, fps)
+
+        if not raw:
+            # Both video paths failed → try screenshots as last resort
+            if recording_paths:
+                _logger.warning(
+                    "CaseJudgeAgent: video upload failed for %s, trying screenshots",
+                    tc.id,
+                )
+            else:
+                _logger.warning("CaseJudgeAgent: no recording for %s, using screenshots", tc.id)
+            screenshots = self._find_screenshots(tc)
+            raw = await self._call_vision_api_screenshots(screenshots, prompt)
+
+        if not raw:
             return CaseJudgeResult(
                 verdict=ExecutionVerdict.NEED_REVIEW,
                 confidence=0.0,
                 failure_category="NONE",
                 failure_root_cause="",
-                reasoning="No recording file found",
-            )
-
-        # Build prompt
-        prompt = self._build_prompt(tc)
-
-        # Set fps based on level
-        fps = self._fps if level == "light" else min(self._fps * 2, 3.0)
-
-        # Call vision API with video (SDK preferred, httpx fallback)
-        raw = await self._call_vision_api_sdk(recording_path, prompt, fps)
-        if not raw:
-            _logger.info("CaseJudgeAgent: SDK failed, falling back to httpx + base64")
-            raw = await self._call_vision_api_httpx(recording_path, prompt, fps)
-        if not raw:
-            return CaseJudgeResult(
-                verdict=ExecutionVerdict.NEED_REVIEW,
-                confidence=0.0,
-                failure_category="NONE",
-                failure_root_cause="",
-                reasoning="Vision API call failed",
+                reasoning="Vision API call failed (no recording or screenshots)",
             )
 
         # Parse response
         return self._parse_response(raw, tc)
 
-    def _build_prompt(self, tc: TestCase) -> str:
+    def _build_prompt(self, tc: TestCase, frames_description: str = "") -> str:
         """Build the judge prompt from test case data."""
         log_digest = generate_log_digest(tc)
         steps_desc = generate_steps_description(tc)
+
+        if not frames_description:
+            frames_description = "(已通过视频传入，请直接分析视频内容)"
 
         return _JUDGE_PROMPT_TEMPLATE.format(
             tc_id=tc.id,
@@ -174,20 +180,135 @@ class CaseJudgeAgent:
             tc_priority=tc.priority,
             tc_steps=steps_desc,
             log_digest=log_digest,
-            frames_description="(已通过视频传入，请直接分析视频内容)",
+            frames_description=frames_description,
         )
 
-    def _find_recording(self, tc: TestCase) -> str | None:
-        """Find the recording file path from test case evidence."""
+    def _build_frames_description(self, recording_paths: list[str]) -> str:
+        """Build description of video frames for the prompt.
+
+        When multiple segments exist (180s split), tell the model the order
+        and that they form a continuous recording.
+        """
+        n = len(recording_paths)
+        if n == 0:
+            return "(已通过截图传入，请分析截图内容)"
+        elif n == 1:
+            return "(已通过视频传入，请直接分析视频内容)"
+        else:
+            return (
+                f"(已通过 {n} 段视频传入，按录制时间依次排列：第 1 段为测试开始部分，第 {n} 段为测试结束状态。"
+                f"各段视频连续录制、前后衔接，请按顺序综合分析整个过程)"
+            )
+
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve an evidence path (relative or absolute) to an absolute Path.
+
+        Evidence paths are stored relative to ``_output_dir`` for portability.
+        If the path is already absolute, return it as-is.
+        """
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        return Path(self._output_dir) / p
+
+    def _find_recordings(self, tc: TestCase) -> list[str]:
+        """Find all recording file paths from test case evidence.
+
+        Supports multiple 180s segments — all are returned and sent to the Judge.
+        Paths are resolved from relative → absolute via ``_resolve_path``.
+        """
+        paths = []
         for evidence in tc.execution.evidence:
             if evidence.type == "recording":
-                return evidence.path
-        return None
+                resolved = self._resolve_path(evidence.path)
+                if resolved.exists():
+                    paths.append(str(resolved))
+        return paths
+
+    def _find_screenshots(self, tc: TestCase) -> list[str]:
+        """Find screenshot file paths from test case evidence (fallback when no recording)."""
+        screenshots = []
+        for evidence in tc.execution.evidence:
+            if evidence.type == "screenshot":
+                resolved = self._resolve_path(evidence.path)
+                if resolved.exists():
+                    screenshots.append(str(resolved))
+        return screenshots
+
+    async def _call_vision_api_screenshots(
+        self, screenshot_paths: list[str], prompt: str
+    ) -> str | None:
+        """Send screenshots to vision API instead of video (fallback for emulator).
+
+        Samples up to 8 screenshots evenly across the test flow so the model
+        sees key moments from the entire execution, not just the end.
+        """
+        if not screenshot_paths:
+            _logger.warning("CaseJudgeAgent: no screenshots available either")
+            return None
+
+        import base64
+        try:
+            # Sample screenshots evenly across the test (not just the last N)
+            total = len(screenshot_paths)
+            _logger.info("CaseJudgeAgent: %d screenshots available, sampling for judge", total)
+            MAX_SCREENSHOTS = 8
+            if total <= MAX_SCREENSHOTS:
+                sampled = screenshot_paths
+            else:
+                # Take first, last, and evenly spaced in between
+                step = (total - 1) / (MAX_SCREENSHOTS - 1)
+                indices = [int(round(i * step)) for i in range(MAX_SCREENSHOTS)]
+                sampled = [screenshot_paths[i] for i in indices]
+                _logger.info(
+                    "CaseJudgeAgent: sampling %d/%d screenshots (indices: %s)",
+                    MAX_SCREENSHOTS, total, indices,
+                )
+
+            images = []
+            for path in sampled:
+                b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+                images.append(b64)
+
+            content_parts = []
+            for b64 in images:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                })
+            content_parts.append({"type": "text", "text": prompt})
+
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self._model,
+                "messages": [{"role": "user", "content": content_parts}],
+                "temperature": 0.1,
+                "max_tokens": 2048,
+            }
+            endpoint = self._api_url.rstrip("/") + "/chat/completions"
+
+            import httpx
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout)) as client:
+                response = await client.post(endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            _logger.error("CaseJudgeAgent: screenshot fallback failed: %s", e)
+            return None
 
     async def _call_vision_api_sdk(
-        self, video_path: str, prompt: str, fps: float
+        self, video_paths: list[str], prompt: str, fps: float
     ) -> str | None:
-        """Upload video via Files API and analyze via Responses API."""
+        """Upload videos via Files API and analyze via Responses API.
+
+        Supports multiple video files (for 180s segments) — uploads all of
+        them and sends all file_ids in one API call so the model sees the
+        full test flow.
+        """
         try:
             from volcenginesdkarkruntime import Ark
 
@@ -196,42 +317,41 @@ class CaseJudgeAgent:
                 api_key=self._api_key,
             )
 
-            # Step 1: Upload video via Files API
-            _logger.info("CaseJudgeAgent: uploading video %s (fps=%.1f)", video_path, fps)
-            with open(video_path, "rb") as f:
-                file_obj = client.files.create(
-                    file=f,
-                    purpose="user_data",
-                    preprocess_configs={
-                        "video": {
-                            "fps": fps,
-                        }
-                    },
-                )
+            # Step 1: Upload ALL video segments via Files API
+            file_ids: list[str] = []
+            for vp in video_paths:
+                _logger.info("CaseJudgeAgent: uploading video %s (fps=%.1f)", vp, fps)
+                with open(vp, "rb") as f:
+                    file_obj = client.files.create(
+                        file=f,
+                        purpose="user_data",
+                        preprocess_configs={
+                            "video": {
+                                "fps": fps,
+                                "min_resolution_height": 720,
+                                "compress_fps": 1.0,
+                            }
+                        },
+                    )
+                file_id = file_obj.id
+                _logger.info("CaseJudgeAgent: uploaded, file_id=%s", file_id)
+                client.files.wait_for_processing(file_id)
+                _logger.info("CaseJudgeAgent: file %s processed", file_id)
+                file_ids.append(file_id)
 
-            file_id = file_obj.id
-            _logger.info("CaseJudgeAgent: uploaded, file_id=%s", file_id)
+            # Step 2: Build content array with all videos + prompt
+            content: list[dict] = []
+            for fid in file_ids:
+                content.append({"type": "input_video", "file_id": fid})
+            content.append({"type": "input_text", "text": prompt})
 
-            # Step 2: Wait for processing
-            client.files.wait_for_processing(file_id)
-            _logger.info("CaseJudgeAgent: file processed")
-
-            # Step 3: Call Responses API with video
+            # Step 3: Call Responses API with all videos
             response = client.responses.create(
                 model=self._model,
                 input=[
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "input_video",
-                                "file_id": file_id,
-                            },
-                            {
-                                "type": "input_text",
-                                "text": prompt,
-                            },
-                        ],
+                        "content": content,
                     }
                 ],
             )
@@ -271,13 +391,20 @@ class CaseJudgeAgent:
             return None
 
     async def _call_vision_api_httpx(
-        self, video_path: str, prompt: str, fps: float
+        self, video_paths: list[str], prompt: str, fps: float
     ) -> str | None:
-        """Fallback: call vision API via httpx + base64 when SDK is unavailable."""
-        import base64
+        """Fallback: call vision API via httpx + base64 when SDK is unavailable.
 
+        Only sends the LAST video segment (most recent, shows final test state)
+        since httpx inline base64 is limited in payload size.
+        """
+        import base64
+        import httpx
+
+        # Use the last (most recent) segment — it shows the most relevant state
+        vp = video_paths[-1]
         try:
-            video_b64 = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
+            video_b64 = base64.b64encode(Path(vp).read_bytes()).decode("ascii")
         except Exception as e:
             _logger.error("CaseJudgeAgent: failed to read video for httpx fallback: %s", e)
             return None

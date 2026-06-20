@@ -1319,66 +1319,77 @@ async def _plan_command_async(
     async def _on_tc_judged(tc):
         """Evaluate and judge a TC immediately after execution."""
         # 1. Save checkpoint
-        ckpt.save(name, config, test_cases)
+        try:
+            ckpt.save(name, config, test_cases)
+        except Exception as exc:
+            typer.echo(f"  [Checkpoint save error: {exc}]")
 
         # 2. Skip evaluation for aborted TCs
         if tc.execution.status == ExecutionStatus.ABORTED:
             return
 
-        # 3. PerTCEvaluator step-level evaluation
-        evaluation = evaluator.evaluate(tc)
-        tc.execution.verdict = evaluation.verdict
-        tc.execution.confidence = evaluation.confidence
-        tc.execution.reason = evaluation.reason
+        # 3-6. Full evaluation (wrapped in try/except to prevent crash from empty errors)
+        try:
+            # 3. PerTCEvaluator step-level evaluation
+            evaluation = evaluator.evaluate(tc)
+            tc.execution.verdict = evaluation.verdict
+            tc.execution.confidence = evaluation.confidence
+            tc.execution.reason = evaluation.reason
 
-        # 4. CaseJudgeAgent semantic evaluation (immediately, per-TC)
-        judge_ran = False
-        if judge is not None:
-            needs_judge, level = should_invoke_judge(tc)
-            if needs_judge:
-                try:
-                    judge_result = await judge.evaluate(tc, level)
-                    tc.execution.verdict = judge_result.verdict
-                    tc.execution.confidence = judge_result.confidence
-                    tc.execution.reason = judge_result.reasoning or judge_result.failure_root_cause
-                    tc.execution.failure_category = judge_result.failure_category
-                    tc.execution.failure_root_cause = judge_result.failure_root_cause
-                    tc.execution.judge_evidence = judge_result.evidence
-                    tc.execution.judge_confidence = judge_result.confidence
-                    tc.execution.judge_reasoning = judge_result.reasoning
-                    judge_ran = True
-                except Exception as exc:
-                    typer.echo(f"  [Judge error for {tc.id}: {exc}]")
+            # 4. CaseJudgeAgent semantic evaluation (immediately, per-TC)
+            judge_ran = False
+            if judge is not None:
+                needs_judge, level = should_invoke_judge(tc)
+                if needs_judge:
+                    try:
+                        judge_result = await judge.evaluate(tc, level)
+                        tc.execution.verdict = judge_result.verdict
+                        tc.execution.confidence = judge_result.confidence
+                        tc.execution.reason = judge_result.reasoning or judge_result.failure_root_cause
+                        tc.execution.failure_category = judge_result.failure_category
+                        tc.execution.failure_root_cause = judge_result.failure_root_cause
+                        tc.execution.judge_evidence = judge_result.evidence
+                        tc.execution.judge_confidence = judge_result.confidence
+                        tc.execution.judge_reasoning = judge_result.reasoning
+                        judge_ran = True
+                    except Exception as exc:
+                        typer.echo(f"  [Judge error for {tc.id}: {exc}]")
 
-        # 5. Print final verdict with colors
-        verdict = tc.execution.verdict
-        status = tc.execution.status
-        if judge_ran:
-            _c = f" (confidence={tc.execution.judge_confidence:.2f})" if tc.execution.judge_confidence else ""
-            _cat = f", category={tc.execution.failure_category}" if tc.execution.failure_category and tc.execution.failure_category != "NONE" else ""
-            if verdict == ExecutionVerdict.PASS:
-                typer.echo(f"  \033[32m🤖 {tc.id} → PASS{_c}{_cat}\033[0m")
-            elif verdict == ExecutionVerdict.FAIL:
-                typer.echo(f"  \033[31m🤖 {tc.id} → FAIL{_c}{_cat}\033[0m")
-            elif verdict == ExecutionVerdict.NEED_REVIEW:
-                typer.echo(f"  \033[33m🤖 {tc.id} → NEED_REVIEW{_c}{_cat}\033[0m")
+            # 5. Print final verdict with colors
+            verdict = tc.execution.verdict
+            status = tc.execution.status
+            if judge_ran:
+                _c = f" (confidence={tc.execution.judge_confidence:.2f})" if tc.execution.judge_confidence else ""
+                _cat = f", category={tc.execution.failure_category}" if tc.execution.failure_category and tc.execution.failure_category != "NONE" else ""
+                if verdict == ExecutionVerdict.PASS:
+                    typer.echo(f"  \033[32m🤖 {tc.id} → PASS{_c}{_cat}\033[0m")
+                elif verdict == ExecutionVerdict.FAIL:
+                    typer.echo(f"  \033[31m🤖 {tc.id} → FAIL{_c}{_cat}\033[0m")
+                elif verdict == ExecutionVerdict.NEED_REVIEW:
+                    typer.echo(f"  \033[33m🤖 {tc.id} → NEED_REVIEW{_c}{_cat}\033[0m")
+                else:
+                    typer.echo(f"  \033[33m🤖 {tc.id} → {getattr(verdict, 'value', verdict)}{_c}{_cat}\033[0m")
             else:
-                typer.echo(f"  \033[33m🤖 {tc.id} → {getattr(verdict, 'value', verdict)}{_c}{_cat}\033[0m")
-        else:
-            # No judge ran, print step-level status
-            if verdict == ExecutionVerdict.PASS:
-                typer.echo(f"  \033[32m✅ {tc.id} → PASS\033[0m")
-            elif verdict == ExecutionVerdict.FAIL:
-                typer.echo(f"  \033[31m❌ {tc.id} → FAIL\033[0m")
-            elif status == ExecutionStatus.EXECUTED:
-                typer.echo(f"  \033[32m✅ {tc.id} → EXECUTED\033[0m")
-            elif status == ExecutionStatus.FAILED:
-                typer.echo(f"  \033[31m❌ {tc.id} → FAILED\033[0m")
-            else:
-                typer.echo(f"  \033[33m{tc.id} → {status.value}\033[0m")
+                # No judge ran, print step-level status
+                if verdict == ExecutionVerdict.PASS:
+                    typer.echo(f"  \033[32m✅ {tc.id} → PASS\033[0m")
+                elif verdict == ExecutionVerdict.FAIL:
+                    typer.echo(f"  \033[31m❌ {tc.id} → FAIL\033[0m")
+                elif status == ExecutionStatus.EXECUTED:
+                    typer.echo(f"  \033[32m✅ {tc.id} → EXECUTED\033[0m")
+                elif status == ExecutionStatus.FAILED:
+                    typer.echo(f"  \033[31m❌ {tc.id} → FAILED\033[0m")
+                else:
+                    typer.echo(f"  \033[33m{tc.id} → {status.value}\033[0m")
 
-        # 6. Print token usage for this TC
-        token_tracker.print_tc_summary()
+            # 6. Print token usage for this TC
+            try:
+                token_tracker.print_tc_summary()
+            except Exception as exc:
+                typer.echo(f"  [Token print error: {exc}]")
+
+        except Exception as exc:
+            typer.echo(f"  [Evaluation error for {tc.id}: {exc}]")
 
     def _on_tc_start(tc):
         """Set token tracker context before TC execution begins."""
