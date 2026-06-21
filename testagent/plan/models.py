@@ -117,6 +117,7 @@ class StepExecution(BaseModel):
     vision_analysis: str = ""  # Multimodal model's analysis of the screen on failure
     source: str = ""  # 来源标识："" 表示 LLM 视觉识别，"cache:TC-xxx/stepN" 表示缓存命中
     warning: str = ""  # Assert warning message (when assert downgraded to warning)
+    coords: dict = Field(default_factory=dict)  # Action coordinates for marker drawing {x, y, ...}
 
 
 class EvidenceItem(BaseModel):

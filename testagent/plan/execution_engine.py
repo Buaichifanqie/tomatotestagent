@@ -203,6 +203,9 @@ class ExecutionEngine:
                     x=cache_entry.coord["x"], y=cache_entry.coord["y"],
                     appium_url=appium_url, session_id=session_id,
                 )
+                # Always inject coords (for marker drawing, even on failure)
+                res["x"] = cache_entry.coord["x"]
+                res["y"] = cache_entry.coord["y"]
                 if not res.get("error"):
                     res["_source"] = f"cache:{cache_entry.tc_id}/step{cache_entry.step}"
                     return res
@@ -399,6 +402,8 @@ class ExecutionEngine:
         # Step 3: 点击目标控件
         self._log(f"  [tap_first chain] tap target at ({tc['x']}, {tc['y']})")
         res2 = await app_tap(x=tc["x"], y=tc["y"], appium_url=appium_url, session_id=session_id)
+        res2["x"] = tc["x"]
+        res2["y"] = tc["y"]
         if res2.get("error"):
             return res2
 
@@ -481,6 +486,8 @@ class ExecutionEngine:
         if vision_result and "x" in vision_result and "y" in vision_result:
             coords = vision_result
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+            res["x"] = coords["x"]
+            res["y"] = coords["y"]
             if not res.get("error"):
                 self._log(f"  [Vision tap at ({coords['x']}, {coords['y']})]")
                 await self._cache_tap_result(step, tc_id, context_hash, coords)
@@ -537,6 +544,8 @@ class ExecutionEngine:
         if vision_result and "x" in vision_result and "y" in vision_result:
             coords = vision_result
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+            res["x"] = coords["x"]
+            res["y"] = coords["y"]
             if not res.get("error"):
                 self._log(f"  [Vision retry at ({coords['x']}, {coords['y']})]")
                 await self._cache_tap_result(step, tc_id, context_hash, coords)
@@ -553,6 +562,8 @@ class ExecutionEngine:
         coords = await self._vision_find_any_content()
         if coords:
             res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+            res["x"] = coords["x"]
+            res["y"] = coords["y"]
             if not res.get("error"):
                 self._log(f"  [Content fallback tap at ({coords['x']}, {coords['y']}) — proceeding]")
                 # 不缓存 content fallback 结果 — 它找到的是任意可点击元素，不是目标元素
@@ -698,6 +709,8 @@ class ExecutionEngine:
 
         coords = vision_result
         res = await app_tap(x=coords["x"], y=coords["y"], appium_url=appium_url, session_id=session_id)
+        res["x"] = coords["x"]
+        res["y"] = coords["y"]
         if res.get("error"):
             return res
 
@@ -713,6 +726,8 @@ class ExecutionEngine:
             step=step.step,
         )
         res["_source"] = ""  # 视觉识别（缓存校验失败后回退）
+        res["x"] = coords["x"]
+        res["y"] = coords["y"]
         return res
 
     # ── screen size (lazy) ──────────────────────────────────────────────
@@ -1161,7 +1176,12 @@ class ExecutionEngine:
                             scr_rel = f"screenshots/{tc.id}/{step.step:03d}_after.png"
                             scr_full = Path(self.config.output_dir) / scr_rel
                             scr_full.parent.mkdir(parents=True, exist_ok=True)
-                            scr_full.write_bytes(base64.b64decode(b64_data))
+                            # Draw action marker on after screenshot
+                            _step_info = {"action": step.action}
+                            _step_info.update(step_exec.coords)
+                            from testagent.plan.screenshot_marker import draw_marker_on_screenshot
+                            marked = draw_marker_on_screenshot(b64_data, _step_info, step_exec.success)
+                            scr_full.write_bytes(marked if marked else base64.b64decode(b64_data))
                             tc.execution.evidence.append(
                                 EvidenceItem(type="screenshot", path=scr_rel)
                             )
@@ -1542,6 +1562,9 @@ class ExecutionEngine:
                         res = {"error": "No text to type"}
                 else:
                     res = {"error": f"Input field '{step.target}' not found"}
+                if coords:
+                    res["x"] = coords["x"]
+                    res["y"] = coords["y"]
                 res["_source"] = _source
                 return res
             elif step.action == "swipe":
@@ -1810,6 +1833,22 @@ class ExecutionEngine:
             _warning = str(result["warning"])
             _warning_scr = str(result.get("_warning_screenshot", ""))
             _warning_scr_rel = str(result.get("_warning_screenshot_rel", "")) or _warning_scr
+
+        # Extract action coordinates for marker drawing on screenshots
+        _coords = {}
+        if isinstance(result, dict):
+            if step.action == "tap" and "x" in result and "y" in result:
+                _coords = {"x": result["x"], "y": result["y"]}
+            elif step.action == "swipe":
+                parts = (step.target or "").split(",")
+                if len(parts) >= 4:
+                    _coords = {
+                        "start_x": int(parts[0]), "start_y": int(parts[1]),
+                        "end_x": int(parts[2]), "end_y": int(parts[3]),
+                    }
+            elif step.action in ("type", "input") and "x" in result and "y" in result:
+                _coords = {"x": result["x"], "y": result["y"]}
+
         step_exec = StepExecution(
             step=step.step,
             action=step.action,
@@ -1820,6 +1859,7 @@ class ExecutionEngine:
             duration_ms=elapsed,
             source=_source,
             warning=_warning,
+            coords=_coords,
         )
         if _warning_scr:
             step_exec.screenshot_after = _warning_scr

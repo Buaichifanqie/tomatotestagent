@@ -39,16 +39,11 @@ class ReportGenerator:
         config: PlanConfig,
         cache_stats: CacheStats | None = None,
     ) -> str:
-        """Build report, write to {output_dir}/plan-report.md and .html, return md path."""
+        """Build report, write to {output_dir}/plan-report.md, return path."""
         self._output_dir.mkdir(parents=True, exist_ok=True)
         report = self._build_report(plan_name, test_cases, overall, config, cache_stats)
         md_path = self._output_dir / "plan-report.md"
         md_path.write_text(report, encoding="utf-8")
-
-        # Also generate HTML version
-        html_path = self._output_dir / "plan-report.html"
-        html_path.write_text(self._md_to_html(report), encoding="utf-8")
-
         return str(md_path)
 
     # ── report assembly ─────────────────────────────────────────────────────
@@ -168,20 +163,43 @@ class ReportGenerator:
             if tc.execution.evidence:
                 lines.append("**证据:**")
                 lines.append("")
-                for ev in tc.execution.evidence:
-                    ev_path = Path(ev.path)
-                    # Path may be relative (from evidence) or absolute (legacy)
-                    if ev_path.is_absolute():
-                        try:
-                            rel = ev_path.relative_to(self._output_dir).as_posix()
-                        except ValueError:
-                            rel = ev_path.name
-                    else:
-                        rel = ev_path.as_posix()
-                    if ev.type == "recording":
-                        lines.append(f"- 🎬 [录屏回放]({rel})")
-                    elif ev.type == "screenshot" and Path(self._output_dir, ev.path).exists():
-                        lines.append(f"- 🖼️ <img src=\"{rel}\" width=\"360\">")
+                recordings = [ev for ev in tc.execution.evidence if ev.type == "recording"]
+                screenshots = [ev for ev in tc.execution.evidence if ev.type == "screenshot"]
+                for ev in recordings:
+                    rel = self._ev_rel_path(ev)
+                    lines.append(f"- 🎬 [录屏回放]({rel})")
+                # Group before/after screenshots side by side
+                scr_before = [s for s in screenshots if "_before." in s.path]
+                scr_after = [s for s in screenshots if "_after." in s.path]
+                scr_other = [s for s in screenshots if "_before." not in s.path and "_after." not in s.path]
+                paired_steps = set()
+                for b in scr_before:
+                    step_prefix = b.path.rsplit("_before.", 1)[0]
+                    a = next((x for x in scr_after if x.path.rsplit("_after.", 1)[0] == step_prefix), None)
+                    if a:
+                        paired_steps.add(step_prefix)
+                        b_rel = self._ev_rel_path(b)
+                        a_rel = self._ev_rel_path(a)
+                        lines.append(
+                            f'<div style="display:flex;gap:8px;align-items:flex-start;margin:4px 0">'
+                            f'<img src="{b_rel}" width="200">'
+                            f'<img src="{a_rel}" width="200">'
+                            f'</div>'
+                        )
+                    elif Path(self._output_dir, b.path).exists():
+                        b_rel = self._ev_rel_path(b)
+                        lines.append(f'<img src="{b_rel}" width="300">')
+                # After screenshots without a matching before
+                for a in scr_after:
+                    step_prefix = a.path.rsplit("_after.", 1)[0]
+                    if step_prefix not in paired_steps and Path(self._output_dir, a.path).exists():
+                        a_rel = self._ev_rel_path(a)
+                        lines.append(f'<img src="{a_rel}" width="300">')
+                # Other screenshots (failure, final, etc.)
+                for ev in scr_other:
+                    if Path(self._output_dir, ev.path).exists():
+                        rel = self._ev_rel_path(ev)
+                        lines.append(f'<img src="{rel}" width="300">')
                 lines.append("")
 
             steps = tc.execution.steps
@@ -223,7 +241,7 @@ class ReportGenerator:
                         else:
                             rel = scr_path.as_posix()
                         lines.append("")
-                        lines.append(f'  <img src="{rel}" width="360" alt="失败截图">')
+                        lines.append(f'  <img src="{rel}" width="200" alt="失败截图">')
                         lines.append("")
                     # Vision analysis for failed steps and warning steps
                     if (not s.success or s.warning) and s.vision_analysis:
@@ -274,6 +292,16 @@ class ReportGenerator:
 
     # ── static helpers ──────────────────────────────────────────────────────
 
+    def _ev_rel_path(self, ev) -> str:
+        """Get relative path for an evidence item."""
+        ev_path = Path(ev.path)
+        if ev_path.is_absolute():
+            try:
+                return ev_path.relative_to(self._output_dir).as_posix()
+            except ValueError:
+                return ev_path.name
+        return ev_path.as_posix()
+
     @staticmethod
     def _verdict_badge(verdict: ExecutionVerdict) -> str:
         mapping: dict[ExecutionVerdict, str] = {
@@ -285,112 +313,3 @@ class ReportGenerator:
             ExecutionVerdict.PARTIAL: "⚠️ PARTIAL",
         }
         return mapping[verdict]
-
-    @staticmethod
-    def _md_to_html(md: str) -> str:
-        """Convert markdown to a self-contained styled HTML page.
-
-        Handles the patterns used in plan-report.md without external deps.
-        """
-        import html as _html
-        import re
-        lines = md.split("\n")
-        html_lines: list[str] = []
-        in_code = False
-        code_buf: list[str] = []
-        in_table = False
-        table_buf: list[str] = []
-
-        def flush_table():
-            nonlocal table_buf, in_table
-            if not table_buf:
-                return
-            html_lines.append('<table class="data-table">')
-            for i, row in enumerate(table_buf):
-                tag = "th" if i == 0 else "td"
-                cells = [c.strip() for c in row.split("|")[1:-1]]
-                escaped = [_html.escape(c) for c in cells]
-                sep = f"</{tag}><{tag}>"
-                html_lines.append(f"<tr><{tag}>{sep.join(escaped)}</{tag}></tr>")
-            html_lines.append("</table>")
-            table_buf = []
-            in_table = False
-
-        for line in lines:
-            if line.startswith("```"):
-                if in_code:
-                    html_lines.append(f"<pre><code>{_html.escape(chr(10).join(code_buf))}</code></pre>")
-                    code_buf = []
-                    in_code = False
-                else:
-                    flush_table()
-                    in_code = True
-                continue
-            if in_code:
-                code_buf.append(line)
-                continue
-
-            flush_table()
-
-            if not line.strip():
-                html_lines.append("<br>")
-                continue
-
-            if line.startswith("|") and line.endswith("|"):
-                if "---" in line:
-                    continue
-                in_table = True
-                table_buf.append(line)
-                continue
-
-            if line.startswith("# "):
-                html_lines.append(f"<h1>{_html.escape(line[2:])}</h1>")
-            elif line.startswith("## "):
-                html_lines.append(f"<h2>{_html.escape(line[3:])}</h2>")
-            elif line.startswith("### "):
-                html_lines.append(f"<h3>{_html.escape(line[4:])}</h3>")
-            elif line.startswith("#### "):
-                html_lines.append(f"<h4>{_html.escape(line[5:])}</h4>")
-            else:
-                text = _html.escape(line)
-                text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-                text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-                text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
-                text = re.sub(r'!\[(.*?)\]\((.+?)\)', r'<img src="\2" alt="\1" style="max-width:360px">', text)
-                text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', text)
-                if text.strip().startswith("- ") or text.strip().startswith("* "):
-                    html_lines.append(f"<li>{text.strip()[2:]}</li>")
-                else:
-                    html_lines.append(f"<p>{text}</p>")
-
-        flush_table()
-
-        body = "\n".join(html_lines)
-        return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TestAgent Report</title>
-<style>
-  body {{ font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-         max-width: 960px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #333; }}
-  h1, h2, h3 {{ color: #1a1a2e; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }}
-  table.data-table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
-  table.data-table th {{ background: #4a6fa5; color: #fff; padding: 8px 12px; text-align: left; }}
-  table.data-table td {{ padding: 8px 12px; border: 1px solid #ddd; }}
-  table.data-table tr:nth-child(even) {{ background: #f2f2f2; }}
-  img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; margin: 8px 0; }}
-  pre {{ background: #1e1e2e; color: #cdd6f4; padding: 14px; border-radius: 6px; overflow-x: auto; }}
-  code {{ background: #e8e8e8; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-  pre code {{ background: none; padding: 0; }}
-  a {{ color: #4a6fa5; }}
-  li {{ margin: 4px 0; }}
-  p {{ line-height: 1.7; }}
-  br {{ display: block; margin: 4px 0; content: ""; }}
-</style>
-</head>
-<body>
-{body}
-</body>
-</html>"""
