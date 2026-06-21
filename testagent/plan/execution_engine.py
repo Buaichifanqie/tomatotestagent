@@ -984,7 +984,15 @@ class ExecutionEngine:
                         if not state_ok:
                             continue  # TC was marked as SKIPPED inside _ensure_states
 
-                    self._log(f"▶ {tc.id}: {tc.title} ...", end="", flush=True)
+                    # ── 测试用例分隔线 ──
+                    ts_header = datetime.now().strftime("%H:%M:%S")
+                    priority = getattr(tc, 'priority', '')
+                    header = f"▶ {tc.id}: {tc.title}"
+                    if priority:
+                        header += f"  [{priority}]"
+                    print(f"\n  \033[36m{'=' * 70}\033[0m")
+                    print(f"  \033[1;36m[{ts_header}] {header}\033[0m")
+                    print(f"  \033[36m{'=' * 70}\033[0m")
                     self._logcat_start(tc.id)
 
                     # ── Notify TC start (e.g. set token tracker context) ──
