@@ -269,74 +269,42 @@ class ExecutionEngine:
         # 4. 截图 + vision 获取目标控件坐标
         self._log(f"  [Reveal Probe: looking for '{step.target}']")
         target_coords = await self._vision_find_element(step.target)
-
-        # 5. 如果 vision 返回了滑动建议（控件在隐藏页），执行滑动后再重试
-        swipe_performed = None  # 记录是否执行了滑动（用于缓存）
         if not target_coords or "x" not in target_coords:
-            swipe_direction = None
-            if isinstance(target_coords, dict) and "suggestion" in target_coords:
-                sug = target_coords["suggestion"]
-                # swipe_ 或 scroll_ 开头都视为滑动建议
-                if sug.startswith("swipe_") or sug.startswith("scroll_"):
-                    swipe_direction = sug
-
-            if swipe_direction:
-                self._log(
-                    f"  [Reveal Probe: '{swipe_direction}' to reveal '{step.target}']"
-                )
-                # 控制栏可能已自动隐藏，先重新点击触发区域
-                await app_tap(
-                    x=tap_first_coords["x"], y=tap_first_coords["y"],
-                    appium_url=appium_url, session_id=session_id,
-                )
-                await asyncio.sleep(0.5)
-                # 在控制栏区域执行滑动（屏幕底部 ~12%）
-                dw, dh = await self._get_screen_size()
-                control_bar_y = int(dh * 0.88)
-                if "left" in swipe_direction:
-                    sx, sy, ex, ey = int(dw * 0.7), control_bar_y, int(dw * 0.2), control_bar_y
-                elif "right" in swipe_direction:
-                    sx, sy, ex, ey = int(dw * 0.2), control_bar_y, int(dw * 0.7), control_bar_y
-                elif "up" in swipe_direction:
-                    sx, sy, ex, ey = int(dw * 0.5), int(dh * 0.88), int(dw * 0.5), int(dh * 0.7)
-                elif "down" in swipe_direction:
-                    sx, sy, ex, ey = int(dw * 0.5), int(dh * 0.7), int(dw * 0.5), int(dh * 0.88)
-                else:
-                    sx, sy, ex, ey = 0, 0, 0, 0  # fallback
-
-                self._log(f"  [Reveal Probe: swipe ({sx},{sy}) -> ({ex},{ey})]")
-                await app_swipe(
-                    start_x=sx, start_y=sy, end_x=ex, end_y=ey,
-                    duration=600,
-                    appium_url=appium_url, session_id=session_id,
-                )
-                await asyncio.sleep(0.8)
-                target_coords = await self._vision_find_element(step.target)
-                swipe_performed = {
-                    "direction": swipe_direction,
-                    "start_x": sx, "start_y": sy, "end_x": ex, "end_y": ey,
-                }
-            else:
-                # 没有滑动建议，走原有的重试逻辑
-                # 但先检查 session 是否活着，避免在死 session 上浪费时间
-                if not self.session_manager.is_connected():
-                    self._log(f"  [Reveal Probe: session dead — aborting probe]")
-                    return {"error": "session_dead"}
-                self._log(f"  [Reveal Probe: re-tapping trigger area for retry]")
-                await app_tap(
-                    x=tap_first_coords["x"], y=tap_first_coords["y"],
-                    appium_url=appium_url, session_id=session_id,
-                )
-                await asyncio.sleep(0.8)
-                target_coords = await self._vision_find_element(step.target)
+            # 没找到目标，重试一次（重新点击触发区域）
+            if not self.session_manager.is_connected():
+                self._log(f"  [Reveal Probe: session dead — aborting probe]")
+                return {"error": "session_dead"}
+            self._log(f"  [Reveal Probe: re-tapping trigger area for retry]")
+            await app_tap(
+                x=tap_first_coords["x"], y=tap_first_coords["y"],
+                appium_url=appium_url, session_id=session_id,
+            )
+            await asyncio.sleep(0.8)
+            target_coords = await self._vision_find_element(step.target)
 
         if not target_coords or "x" not in target_coords:
-            if isinstance(target_coords, dict) and target_coords.get("suggestion"):
-                pass  # 有 suggestion 但未处理，正常返回错误
-            elif not self.session_manager.is_connected():
+            if not self.session_manager.is_connected():
                 self._log(f"  [Reveal Probe: session dead after probe — aborting]")
                 return {"error": "session_dead"}
-            return {"error": f"tap_first: '{step.target}' not found after tapping '{step.tap_first}'"}
+            # ── Vision 导航回退：让 Vision 分析当前页面，建议点击哪里 ──
+            self._log(f"  [Reveal Probe: target not found, asking Vision for navigation advice]")
+            nav_coords = await self._vision_navigate_to_target(step.target)
+            if nav_coords:
+                self._log(f"  [Vision nav: tapping ({nav_coords['x']}, {nav_coords['y']})]")
+                await app_tap(
+                    x=nav_coords["x"], y=nav_coords["y"],
+                    appium_url=appium_url, session_id=session_id,
+                )
+                await asyncio.sleep(1.0)
+                target_coords = await self._vision_find_element(step.target)
+                if target_coords and "x" in target_coords:
+                    # Vision 导航成功，更新触发区域为刚才点击的位置
+                    tap_first_coords = nav_coords
+                else:
+                    self._log(f"  [Vision nav failed: still can't find '{step.target}']")
+                    return {"error": f"tap_first: '{step.target}' not found even after Vision navigation"}
+            else:
+                return {"error": f"tap_first: '{step.target}' not found after tapping '{step.tap_first}'"}
 
         # ── 探测成功：缓存动作链，供后续快速回放 ──
         chain: dict = {
@@ -344,14 +312,7 @@ class ExecutionEngine:
             "target_coords": target_coords,
             "wait_ms": 500,
         }
-        if swipe_performed:
-            chain["swipe"] = swipe_performed
-            self._log(
-                f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}' "
-                f"(with swipe: {swipe_performed['direction']})]"
-            )
-        else:
-            self._log(f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}']")
+        self._log(f"  [Reveal Probe: cached chain '{step.tap_first}' → '{step.target}']")
         self._tap_first_chain_cache[chain_key] = chain
 
         # ── 执行阶段：用刚获取的坐标立即执行快速链条 ──
@@ -3150,6 +3111,64 @@ class ExecutionEngine:
             f"found={found}, has_center={bool(coords.get('center'))}, "
             f"response={content[:200]}]"
         )
+        return None
+
+    async def _vision_navigate_to_target(self, target: str) -> dict[str, int] | None:
+        """Ask Vision to analyze the current screen and suggest where to click
+        to find the target element. Used as a last-resort fallback when
+        tap_first probe fails.
+
+        Returns coordinates to tap, or None if Vision can't help.
+        """
+        client = self._init_vision_client()
+        if not client:
+            return None
+
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        if not screenshot_id:
+            return None
+
+        from testagent.mcp_servers.shared_cache import get_screenshot
+        b64 = get_screenshot(screenshot_id)
+        if not b64:
+            return None
+
+        dw, dh = await self._get_screen_size()
+        prompt = (
+            f"我在当前页面上找不到「{target}」这个元素。\n"
+            f"请分析当前屏幕，告诉我应该点击哪里才能找到「{target}」？\n"
+            f"可能是需要点击某个菜单、标签页、或者某个区域来唤出隐藏的控件。\n\n"
+            f"请按以下格式回复：\n"
+            f"- 如果你知道要点哪里，提供该位置的百分比坐标：pct_x%, pct_y%\n"
+            f"- 如果当前页面确实无法到达目标，回复 found: false\n"
+            f"- 简要说明为什么要点击那个位置"
+        )
+
+        try:
+            result = await client.analyze(b64, prompt, device_width=dw, device_height=dh)
+        except Exception:
+            return None
+
+        if "error" in result:
+            return None
+
+        content = result.get("content", "")
+        from testagent.mcp_servers.vision_server.tools import (
+            _parse_percentage_coordinates,
+        )
+        img_w = result.get("image_width", 0)
+        img_h = result.get("image_height", 0)
+        coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
+
+        if coords.get("center"):
+            center = coords["center"]
+            self._log(f"  [Vision nav: description: {content[:100]}]")
+            return {"x": center["x"], "y": center["y"]}
+
         return None
 
     async def _vision_find_any_content(self) -> dict[str, int] | None:

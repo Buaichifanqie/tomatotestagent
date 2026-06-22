@@ -24,11 +24,9 @@ from testagent.common.logging import get_logger
 _logger = get_logger(__name__)
 
 # ── Colors ────────────────────────────────────────────────────────────
-_YELLOW = (255, 230, 0)        # fluorescent yellow
-_ORANGE = (255, 140, 0)        # dark orange for outline
+_GREEN = (0, 200, 60)          # green for successful actions
 _RED = (255, 40, 40)           # red for failures
 _BLUE = (60, 140, 255)         # blue for input/assert
-_WHITE = (255, 255, 255)       # white outline
 _BLACK = (0, 0, 0)             # black outline
 
 
@@ -61,9 +59,9 @@ def draw_marker_on_screenshot(
         draw = ImageDraw.Draw(img)
         w, h = img.size
 
-        # Scale factors based on image width
-        r = max(int(w * 0.04), 8)       # circle radius
-        lw = max(int(w * 0.008), 2)     # line width
+        # Scale factors based on image width (half of previous size)
+        r = max(int(w * 0.02), 4)       # circle radius
+        lw = max(int(w * 0.004), 1)     # line width
 
         if action == "tap":
             _draw_tap_marker(draw, step_info, w, h, r, lw, success)
@@ -93,7 +91,7 @@ def _draw_tap_marker(
     if x is None or y is None:
         return
 
-    color = _YELLOW if success else _RED
+    color = _GREEN if success else _RED
     outline = _BLACK
 
     # Outer circle with black outline
@@ -130,7 +128,7 @@ def _draw_swipe_marker(
     if sx is None or sy is None or ex is None or ey is None:
         return
 
-    color = _YELLOW if success else _RED
+    color = _GREEN if success else _RED
 
     # Line with black outline
     draw.line([(sx, sy), (ex, ey)], fill=_BLACK, width=lw + 3)

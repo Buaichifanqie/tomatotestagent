@@ -105,7 +105,7 @@ class SegmentedRecorder:
             self._adb_process = await asyncio.create_subprocess_exec(
                 "adb", "shell", "screenrecord",
                 "--time-limit", str(_SEGMENT_LIMIT_S),
-                "--bit-rate", "4000000",
+                "--bit-rate", "2000000",
                 self._device_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
