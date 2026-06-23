@@ -12,19 +12,16 @@ import os
 import platform
 import shutil
 import tempfile
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 
 from testagent.common.logging import get_logger
 
-if TYPE_CHECKING:
-    import asyncio as _asyncio
-
 logger = get_logger(__name__)
 
 _APPIUM_URL = "http://localhost:4723"
-_appium_process: _asyncio.subprocess.Process | None = None
 
 
 def ensure_android_home() -> str | None:
@@ -177,97 +174,111 @@ async def _close_test_session(sid: str) -> None:
 
 
 async def ensure_appium_running() -> bool:
-    """Ensure Appium server is running and can create sessions.
+    """Legacy wrapper — delegates to AppiumManager singleton on port 4723."""
+    global _appium_manager
+    try:
+        await _appium_manager.ensure_appium_running(
+            udid="emulator-5554",
+            port=4723,
+        )
+        return True
+    except RuntimeError:
+        return False
 
-    If the existing Appium server is healthy, returns immediately.
-    Otherwise kills the old process, starts a new one with ANDROID_HOME
-    in its environment, and waits for it to be ready.
-    """
-    global _appium_process
 
-    # Step 1: Check if existing Appium is healthy
-    for _ in range(5):
+@dataclass
+class AppiumInstance:
+    port: int
+    process: asyncio.subprocess.Process
+    log_path: str
+    url: str
+
+
+class AppiumManager:
+    """Manage multiple Appium server instances, one per device."""
+
+    def __init__(self) -> None:
+        self._instances: dict[str, AppiumInstance] = {}
+
+    async def ensure_appium_running(self, udid: str, port: int, log_path: str = "") -> AppiumInstance:
+        """Start Appium server for *udid* on *port* (or return existing one)."""
+        if udid in self._instances:
+            inst = self._instances[udid]
+            if await self._is_healthy(inst.url):
+                return inst
+            await self._stop_instance(udid)
+
+        if not log_path:
+            log_path = os.path.join(tempfile.gettempdir(), f"appium_{udid.replace(':', '_')}.log")
+
+        # Use the existing module-level _kill_process_on_port
+        await _kill_process_on_port(port)
+        await asyncio.sleep(1)
+
+        android_home = ensure_android_home()
+        extra_env = {}
+        if android_home:
+            extra_env["ANDROID_HOME"] = android_home
+            extra_env["ANDROID_SDK_ROOT"] = android_home
+
+        appium_path = _find_appium()
+        env = {**os.environ, **extra_env}
+
+        log_fh = open(log_path, "a", encoding="utf-8")
+        proc = await asyncio.create_subprocess_exec(
+            appium_path,
+            "-p", str(port),
+            "--allow-insecure", "*:adb_shell",
+            stdout=log_fh,
+            stderr=log_fh,
+            env=env,
+        )
+
+        url = f"http://localhost:{port}"
+        inst = AppiumInstance(port=port, process=proc, log_path=log_path, url=url)
+        self._instances[udid] = inst
+
+        # Wait for readiness (max ~30s)
+        for _ in range(30):
+            await asyncio.sleep(1)
+            if await self._is_healthy(url):
+                return inst
+
+        raise RuntimeError(f"Appium server on port {port} did not start within 30s for device {udid}")
+
+    async def stop(self, udid: str) -> None:
+        """Stop Appium server for a single device."""
+        await self._stop_instance(udid)
+
+    async def stop_all(self) -> None:
+        """Stop all running Appium servers."""
+        for udid in list(self._instances.keys()):
+            await self._stop_instance(udid)
+
+    async def _stop_instance(self, udid: str) -> None:
+        inst = self._instances.pop(udid, None)
+        if inst is None:
+            return
         try:
+            inst.process.terminate()
+            await asyncio.wait_for(inst.process.wait(), timeout=5)
+        except Exception:
+            try:
+                inst.process.kill()
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _is_healthy(url: str) -> bool:
+        try:
+            import httpx
+
             async with httpx.AsyncClient(timeout=3) as client:
-                resp = await client.get(f"{_APPIUM_URL}/status")
-            if resp.status_code == 200:
-                test_sid = await _create_test_session()
-                if test_sid:
-                    await _close_test_session(test_sid)
-                    logger.info("Existing Appium is healthy, session verified")
-                    return True
-                logger.warning("Appium server is up but session creation failed, will restart...")
-                break
-        except (httpx.RequestError, httpx.TimeoutException):
-            pass
-        await asyncio.sleep(1)
+                resp = await client.get(f"{url}/status")
+                return resp.status_code == 200
+        except Exception:
+            return False
 
-    # Step 2: Kill old Appium process
-    logger.info("Existing Appium not available, restarting...")
 
-    # Discard stale reference to process from a previous event loop
-    _appium_process = None
-
-    await _kill_process_on_port(4723)
-
-    await _kill_process_on_port(4723)
-    await asyncio.sleep(2)
-
-    # Step 3: Start new Appium with ANDROID_HOME
-    android_home = ensure_android_home()
-    extra_env = {}
-    if android_home:
-        extra_env["ANDROID_HOME"] = android_home
-        extra_env["ANDROID_SDK_ROOT"] = android_home
-
-    appium_path = _find_appium()
-    env = {**os.environ, **extra_env}
-
-    if platform.system() == "Windows" and android_home:
-        wrapper = os.path.join(tempfile.gettempdir(), "_appium_testagent_wrapper.bat")
-        with open(wrapper, "w", encoding="ascii") as f:
-            f.write(
-                f'@echo off\r\n'
-                f'set "ANDROID_HOME={android_home}"\r\n'
-                f'set "ANDROID_SDK_ROOT={android_home}"\r\n'
-                f'"{appium_path}" --allow-insecure "*:adb_shell" %*\r\n'
-            )
-        _appium_process = await asyncio.create_subprocess_exec(
-            wrapper,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-    elif appium_path.endswith(".cmd"):
-        _appium_process = await asyncio.create_subprocess_shell(
-            appium_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-    else:
-        _appium_process = await asyncio.create_subprocess_exec(
-            appium_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-
-    # Step 4: Wait for readiness (max ~3 min: 18 retries × 10s timeout)
-    for _ in range(18):
-        await asyncio.sleep(1)
-        try:
-            async with httpx.AsyncClient(timeout=2) as client:
-                resp = await client.get(f"{_APPIUM_URL}/status")
-            if resp.status_code == 200:
-                test_sid = await _create_test_session()
-                if test_sid:
-                    await _close_test_session(test_sid)
-                    logger.info("Appium started with ANDROID_HOME, session verified OK")
-                    return True
-                logger.warning("Appium server is up but session creation failed, waiting...")
-        except httpx.RequestError:
-            continue
-
-    logger.error("Failed to start Appium or create test session")
-    return False
+# Global AppiumManager singleton used by the legacy ensure_appium_running wrapper
+_appium_manager = AppiumManager()

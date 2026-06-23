@@ -49,25 +49,28 @@ class SessionManager:
         """Return the current session ID (alias for backward compatibility)."""
         return self._session_id
 
-    def create_session(self) -> str | None:
+    def create_session(self, device_udid: str = "", system_port: int = 8200) -> str | None:
         """Create an Appium session via HTTP POST.
 
-        Sends Android capabilities to the Appium server and returns the
-        session ID string on success, or None on failure.
+        Args:
+            device_udid: Target device serial (overrides default ``emulator-5554``).
+            system_port: UiAutomator2 systemPort for this device.
 
         Returns:
             The session ID string, or None if creation failed.
         """
         android_home = ensure_android_home()
+        udid = device_udid or "emulator-5554"
         caps: dict[str, object] = {
             "platformName": "Android",
             "appium:automationName": "UiAutomator2",
-            "appium:deviceName": "emulator-5554",
-            "appium:udid": "emulator-5554",
+            "appium:deviceName": udid,
+            "appium:udid": udid,
             "appium:noReset": True,
             "appium:autoGrantPermissions": True,
             "appium:newCommandTimeout": 300,
             "appium:allowInsecure": "*:adb_shell",
+            "appium:systemPort": system_port,
         }
         if android_home:
             caps["appium:androidHome"] = android_home
