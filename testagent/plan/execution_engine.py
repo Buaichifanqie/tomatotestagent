@@ -117,6 +117,7 @@ class ExecutionEngine:
         self._db_toolkit_state: Any | None = None
         self._db_schema_cache: str = ""
         self._db_setup_done: bool = False
+        self._consecutive_vision_timeouts: int = 0
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -945,6 +946,7 @@ class ExecutionEngine:
                             if new_sid:
                                 self._log(f"[Session recreated: {new_sid[:12]}...]")
                                 self._consecutive_session_failures = 0
+                                self._consecutive_vision_timeouts = 0
                             else:
                                 self._consecutive_session_failures += 1
                                 self._log(
@@ -1598,7 +1600,13 @@ class ExecutionEngine:
                         capture_output=True, text=True, timeout=15,
                         encoding="utf-8", errors="replace",
                     )
-                    return {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
+                    result = {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
+                    # After KEYCODE_HOME (切后台), ensure app is brought back
+                    if "HOME" in cmd.upper():
+                        self._log("  [Exec: HOME key sent, ensuring app returns to foreground]")
+                        await asyncio.sleep(2)
+                        await self._ensure_app_launched()
+                    return result
                 except subprocess.TimeoutExpired:
                     return {"error": f"exec command timed out: {cmd}"}
                 except Exception as exc:
@@ -2993,6 +3001,11 @@ class ExecutionEngine:
             Dict with 'suggestion' key if swipe suggested,
             None if not found / error.
         """
+        # Fast-fail: if Vision API has timed out 2+ times consecutively, skip
+        if self._consecutive_vision_timeouts >= 2:
+            self._log(f"  [Vision: skipping '{target}' — {self._consecutive_vision_timeouts} consecutive timeouts]")
+            return None
+
         client = self._init_vision_client()
         if not client:
             return None
@@ -3047,7 +3060,11 @@ class ExecutionEngine:
             result = await client.analyze(
                 b64, prompt, device_width=dw, device_height=dh,
             )
-        except Exception:
+            self._consecutive_vision_timeouts = 0
+        except Exception as exc:
+            if "timeout" in str(exc).lower() or "Timeout" in str(type(exc).__name__):
+                self._consecutive_vision_timeouts += 1
+                self._log(f"  [Vision timeout #{self._consecutive_vision_timeouts}]")
             return None
 
         if "error" in result:
