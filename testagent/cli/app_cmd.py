@@ -132,6 +132,10 @@ def plan(
         "", "--resume", "-r",
         help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"
     ),
+    multi_config: str = typer.Option(
+        "", "--multi-config", "-m",
+        help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"
+    ),
     show_help: bool = typer.Option(
         False, "--help", "-h", is_eager=True,
         help="显示交互式帮助。"
@@ -152,6 +156,11 @@ def plan(
 
     def _log(msg: str) -> None:
         typer.echo(msg)
+
+    if multi_config:
+        from testagent.cli.plan import run_multi_device_plan
+        result = asyncio.run(run_multi_device_plan(config=multi_config, log_fn=_log))
+        return
 
     result = asyncio.run(run_single_plan(
         requirement,

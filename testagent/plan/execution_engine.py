@@ -118,6 +118,7 @@ class ExecutionEngine:
         self._db_schema_cache: str = ""
         self._db_setup_done: bool = False
         self._consecutive_vision_timeouts: int = 0
+        self.device_udid: str = config.device_udid or ""
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 

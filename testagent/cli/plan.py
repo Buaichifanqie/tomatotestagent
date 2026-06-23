@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import typer
+import yaml
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
+from testagent.plan.device_manager import DeviceManager, DeviceInfo, DevicePlanAssignment
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.session_manager import SessionManager
 from testagent.plan.evaluator import PerTCEvaluator
@@ -606,6 +609,9 @@ def plan_command(
     app_activity: str = "",
     app_id: str = "",
     auto_yes: bool = False,
+    device_udid: str = "",
+    appium_url: str = "http://localhost:4723",
+    system_port: int = 8200,
 ) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Main orchestration function — sync entry point for the Typer CLI.
 
@@ -616,6 +622,7 @@ def plan_command(
         requirement, name=name,
         app_package=app_package, app_activity=app_activity,
         app_id=app_id, auto_yes=auto_yes,
+        device_udid=device_udid, appium_url=appium_url, system_port=system_port,
     ))
 
 
@@ -627,6 +634,10 @@ async def _plan_command_async(
     app_id: str = "",
     auto_yes: bool = False,
     resume_dir: str = "",
+    # New device parameters
+    device_udid: str = "",
+    appium_url: str = "http://localhost:4723",
+    system_port: int = 8200,
 ) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Async implementation of the full plan lifecycle.
 
@@ -752,6 +763,9 @@ async def _plan_command_async(
         app_activity=app_activity,
         output_dir=output_dir,
         auto_yes=auto_yes,
+        device_udid=device_udid,
+        appium_url=appium_url,
+        system_port=system_port,
     )
 
     # Create LLM provider once — shared between exploration, TC generation and execution
@@ -800,7 +814,7 @@ async def _plan_command_async(
             if cached_map:
                 typer.echo("  Found cached UI context map, validating...")
                 # Quick validation: create session, get home elements, compare
-                sm_temp = SessionManager()
+                sm_temp = SessionManager(appium_url=config.appium_url)
                 sid = sm_temp.create_session()
                 if sid:
                     try:
@@ -826,7 +840,7 @@ async def _plan_command_async(
 
             # Explore if no valid cache
             if ui_context_map is None:
-                sm = SessionManager()
+                sm = SessionManager(appium_url=config.appium_url)
                 explorer = AppExplorer(
                     session_manager=sm,
                     llm_callable=_build_llm_callable(),
@@ -1802,4 +1816,199 @@ async def run_single_plan(
         failed=failed,
         aborted=aborted_count,
         duration=f"{duration_s:.1f}s",
+    )
+
+
+# ── Multi-device helpers ────────────────────────────────────────────────
+
+
+def load_multi_device_config(config_path: str) -> list[DevicePlanAssignment]:
+    """Load multi-device configuration from a YAML file.
+
+    Expected format:
+    ```yaml
+    assignments:
+      - device: "emulator-5554"
+        plan: "plans/login.yaml"
+      - device: "192.168.1.100:5555"
+        plan: "plans/pay.yaml"
+    ```
+    """
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    assignments: list[DevicePlanAssignment] = []
+    for entry in data.get("assignments", []):
+        device = DeviceInfo(udid=entry["device"])
+        assignments.append(DevicePlanAssignment(device=device, plan_path=entry["plan"]))
+    return assignments
+
+
+def interactive_device_menu() -> list[DevicePlanAssignment]:
+    """Interactive prompt to assign plans to devices.
+
+    Flow:
+    1. Display discovered devices.
+    2. Let user assign a test plan YAML to each selected device.
+    3. Return the assignments.
+    """
+    import subprocess
+    import typer
+
+    typer.echo("\n🔍 正在扫描已连接设备...\n")
+    try:
+        result = subprocess.run(
+            ["adb", "devices", "-l"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception as exc:
+        typer.echo(f"❌ 无法运行 adb devices: {exc}")
+        raise typer.Exit(1)
+
+    devices: list[dict] = []
+    for line in result.stdout.splitlines():
+        if "device" not in line or "devices" in line:
+            continue
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        udid, status = parts[0], parts[1]
+        if status != "device":
+            continue
+        name = udid
+        for token in parts[2:]:
+            if token.startswith("model:"):
+                name = token.split(":", 1)[1].replace("_", " ")
+                break
+        devices.append({"udid": udid, "name": name, "index": len(devices) + 1})
+
+    if not devices:
+        typer.echo("❌ 未发现已连接的设备。请确认 USB 连接或模拟器已启动。")
+        raise typer.Exit(1)
+
+    typer.echo(f"发现 {len(devices)} 台设备:\n")
+    for d in devices:
+        typer.echo(f"  [{d['index']}] {d['name']:20s} ({d['udid']:30s}) ✅ 在线")
+    typer.echo()
+
+    selection = typer.prompt(
+        "请选择要使用的设备 (多选用逗号分隔, 或按 Enter 全选)",
+        default=",".join(str(d["index"]) for d in devices),
+    )
+    selected_indices = [int(s.strip()) for s in selection.split(",") if s.strip()]
+
+    selected_devices = [d for d in devices if d["index"] in selected_indices]
+    if not selected_devices:
+        typer.echo("❌ 未选择任何设备。")
+        raise typer.Exit(1)
+
+    from pathlib import Path
+    plan_dir = Path("plans")
+    available_plans = list(plan_dir.glob("*.yaml")) + list(plan_dir.glob("*.yml"))
+    if not available_plans:
+        typer.echo("⚠️ 未在 plans/ 目录下找到测试计划文件。直接输入路径。")
+        available_plans = []
+
+    assignments: list[DevicePlanAssignment] = []
+    typer.echo()
+    for d in selected_devices:
+        typer.echo(f"📋 为 {d['name']} ({d['udid']}) 选择测试计划:")
+        if available_plans:
+            for i, p in enumerate(available_plans, 1):
+                typer.echo(f"    [{i}] {p.name}")
+            choice = typer.prompt("  请输入编号或直接输入路径", default="1")
+            try:
+                idx = int(choice) - 1
+                plan_path = str(available_plans[idx])
+            except (ValueError, IndexError):
+                plan_path = choice
+        else:
+            plan_path = typer.prompt("  请输入测试计划路径")
+
+        device_info = DeviceInfo(udid=d["udid"], name=d["name"])
+        assignments.append(DevicePlanAssignment(device=device_info, plan_path=plan_path))
+
+    return assignments
+
+
+async def run_multi_device_plan(
+    config: str | None = None,
+    log_fn: Any = None,
+) -> PlanResult:
+    """Run multiple test plans across multiple devices in parallel."""
+    _log = log_fn or (lambda msg: None)
+
+    if config:
+        assignments = load_multi_device_config(config)
+    else:
+        assignments = interactive_device_menu()
+
+    if not assignments:
+        return PlanResult(status="failed", error="No device-plan assignments")
+
+    dm = DeviceManager()
+    devices = [a.device for a in assignments]
+    _log(f"Preparing {len(devices)} device(s)...")
+    try:
+        await dm.prepare_all(devices)
+    except Exception as exc:
+        _log(f"Device preparation failed: {exc}")
+        await dm.teardown_all()
+        return PlanResult(status="failed", error=str(exc))
+
+    pending_tcs: list[TestCase] = []
+    results: dict[str, PlanResult] = {}
+
+    def _run_engine(assignment: DevicePlanAssignment) -> tuple[str, PlanResult]:
+        import asyncio
+        udid = assignment.device.udid
+        try:
+            report_path, overall, executed_tcs = asyncio.run(
+                _plan_command_async(
+                    requirement=assignment.plan_path,
+                    app_package="",
+                    app_activity="",
+                    auto_yes=True,
+                    device_udid=udid,
+                    appium_url=assignment.device.appium_url,
+                    system_port=assignment.device.system_port,
+                )
+            )
+            return udid, PlanResult(
+                status="completed",
+                requirement_source=assignment.plan_path,
+                test_cases=executed_tcs,
+                report_path=report_path or "",
+                case_count=overall.total_count if overall else 0,
+                passed=overall.passed_count if overall else 0,
+            )
+        except Exception as exc:
+            return udid, PlanResult(status="failed", error=str(exc))
+
+    with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
+        futures = {
+            executor.submit(_run_engine, a): a.device.udid
+            for a in assignments
+        }
+        for future in as_completed(futures):
+            udid, result = future.result()
+            results[udid] = result
+            if result.test_cases:
+                pending_tcs.extend(result.test_cases)
+
+    await dm.teardown_all()
+
+    total = sum(r.case_count for r in results.values() if r.case_count)
+    passed = sum(r.passed for r in results.values() if r.passed)
+    failed = total - passed
+    summary = f"Multi-device: {total} cases across {len(results)} devices: {passed} passed, {failed} failed"
+
+    return PlanResult(
+        status="completed",
+        requirement_source="multi-device",
+        test_cases=pending_tcs,
+        summary=summary,
+        case_count=total,
+        passed=passed,
+        failed=failed,
     )
