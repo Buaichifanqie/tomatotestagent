@@ -1956,6 +1956,11 @@ async def run_multi_device_plan(
         await dm.teardown_all()
         return PlanResult(status="failed", error=str(exc))
 
+    # Start TUI
+    from testagent.plan.multi_device_tui import MultiDeviceTUI
+    tui = MultiDeviceTUI(devices)
+    tui.start()
+
     pending_tcs: list[TestCase] = []
     results: dict[str, PlanResult] = {}
 
@@ -1963,6 +1968,7 @@ async def run_multi_device_plan(
         import asyncio
         udid = assignment.device.udid
         try:
+            tui.update_log(udid, f"Starting plan: {assignment.plan_path}", "info")
             report_path, overall, executed_tcs = asyncio.run(
                 _plan_command_async(
                     requirement=assignment.plan_path,
@@ -1974,6 +1980,7 @@ async def run_multi_device_plan(
                     system_port=assignment.device.system_port,
                 )
             )
+            tui.update_summary(udid, "completed")
             return udid, PlanResult(
                 status="completed",
                 requirement_source=assignment.plan_path,
@@ -1983,6 +1990,8 @@ async def run_multi_device_plan(
                 passed=overall.passed_count if overall else 0,
             )
         except Exception as exc:
+            tui.update_log(udid, f"FAILED: {exc}", "error")
+            tui.update_summary(udid, "failed")
             return udid, PlanResult(status="failed", error=str(exc))
 
     with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
@@ -1996,6 +2005,7 @@ async def run_multi_device_plan(
             if result.test_cases:
                 pending_tcs.extend(result.test_cases)
 
+    tui.stop()
     await dm.teardown_all()
 
     total = sum(r.case_count for r in results.values() if r.case_count)
