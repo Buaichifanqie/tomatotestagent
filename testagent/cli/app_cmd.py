@@ -357,3 +357,35 @@ async def _replay_command(
         typer.echo(f"  Blocked: {summary.get('blocked', 0)}")
         typer.echo(f"  Skipped: {summary.get('skipped', 0)}")
         typer.echo(f"\nDelta report: {html_path}")
+
+
+# ── 向后兼容：testagent app plan → 委托给 tpilot plan ──
+
+@app_typer.command(name="plan", hidden=True, help="[已迁移] 请使用 testagent app tpilot plan")
+def _plan_backward_compat(
+    requirement: str = typer.Argument(
+        "", help="产品需求文档路径 或 自然语言需求描述"
+    ),
+    name: str = typer.Option("", "--name", "-n", help="自定义计划名称"),
+    app_package: str = typer.Option("", "--app-package", "-p", help="App package name"),
+    app_activity: str = typer.Option("", "--app-activity", "-a", help="App launch activity"),
+    app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.example.app），默认使用 app-package"),
+    auto_yes: bool = typer.Option(False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"),
+    resume: str = typer.Option("", "--resume", "-r", help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"),
+    multi_config: str = typer.Option("", "--multi-config", "-m", help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"),
+) -> None:
+    """[已迁移] 请使用 testagent app tpilot plan"""
+    typer.echo("ℹ️  \x1b[33mtestagent app plan 已迁移到 testagent app tpilot plan\x1b[0m")
+    typer.echo("   正在自动跳转...\n")
+
+    # 直接调用 tpilot 下的 plan（同文件内可访问）
+    plan(
+        requirement=requirement,
+        name=name,
+        app_package=app_package,
+        app_activity=app_activity,
+        app_id=app_id,
+        auto_yes=auto_yes,
+        resume=resume,
+        multi_config=multi_config,
+    )
