@@ -4,7 +4,14 @@ import sys
 
 import typer
 
-app_typer = typer.Typer(name="app", help="Android App 测试命令")
+app_typer = typer.Typer(name="app", help="多平台测试命令集（Android / Web / API）")
+
+# ── tpilot: Android App 测试子命令组 ──
+tpilot_typer = typer.Typer(
+    name="tpilot",
+    help="Android App 自动化测试：AI 生成测试用例、执行生成报告、重跑失败用例",
+)
+app_typer.add_typer(tpilot_typer)
 
 
 def _interactive_help() -> None:
@@ -19,6 +26,7 @@ def _interactive_help() -> None:
         ("--app-id",      "App 标识（如 com.example.app），默认使用 app-package"),
         ("--auto-yes/-y", "跳过确认步骤，直接执行"),
         ("--resume/-r",   "恢复中断的测试计划"),
+        ("--multi-config/-m", "多设备并行测试配置文件路径 (YAML)"),
     ]
 
     details = {
@@ -28,41 +36,41 @@ def _interactive_help() -> None:
             "    - 产品需求文档的文件路径（如 docs/需求.md）\n"
             "    - 自然语言需求描述文本\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求文档.md\"\n"
-            "    testagent app plan \"用户登录功能测试\""
+            "    testagent app tpilot plan \"需求文档.md\"\n"
+            "    testagent app tpilot plan \"用户登录功能测试\""
         ),
         "--name/-n": (
             "自定义计划名称，用于报告目录和报告标题。\n"
             "  如果不指定，自动从需求文档文件名生成。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" --name my-plan\n"
-            "    testagent app plan \"需求.md\" -n v2.0-regression"
+            "    testagent app tpilot plan \"需求.md\" --name my-plan\n"
+            "    testagent app tpilot plan \"需求.md\" -n v2.0-regression"
         ),
         "--app-package": (
             "Android App 的 package name。\n"
             "  如果连接了设备，会自动检测。手动指定可跳过检测。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" -p com.example.app\n"
-            "    testagent app plan \"需求.md\" -p com.tencent.mm"
+            "    testagent app tpilot plan \"需求.md\" -p com.example.app\n"
+            "    testagent app tpilot plan \"需求.md\" -p com.tencent.mm"
         ),
         "--app-activity": (
             "App 的启动 Activity。\n"
             "  通常不需要指定，Appium 会自动使用默认 Activity。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" -a .MainActivity"
+            "    testagent app tpilot plan \"需求.md\" -a .MainActivity"
         ),
         "--app-id": (
             "App 标识符，用于 App Context Memory（历史用例、学习模式）。\n"
             "  默认使用 app-package 的值。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" --app-id com.example.app"
+            "    testagent app tpilot plan \"需求.md\" --app-id com.example.app"
         ),
         "--auto-yes/-y": (
             "跳过确认步骤，生成用例后直接执行。\n"
             "  适用于 CI/CD 或批量执行场景。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" -y\n"
-            "    testagent app plan \"需求.md\" --app-package com.example.app -y"
+            "    testagent app tpilot plan \"需求.md\" -y\n"
+            "    testagent app tpilot plan \"需求.md\" --app-package com.example.app -y"
         ),
         "--resume/-r": (
             "恢复之前中断的测试计划。\n"
@@ -72,9 +80,27 @@ def _interactive_help() -> None:
             "    latest    — 自动查找最近一次中断的计划\n"
             "    <目录路径> — 指定报告目录路径\n\n"
             "  示例：\n"
-            "    testagent app plan --resume latest\n"
-            "    testagent app plan --resume reports/2026-06-11-015824-my-app/\n"
-            "    testagent app plan -r latest"
+            "    testagent app tpilot plan --resume latest\n"
+            "    testagent app tpilot plan --resume reports/2026-06-11-015824-my-app/\n"
+            "    testagent app tpilot plan -r latest"
+        ),
+        "--multi-config/-m": (
+            "多设备并行测试配置文件路径（YAML 格式）。\n"
+            "  指定后，系统会读取配置，自动为每台手机启动独立的 Appium 实例，\n"
+            "  并行执行测试计划，每台设备在 TUI 面板中独立显示。\n\n"
+            "  配置文件格式：\n"
+            "    assignments:\n"
+            "      - device: \"emulator-5554\"\n"
+            "        plan: \"plans/login.yaml\"\n"
+            "      - device: \"192.168.1.100:5555\"\n"
+            "        plan: \"plans/pay.yaml\"\n\n"
+            "  如果未指定 --multi-config，系统自动进入交互式菜单模式：\n"
+            "    1. 自动扫描 adb devices 发现已连接设备\n"
+            "    2. 让用户选择设备并分配测试计划\n"
+            "    3. 并行执行\n\n"
+            "  示例：\n"
+            "    testagent app tpilot plan -m configs/multi_device.yaml\n"
+            "    testagent app tpilot plan  # 交互式菜单模式"
         ),
     }
 
@@ -82,7 +108,7 @@ def _interactive_help() -> None:
 
     def _render() -> None:
         sys.stdout.write("\033[2J\033[H")  # clear screen
-        sys.stdout.write("  testagent app plan — 交互式帮助\n")
+        sys.stdout.write("  testagent app tpilot plan — 交互式帮助\n")
         sys.stdout.write("  ↑↓ 移动  Enter 查看详情  q 退出\n\n")
         for i, (key, desc) in enumerate(options):
             prefix = "  > " if i == selected else "    "
@@ -116,7 +142,7 @@ def _interactive_help() -> None:
             _render()
 
 
-@app_typer.command(add_help_option=False)
+@tpilot_typer.command(add_help_option=False)
 def plan(
     requirement: str = typer.Argument(
         "", help="产品需求文档路径 或 自然语言需求描述"
@@ -187,7 +213,7 @@ def plan(
     typer.echo(f"  报告: {result.report_path}")
 
 
-@app_typer.command()
+@tpilot_typer.command()
 def replay(
     app_id: str = typer.Option(..., "--app-id", help="App 标识（如 com.example.app）"),
     stats: bool = typer.Option(False, "--stats", help="显示待重跑用例统计"),
