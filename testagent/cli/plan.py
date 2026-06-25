@@ -1931,14 +1931,10 @@ async def run_multi_device_plan(
     config: str | None = None,
     log_fn: Any = None,
 ) -> PlanResult:
-    """Multi-device mode: auto-launch independent terminal windows.
-
-    Each device gets its own .bat file + cmd window running the existing
-    ``plan`` command with ``--device-udid``.  Users interact with each
-    window independently — review, edit, confirm test cases — exactly
-    like single-device mode.
-    """
+    """Multi-device mode: Windows Terminal split-pane, each device independent."""
     import sys as _sys
+    import shutil
+    import subprocess as _sp
     from datetime import datetime
     from pathlib import Path
     from rich.console import Console
@@ -1954,25 +1950,16 @@ async def run_multi_device_plan(
     if not assignments:
         return PlanResult(status="failed", error="No device-plan assignments")
 
-    # ── Log directory ───────────────────────────────────────────────────────
+    # ── 1. Prepare directories ──────────────────────────────────────────────
+    project_dir = Path.cwd()
     log_dir = Path("multi_device_logs") / datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Find venv activate script ───────────────────────────────────────────
     venv_dir = Path(_sys.prefix)
     activate_bat = venv_dir / "Scripts" / "activate.bat"
-    if not activate_bat.exists():
-        activate_bat = None
 
-    # ── Find testagent command ──────────────────────────────────────────────
-    testagent_exe = venv_dir / "Scripts" / "testagent.exe"
-    if testagent_exe.exists():
-        testagent_cmd = f'"{testagent_exe}"'
-    else:
-        testagent_cmd = f'"{_sys.executable}" -m testagent.cli'
-
-    # ── Generate .bat files ─────────────────────────────────────────────────
-    bat_files: list[tuple[str, str, Path]] = []
+    # ── 2. Generate .bat files ──────────────────────────────────────────────
+    bat_paths: list[Path] = []
 
     for a in assignments:
         udid = a.device.udid
@@ -1980,91 +1967,93 @@ async def run_multi_device_plan(
         safe = udid.replace(":", "_").replace(".", "_")
         bat_path = log_dir / f"device_{safe}.bat"
 
+        # Write requirement to file (avoids Chinese encoding issues in cmd)
+        req_file = log_dir / f"requirement_{safe}.txt"
+        req_file.write_text(a.plan_path, encoding="utf-8")
+
         lines = [
             "@echo off",
-            f"title {name} ({udid})",
+            "chcp 65001 > nul",
+            "",
+            f'cd /d "{project_dir}"',
+            "",
             "echo ========================================",
-            f"echo   Device: {name}",
-            f"echo   UDID: {udid}",
-            f"echo   Requirement: {a.plan_path}",
+            f"echo   Device : {udid}",
+            f"echo   Test   : {a.plan_path}",
             "echo ========================================",
             "echo.",
         ]
 
-        if activate_bat:
-            lines.append(f'call "{activate_bat}"')
+        if activate_bat.exists():
+            lines.append(f'if exist "{activate_bat}" call "{activate_bat}"')
+            lines.append("")
 
-        req_escaped = a.plan_path.replace('"', '\\"')
-        cmd_parts = [
-            testagent_cmd,
-            "app", "tpilot", "plan",
-            f'"{req_escaped}"',
-            f"--device-udid {udid}",
-            f"--appium-url {a.device.appium_url}",
-            f"--system-port {a.device.system_port}",
-        ]
-        lines.append(" ".join(cmd_parts))
+        lines.append(
+            f'"{_sys.executable}" -m testagent.cli.plan app tpilot plan '
+            f'--requirement-file "{req_file}" '
+            f'--device-udid {udid} '
+            f'--appium-url {a.device.appium_url} '
+            f'--system-port {a.device.system_port}'
+        )
 
         lines.extend([
+            "",
             "echo.",
-            "echo === Done. Press any key to close ===",
-            "pause > nul",
+            "echo === Done ===",
+            "pause",
         ])
 
         bat_path.write_text("\n".join(lines), encoding="utf-8")
-        bat_files.append((name, udid, bat_path))
+        bat_paths.append(bat_path)
 
-    # ── Launch: Windows Terminal split-pane or fallback to os.startfile ────
-    import shutil
-    import subprocess as _sp
-
+    # ── 3. Launch: wt split-pane or os.startfile fallback ───────────────────
     has_wt = shutil.which("wt") is not None
 
     if has_wt and len(assignments) > 1:
-        # Windows Terminal: split-pane mode (all panes in one window)
         console.print(f"\n  🚀 正在启动 Windows Terminal 分屏...\n")
 
-        # Build wt command with absolute paths
-        wt_args = []
-        for i, (name, udid, bat_path) in enumerate(bat_files):
-            abs_bat = str(bat_path.resolve())
+        wt_parts = []
+        for i, (a, bat) in enumerate(zip(assignments, bat_paths)):
+            udid = a.device.udid
+            name = a.device.name
             if i == 0:
-                wt_args.extend([
-                    "-w", "0",
-                    "--title", f"{name} ({udid})",
-                    "cmd", "/c", abs_bat,
-                ])
+                wt_parts.append(
+                    f'wt -w 0 -d "{project_dir}" '
+                    f'cmd /k "{bat}"'
+                )
             else:
-                wt_args.extend([
-                    ";", "split-pane", "-V",
-                    "--title", f"{name} ({udid})",
-                    "cmd", "/c", abs_bat,
-                ])
+                wt_parts.append(
+                    f'split-pane -V -d "{project_dir}" '
+                    f'cmd /k "{bat}"'
+                )
 
+        wt_cmd = " ; ".join(wt_parts)
         try:
-            _sp.Popen(["wt"] + wt_args)
-            for name, udid, _ in bat_files:
-                console.print(f"    📱 {name} ({udid})")
+            _sp.Popen(wt_cmd, shell=True)
+            for a in assignments:
+                console.print(f"    📱 {a.device.name} ({a.device.udid})")
             console.print(f"\n  💡 点击不同面板切换焦点，各面板独立操作\n")
         except Exception as exc:
-            # Fallback to separate windows
-            console.print(f"  ⚠️ wt 启动失败 ({exc}), 改用独立窗口...\n")
-            for name, udid, bat_path in bat_files:
-                os.startfile(str(bat_path))
-                console.print(f"    📱 {name} ({udid})")
+            console.print(f"  ⚠️ wt 失败 ({exc}), 改用独立窗口...\n")
+            for a, bat in zip(assignments, bat_paths):
+                os.startfile(str(bat))
+                console.print(f"    📱 {a.device.name} ({a.device.udid})")
             console.print()
-
     else:
-        # Fallback: separate windows via os.startfile
-        console.print(f"\n  🚀 正在为 {len(assignments)} 台设备启动独立测试窗口...\n")
-
-        for name, udid, bat_path in bat_files:
-            os.startfile(str(bat_path))
-            console.print(f"    📱 {name} ({udid})")
-
-        console.print(f"\n  💡 关闭窗口即结束，各窗口完全独立操作\n")
+        console.print(f"\n  🚀 正在启动 {len(assignments)} 个独立窗口...\n")
+        for a, bat in zip(assignments, bat_paths):
+            os.startfile(str(bat))
+            console.print(f"    📱 {a.device.name} ({a.device.udid})")
+        console.print(f"\n  💡 关闭窗口即结束\n")
 
     console.print(f"  📁 脚本目录: {log_dir}/\n")
+
+    return PlanResult(
+        status="launched",
+        requirement_source="multi-device",
+        summary=f"Launched {len(assignments)} test panes",
+        case_count=len(assignments),
+    )
 
     return PlanResult(
         status="launched",
