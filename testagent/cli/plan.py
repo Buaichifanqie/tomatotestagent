@@ -1920,20 +1920,20 @@ async def run_multi_device_plan(
     config: str | None = None,
     log_fn: Any = None,
 ) -> PlanResult:
-    """Run multiple test plans across multiple devices in parallel.
+    """Multi-device mode: auto-launch independent terminal windows.
 
-    Architecture: subprocess per device + rich.Live split-panel TUI.
-    Each device runs as an independent subprocess. Its stdout is captured
-    via pipe, fed into a queue by a background reader thread, and rendered
-    by the main process's ``rich.Live`` — the sole writer to the terminal.
+    Each device gets its own terminal window/tab running the existing
+    ``plan`` command with ``--device-udid``.  Users interact with each
+    window independently — review, edit, confirm test cases — exactly
+    like single-device mode.
+
+    After all windows are launched, the main process prints the commands
+    and exits.  Windows run to completion independently.
     """
     import subprocess as _sp
     import sys as _sys
-    import threading
-    import re as _re
-    from datetime import datetime
-    from pathlib import Path
-    from queue import Queue, Empty
+    import shutil
+    import time
 
     _log = log_fn or (lambda msg: None)
 
@@ -1945,195 +1945,56 @@ async def run_multi_device_plan(
     if not assignments:
         return PlanResult(status="failed", error="No device-plan assignments")
 
-    dm = DeviceManager()
-    devices = [a.device for a in assignments]
-    _log(f"Preparing {len(devices)} device(s)...")
-    try:
-        await dm.prepare_all(devices)
-    except Exception as exc:
-        _log(f"Device preparation failed: {exc}")
-        await dm.teardown_all()
-        return PlanResult(status="failed", error=str(exc))
-
-    log_dir = Path("multi_device_logs") / datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── 1. Launch subprocesses with piped stdout ────────────────────────────
-    procs: dict[str, _sp.Popen] = {}
-    log_paths: dict[str, Path] = {}
-    output_queues: dict[str, Queue] = {}
-    device_names: dict[str, str] = {}
-
+    # ── Build commands ──────────────────────────────────────────────────────
+    commands: list[tuple[str, str, str]] = []
     for a in assignments:
         udid = a.device.udid
-        device_names[udid] = a.device.name
-        safe = udid.replace(":", "_").replace(".", "_")
-        log_path = log_dir / f"{safe}.log"
-        log_paths[udid] = log_path
-
-        cmd = [
-            _sys.executable, "-m", "testagent.cli.plan",
-            "run-single",
-            "--requirement", a.plan_path,
-            "--device-udid", udid,
-            "--appium-url", a.device.appium_url,
-            "--system-port", str(a.device.system_port),
-            "--auto-yes",
-        ]
-
-        env = dict(os.environ)
-        env["NO_COLOR"] = "1"
-        env["TERM"] = "dumb"
-
-        proc = _sp.Popen(
-            cmd,
-            stdout=_sp.PIPE,
-            stderr=_sp.STDOUT,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-            env=env,
+        name = a.device.name
+        cmd = (
+            f'"{_sys.executable}" -m testagent.cli.plan '
+            f'"tpilot" "plan" '
+            f'"{a.plan_path}" '
+            f'--device-udid {udid} '
+            f'--appium-url {a.device.appium_url} '
+            f'--system-port {a.device.system_port}'
         )
-        procs[udid] = proc
+        commands.append((name, udid, cmd))
 
-        q: Queue = Queue()
-        output_queues[udid] = q
+    # ── Launch independent windows ──────────────────────────────────────────
+    has_wt = shutil.which("wt") is not None
 
-        def _reader(p=proc, queue=q, lp=log_path):
-            with open(lp, "w", encoding="utf-8") as lf:
-                for line in p.stdout:
-                    lf.write(line)
-                    lf.flush()
-                    clean = _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', line.rstrip())
-                    queue.put(clean)
-                queue.put(None)
+    _log(f"\n  🚀 正在为 {len(assignments)} 台设备启动独立测试窗口...\n")
 
-        threading.Thread(target=_reader, daemon=True).start()
+    if has_wt:
+        # Windows Terminal: one tab per device
+        wt_parts = []
+        for i, (name, udid, cmd) in enumerate(commands):
+            prefix = "wt" if i == 0 else "nt"
+            wt_parts.append(
+                f'{prefix} --title "{name} ({udid})" cmd /c "{cmd} & pause"'
+            )
+        wt_cmd = " ; ".join(wt_parts)
+        _sp.Popen(["cmd", "/c", wt_cmd])
+    else:
+        # Fallback: one cmd.exe window per device
+        for i, (name, udid, cmd) in enumerate(commands):
+            _sp.Popen([
+                "cmd", "/c", "start",
+                f"{name} ({udid})",
+                "cmd", "/c", f'{cmd} & pause',
+            ])
+            time.sleep(0.3)
 
-    # ── 2. Split-panel TUI ──────────────────────────────────────────────────
-    device_output: dict[str, list[str]] = {udid: [] for udid in procs}
-    MAX_PANEL_LINES = 35
-
-    def _drain_queues():
-        for udid in procs:
-            while True:
-                try:
-                    line = output_queues[udid].get_nowait()
-                except Empty:
-                    break
-                if line is None:
-                    device_output[udid].append("━━━ ✅ Completed ━━━")
-                else:
-                    device_output[udid].append(line)
-
-    def _build_display():
-        from rich.panel import Panel
-        from rich.columns import Columns
-        _drain_queues()
-        panels = []
-        for udid in procs:
-            lines = device_output[udid][-MAX_PANEL_LINES:]
-            content = "\n".join(lines) if lines else "[dim]Waiting for output...[/dim]"
-            p = procs[udid]
-            name = device_names.get(udid, udid)
-            if p.poll() is None:
-                status, border = "⏳ Running", "yellow"
-            elif p.returncode == 0:
-                status, border = "✅ Done", "green"
-            else:
-                status, border = f"❌ Exit {p.returncode}", "red"
-            panels.append(Panel(
-                content,
-                title=f"📱 {name} ({udid})  {status}",
-                border_style=border,
-                padding=(0, 1),
-            ))
-        return Columns(panels, equal=True, expand=True)
-
-    from rich.console import Console
-    from rich.live import Live
-    console = Console()
-
-    try:
-        with Live(_build_display(), console=console, refresh_per_second=4, screen=True) as live:
-            while any(procs[u].poll() is None for u in procs):
-                await asyncio.sleep(0.25)
-                live.update(_build_display())
-            await asyncio.sleep(0.5)
-            live.update(_build_display())
-    except KeyboardInterrupt:
-        for proc in procs.values():
-            proc.terminate()
-        for proc in procs.values():
-            try:
-                proc.wait(timeout=5)
-            except _sp.TimeoutExpired:
-                proc.kill()
-
-    # ── 3. Collect results ──────────────────────────────────────────────────
-    results: dict[str, PlanResult] = {}
-    for udid, proc in procs.items():
-        results[udid] = PlanResult(
-            status="completed" if proc.returncode == 0 else "failed",
-            requirement_source="multi-device",
-        )
-
-    await dm.teardown_all()
-
-    total = len(results)
-    completed = sum(1 for r in results.values() if r.status == "completed")
-    failed_count = total - completed
-    summary = f"Multi-device: {total} devices, {completed} completed, {failed_count} failed"
-
-    for udid, proc in procs.items():
-        icon = "✅" if proc.returncode == 0 else "❌"
-        name = device_names.get(udid, udid)
-        console.print(f"  {icon} {name} ({udid}) — log: {log_paths[udid]}")
+    # ── Print copy-paste commands ───────────────────────────────────────────
+    _log("  ✅ 已打开独立终端窗口，请在各窗口中操作\n")
+    _log("  📋 如需手动运行，命令如下：\n")
+    for name, udid, cmd in commands:
+        _log(f"    # {name} ({udid})")
+        _log(f"    {cmd}\n")
 
     return PlanResult(
-        status="completed" if failed_count == 0 else "partial",
+        status="launched",
         requirement_source="multi-device",
-        summary=summary,
-        case_count=total,
-        passed=completed,
-        failed=failed_count,
+        summary=f"Launched {len(assignments)} independent test windows",
+        case_count=len(assignments),
     )
-
-
-# ── Subprocess entry point for multi-device ──────────────────────────────────
-
-def run_single_device_subprocess() -> None:
-    """CLI entry point — each device's subprocess calls this.
-
-    Usage: python -m testagent.cli.plan run-single \\
-        --requirement "测试登录" --device-udid emulator-5554 \\
-        --appium-url http://localhost:4723 --system-port 8200 --auto-yes
-    """
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["run-single"])
-    parser.add_argument("--requirement", required=True)
-    parser.add_argument("--device-udid", default="")
-    parser.add_argument("--appium-url", default="http://localhost:4723")
-    parser.add_argument("--system-port", type=int, default=8200)
-    parser.add_argument("--auto-yes", action="store_true")
-    args = parser.parse_args()
-
-    result = asyncio.run(_plan_command_async(
-        requirement=args.requirement,
-        app_package="",
-        app_activity="",
-        device_udid=args.device_udid,
-        appium_url=args.appium_url,
-        system_port=args.system_port,
-        auto_yes=args.auto_yes,
-    ))
-
-    sys.exit(0 if result[0] is not None else 1)
-
-
-if __name__ == "__main__":
-    import sys as _sys
-    if len(_sys.argv) > 1 and _sys.argv[1] == "run-single":
-        run_single_device_subprocess()
