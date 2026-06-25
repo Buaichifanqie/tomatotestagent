@@ -1929,19 +1929,17 @@ async def run_multi_device_plan(
 ) -> PlanResult:
     """Multi-device mode: auto-launch independent terminal windows.
 
-    Each device gets its own terminal window/tab running the existing
+    Each device gets its own .bat file + cmd window running the existing
     ``plan`` command with ``--device-udid``.  Users interact with each
     window independently — review, edit, confirm test cases — exactly
     like single-device mode.
-
-    After all windows are launched, the main process prints the commands
-    and exits.  Windows run to completion independently.
     """
-    import subprocess as _sp
     import sys as _sys
-    import shutil
-    import time
+    from datetime import datetime
+    from pathlib import Path
+    from rich.console import Console
 
+    console = Console()
     _log = log_fn or (lambda msg: None)
 
     if config:
@@ -1952,52 +1950,75 @@ async def run_multi_device_plan(
     if not assignments:
         return PlanResult(status="failed", error="No device-plan assignments")
 
-    # ── Build commands ──────────────────────────────────────────────────────
-    commands: list[tuple[str, str, str]] = []
+    # ── Log directory ───────────────────────────────────────────────────────
+    log_dir = Path("multi_device_logs") / datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Find venv activate script ───────────────────────────────────────────
+    venv_dir = Path(_sys.prefix)
+    activate_bat = venv_dir / "Scripts" / "activate.bat"
+    if not activate_bat.exists():
+        activate_bat = None
+
+    # ── Find testagent command ──────────────────────────────────────────────
+    testagent_exe = venv_dir / "Scripts" / "testagent.exe"
+    if testagent_exe.exists():
+        testagent_cmd = f'"{testagent_exe}"'
+    else:
+        testagent_cmd = f'"{_sys.executable}" -m testagent.cli'
+
+    # ── Generate .bat files ─────────────────────────────────────────────────
+    bat_files: list[tuple[str, str, Path]] = []
+
     for a in assignments:
         udid = a.device.udid
         name = a.device.name
-        cmd = (
-            f'"{_sys.executable}" -m testagent.cli.plan '
-            f'"tpilot" "plan" '
-            f'"{a.plan_path}" '
-            f'--device-udid {udid} '
-            f'--appium-url {a.device.appium_url} '
-            f'--system-port {a.device.system_port}'
-        )
-        commands.append((name, udid, cmd))
+        safe = udid.replace(":", "_").replace(".", "_")
+        bat_path = log_dir / f"device_{safe}.bat"
 
-    # ── Launch independent windows ──────────────────────────────────────────
-    has_wt = shutil.which("wt") is not None
+        lines = [
+            "@echo off",
+            f"title {name} ({udid})",
+            "echo ========================================",
+            f"echo   Device: {name}",
+            f"echo   UDID: {udid}",
+            f"echo   Requirement: {a.plan_path}",
+            "echo ========================================",
+            "echo.",
+        ]
 
-    _log(f"\n  🚀 正在为 {len(assignments)} 台设备启动独立测试窗口...\n")
+        if activate_bat:
+            lines.append(f'call "{activate_bat}"')
 
-    if has_wt:
-        # Windows Terminal: one tab per device
-        wt_parts = []
-        for i, (name, udid, cmd) in enumerate(commands):
-            prefix = "wt" if i == 0 else "nt"
-            wt_parts.append(
-                f'{prefix} --title "{name} ({udid})" cmd /c "{cmd} & pause"'
-            )
-        wt_cmd = " ; ".join(wt_parts)
-        _sp.Popen(["cmd", "/c", wt_cmd])
-    else:
-        # Fallback: one cmd.exe window per device
-        for i, (name, udid, cmd) in enumerate(commands):
-            _sp.Popen([
-                "cmd", "/c", "start",
-                f"{name} ({udid})",
-                "cmd", "/c", f'{cmd} & pause',
-            ])
-            time.sleep(0.3)
+        req_escaped = a.plan_path.replace('"', '\\"')
+        cmd_parts = [
+            testagent_cmd,
+            "app", "tpilot", "plan",
+            f'"{req_escaped}"',
+            f"--device-udid {udid}",
+            f"--appium-url {a.device.appium_url}",
+            f"--system-port {a.device.system_port}",
+        ]
+        lines.append(" ".join(cmd_parts))
 
-    # ── Print copy-paste commands ───────────────────────────────────────────
-    _log("  ✅ 已打开独立终端窗口，请在各窗口中操作\n")
-    _log("  📋 如需手动运行，命令如下：\n")
-    for name, udid, cmd in commands:
-        _log(f"    # {name} ({udid})")
-        _log(f"    {cmd}\n")
+        lines.extend([
+            "echo.",
+            "echo === Done. Press any key to close ===",
+            "pause > nul",
+        ])
+
+        bat_path.write_text("\n".join(lines), encoding="utf-8")
+        bat_files.append((name, udid, bat_path))
+
+    # ── Launch windows via os.startfile ─────────────────────────────────────
+    console.print(f"\n  🚀 正在为 {len(assignments)} 台设备启动独立测试窗口...\n")
+
+    for name, udid, bat_path in bat_files:
+        os.startfile(str(bat_path))
+        console.print(f"    📱 {name} ({udid})")
+
+    console.print(f"\n  📁 批处理文件: {log_dir}/")
+    console.print("  💡 关闭窗口即结束，各窗口完全独立操作\n")
 
     return PlanResult(
         status="launched",
