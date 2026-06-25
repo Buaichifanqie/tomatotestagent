@@ -175,17 +175,19 @@ def plan(
     import asyncio
     from testagent.cli.plan import run_single_plan
 
-    # Validation
-    if not resume and not requirement:
-        typer.echo("Error: 请提供需求文档路径或使用 --resume 恢复中断的计划。")
-        raise typer.Exit(1)
-
     def _log(msg: str) -> None:
         typer.echo(msg)
 
+    # Multi-device mode: --multi-config YAML
     if multi_config:
         from testagent.cli.plan import run_multi_device_plan
-        result = asyncio.run(run_multi_device_plan(config=multi_config, log_fn=_log))
+        asyncio.run(run_multi_device_plan(config=multi_config, log_fn=_log))
+        return
+
+    # Interactive multi-device menu: no arguments at all
+    if not requirement and not resume:
+        from testagent.cli.plan import run_multi_device_plan
+        asyncio.run(run_multi_device_plan(log_fn=_log))
         return
 
     result = asyncio.run(run_single_plan(
