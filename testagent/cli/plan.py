@@ -1892,10 +1892,11 @@ def interactive_device_menu() -> list[DevicePlanAssignment]:
     typer.echo()
 
     selection = typer.prompt(
-        "请选择要使用的设备 (多选用逗号分隔, 或按 Enter 全选)",
-        default=",".join(str(d["index"]) for d in devices),
+        "请选择要使用的设备 (多选用空格或逗号分隔, 或按 Enter 全选)",
+        default=" ".join(str(d["index"]) for d in devices),
     )
-    selected_indices = [int(s.strip()) for s in selection.split(",") if s.strip()]
+    import re as _re
+    selected_indices = [int(s) for s in _re.split(r"[，, \t]+", selection.strip()) if s.isdigit()]
 
     selected_devices = [d for d in devices if d["index"] in selected_indices]
     if not selected_devices:
