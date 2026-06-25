@@ -19,6 +19,7 @@ def _interactive_help() -> None:
     import msvcrt
 
     options = [
+        ("（无参数）",    "进入交互式多设备菜单：扫描设备 → 分配计划 → 并行执行"),
         ("requirement",   "产品需求文档路径 或 自然语言需求描述"),
         ("--name/-n",     "自定义计划名称"),
         ("--app-package", "App package name（如 com.example.app）"),
@@ -158,6 +159,10 @@ def plan(
         "", "--resume", "-r",
         help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"
     ),
+    device_udid: str = typer.Option(
+        "", "--device-udid",
+        help="指定目标设备 UDID（如 emulator-5554）。不指定则自动进入交互式多设备菜单。"
+    ),
     multi_config: str = typer.Option(
         "", "--multi-config", "-m",
         help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"
@@ -199,6 +204,7 @@ def plan(
         name=name,
         log_fn=_log,
         resume_dir=resume,
+        device_udid=device_udid,
     ))
 
     if result.status == "failed":
@@ -374,6 +380,7 @@ def _plan_backward_compat(
     app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.example.app），默认使用 app-package"),
     auto_yes: bool = typer.Option(False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"),
     resume: str = typer.Option("", "--resume", "-r", help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"),
+    device_udid: str = typer.Option("", "--device-udid", help="指定目标设备 UDID"),
     multi_config: str = typer.Option("", "--multi-config", "-m", help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"),
 ) -> None:
     """[已迁移] 请使用 testagent app tpilot plan"""
@@ -389,5 +396,6 @@ def _plan_backward_compat(
         app_id=app_id,
         auto_yes=auto_yes,
         resume=resume,
+        device_udid=device_udid,
         multi_config=multi_config,
     )

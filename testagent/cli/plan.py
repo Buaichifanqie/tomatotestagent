@@ -1737,6 +1737,7 @@ async def run_single_plan(
     name: str = "",
     log_fn: Any = None,
     resume_dir: str = "",
+    device_udid: str = "",
 ) -> PlanResult:
     """Execute a single requirement document's full test lifecycle.
 
@@ -1771,6 +1772,7 @@ async def run_single_plan(
             app_id=app_id,
             auto_yes=auto_yes,
             resume_dir=resume_dir,
+            device_udid=device_udid,
         )
     except Exception as exc:
         duration_s = time.monotonic() - start_time
