@@ -173,17 +173,13 @@ async def _close_test_session(sid: str) -> None:
         pass
 
 
-async def ensure_appium_running(udid: str = "", port: int = 4723) -> bool:
-    """Ensure an Appium server is running for the given device.
-
-    If *udid* is empty, defaults to checking port 4723 (legacy behavior).
-    Each device gets its own Appium instance on a dedicated port.
-    """
+async def ensure_appium_running() -> bool:
+    """Legacy wrapper — delegates to AppiumManager singleton on port 4723."""
     global _appium_manager
     try:
         await _appium_manager.ensure_appium_running(
-            udid=udid or "default",
-            port=port,
+            udid="emulator-5554",
+            port=4723,
         )
         return True
     except RuntimeError:
@@ -193,7 +189,7 @@ async def ensure_appium_running(udid: str = "", port: int = 4723) -> bool:
 @dataclass
 class AppiumInstance:
     port: int
-    process: Any  # asyncio.subprocess.Process or subprocess.Popen
+    process: asyncio.subprocess.Process
     log_path: str
     url: str
 
@@ -206,8 +202,6 @@ class AppiumManager:
 
     async def ensure_appium_running(self, udid: str, port: int, log_path: str = "") -> AppiumInstance:
         """Start Appium server for *udid* on *port* (or return existing one)."""
-        import subprocess as _sp
-
         if udid in self._instances:
             inst = self._instances[udid]
             if await self._is_healthy(inst.url):
@@ -217,7 +211,7 @@ class AppiumManager:
         if not log_path:
             log_path = os.path.join(tempfile.gettempdir(), f"appium_{udid.replace(':', '_')}.log")
 
-        # Kill anything on the port first
+        # Use the existing module-level _kill_process_on_port
         await _kill_process_on_port(port)
         await asyncio.sleep(1)
 
@@ -231,10 +225,10 @@ class AppiumManager:
         env = {**os.environ, **extra_env}
 
         log_fh = open(log_path, "a", encoding="utf-8")
-
-        # Use subprocess.Popen (works reliably on Windows with .cmd files)
-        proc = _sp.Popen(
-            [appium_path, "-p", str(port), "--allow-insecure", "*:adb_shell"],
+        proc = await asyncio.create_subprocess_exec(
+            appium_path,
+            "-p", str(port),
+            "--allow-insecure", "*:adb_shell",
             stdout=log_fh,
             stderr=log_fh,
             env=env,
@@ -248,13 +242,9 @@ class AppiumManager:
         for _ in range(30):
             await asyncio.sleep(1)
             if await self._is_healthy(url):
-                logger.info(f"Appium started on port {port} for device {udid}")
                 return inst
 
-        raise RuntimeError(
-            f"Appium server on port {port} did not start within 30s for device {udid}. "
-            f"Check log: {log_path}"
-        )
+        raise RuntimeError(f"Appium server on port {port} did not start within 30s for device {udid}")
 
     async def stop(self, udid: str) -> None:
         """Stop Appium server for a single device."""

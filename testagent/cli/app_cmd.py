@@ -12,7 +12,6 @@ def _interactive_help() -> None:
     import msvcrt
 
     options = [
-        ("（无参数）",    "进入交互式多设备菜单：扫描设备 → 分配计划 → 并行执行"),
         ("requirement",   "产品需求文档路径 或 自然语言需求描述"),
         ("--name/-n",     "自定义计划名称"),
         ("--app-package", "App package name（如 com.example.app）"),
@@ -20,7 +19,6 @@ def _interactive_help() -> None:
         ("--app-id",      "App 标识（如 com.example.app），默认使用 app-package"),
         ("--auto-yes/-y", "跳过确认步骤，直接执行"),
         ("--resume/-r",   "恢复中断的测试计划"),
-        ("--multi-config/-m", "多设备并行测试配置文件路径 (YAML)"),
     ]
 
     details = {
@@ -78,24 +76,6 @@ def _interactive_help() -> None:
             "    testagent app plan --resume reports/2026-06-11-015824-my-app/\n"
             "    testagent app plan -r latest"
         ),
-        "--multi-config/-m": (
-            "多设备并行测试配置文件路径（YAML 格式）。\n"
-            "  指定后，系统会读取配置，自动为每台手机启动独立的 Appium 实例，\n"
-            "  并行执行测试计划，每台设备在 TUI 面板中独立显示。\n\n"
-            "  配置文件格式：\n"
-            "    assignments:\n"
-            "      - device: \"emulator-5554\"\n"
-            "        plan: \"plans/login.yaml\"\n"
-            "      - device: \"192.168.1.100:5555\"\n"
-            "        plan: \"plans/pay.yaml\"\n\n"
-            "  如果未指定 --multi-config，系统自动进入交互式菜单模式：\n"
-            "    1. 自动扫描 adb devices 发现已连接设备\n"
-            "    2. 让用户选择设备并分配测试计划\n"
-            "    3. 并行执行\n\n"
-            "  示例：\n"
-            "    testagent app plan -m configs/multi_device.yaml\n"
-            "    testagent app plan  # 交互式菜单模式"
-        ),
     }
 
     selected = 0
@@ -152,9 +132,9 @@ def plan(
         "", "--resume", "-r",
         help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"
     ),
-    device_udid: str = typer.Option(
-        "", "--device-udid",
-        help="指定目标设备 UDID（如 emulator-5554）。"
+    multi_config: str = typer.Option(
+        "", "--multi-config", "-m",
+        help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"
     ),
     show_help: bool = typer.Option(
         False, "--help", "-h", is_eager=True,
@@ -169,12 +149,18 @@ def plan(
     import asyncio
     from testagent.cli.plan import run_single_plan
 
+    # Validation
+    if not resume and not requirement:
+        typer.echo("Error: 请提供需求文档路径或使用 --resume 恢复中断的计划。")
+        raise typer.Exit(1)
+
     def _log(msg: str) -> None:
         typer.echo(msg)
 
-    if not requirement and not resume:
-        typer.echo("Error: 请提供需求文档路径或使用 --resume 恢复中断的计划。")
-        raise typer.Exit(1)
+    if multi_config:
+        from testagent.cli.plan import run_multi_device_plan
+        result = asyncio.run(run_multi_device_plan(config=multi_config, log_fn=_log))
+        return
 
     result = asyncio.run(run_single_plan(
         requirement,
@@ -185,7 +171,6 @@ def plan(
         name=name,
         log_fn=_log,
         resume_dir=resume,
-        device_udid=device_udid,
     ))
 
     if result.status == "failed":

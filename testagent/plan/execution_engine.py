@@ -180,11 +180,11 @@ class ExecutionEngine:
             self._log(f"  [Keyboard target detected: '{step.target}', sending KEYCODE_ENTER]")
             import subprocess
             try:
-                from testagent.common.adb_utils import adb_command
                 await asyncio.to_thread(
-                    lambda: adb_command(self.device_udid, "shell", "input", "keyevent", "KEYCODE_ENTER",
-                                       capture_output=True, text=True, timeout=10,
-                                       encoding="utf-8", errors="replace"),
+                    subprocess.run,
+                    ["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"],
+                    capture_output=True, text=True, timeout=10,
+                    encoding="utf-8", errors="replace",
                 )
                 await asyncio.sleep(1)
                 return {"_source": "adb:KEYCODE_ENTER"}
@@ -1088,7 +1088,6 @@ class ExecutionEngine:
         _recorder = SegmentedRecorder(
             output_dir=self.config.output_dir,
             tc_id=tc.id,
-            device_udid=self.device_udid,
         )
         await _recorder.start()
 
@@ -1593,12 +1592,12 @@ class ExecutionEngine:
                 # Appium mobile:shell, because mobile:shell can trigger adbd
                 # crashes (especially on network-affecting commands like
                 # svc wifi disable) which kills the Appium session.
-                from testagent.common.adb_utils import adb_command
+                import subprocess
                 cmd = step.value or step.target
                 try:
                     proc = await asyncio.to_thread(
-                        adb_command,
-                        self.device_udid, "shell", cmd,
+                        subprocess.run,
+                        ["adb", "shell", cmd],
                         capture_output=True, text=True, timeout=15,
                         encoding="utf-8", errors="replace",
                     )
@@ -1896,10 +1895,10 @@ class ExecutionEngine:
 
         # Force-stop before launch to ensure cold start (prevents apps
         # from restoring previous page state on warm start)
-        from testagent.common.adb_utils import adb_command
+        import subprocess
         try:
-            adb_command(
-                self.device_udid, "shell", "am", "force-stop", pkg,
+            subprocess.run(
+                ["adb", "shell", "am", "force-stop", pkg],
                 capture_output=True, timeout=10,
             )
         except Exception:
@@ -1972,13 +1971,13 @@ class ExecutionEngine:
         ``force-stop`` clears all in-memory state (page stack, runtime vars,
         caches), so the next TC's ``launch`` starts from a cold boot.
         """
-        from testagent.common.adb_utils import adb_command
+        import subprocess
 
         pkg = self.config.app_package or ""
         if pkg:
             try:
-                adb_command(
-                    self.device_udid, "shell", "am", "force-stop", pkg,
+                subprocess.run(
+                    ["adb", "shell", "am", "force-stop", pkg],
                     capture_output=True, timeout=10,
                 )
             except Exception:
@@ -1988,9 +1987,8 @@ class ExecutionEngine:
         # because mobile:shell can trigger adbd crashes on network commands).
         for _cmd in ("svc wifi enable", "svc data enable"):
             try:
-                from testagent.common.adb_utils import adb_command
-                adb_command(
-                    self.device_udid, "shell", _cmd,
+                subprocess.run(
+                    ["adb", "shell", _cmd],
                     capture_output=True, timeout=10,
                 )
             except Exception:
@@ -2420,10 +2418,10 @@ class ExecutionEngine:
 
     def _logcat_start(self, tc_id: str) -> None:
         """Clear logcat buffer before a test case."""
-        from testagent.common.adb_utils import adb_command
+        import subprocess
         try:
-            adb_command(
-                self.device_udid, "logcat", "-c",
+            subprocess.run(
+                ["adb", "logcat", "-c"],
                 capture_output=True, timeout=5,
                 encoding="utf-8", errors="replace",
             )
@@ -2432,12 +2430,12 @@ class ExecutionEngine:
 
     def _logcat_stop(self, tc: TestCase) -> None:
         """If TC failed, dump last 20 lines of device log."""
-        from testagent.common.adb_utils import adb_command
+        import subprocess
         if tc.execution.status not in (ExecutionStatus.FAILED, ExecutionStatus.ABORTED):
             return
         try:
-            result = adb_command(
-                self.device_udid, "logcat", "-v", "time", "-d", "-t", "20",
+            result = subprocess.run(
+                ["adb", "logcat", "-v", "time", "-d", "-t", "20"],
                 capture_output=True, text=True, timeout=5,
                 encoding="utf-8", errors="replace",
             )

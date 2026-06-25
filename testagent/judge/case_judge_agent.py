@@ -135,7 +135,6 @@ class CaseJudgeAgent:
         frames_desc = self._build_frames_description(recording_paths)
         prompt = self._build_prompt(tc, frames_desc)
 
-        raw: str | None = None
         if recording_paths:
             fps = self._fps if level == "light" else min(self._fps * 2, 3.0)
             raw = await self._call_vision_api_sdk(recording_paths, prompt, fps)

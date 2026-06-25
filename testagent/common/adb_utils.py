@@ -7,11 +7,8 @@ All multi-device ADB operations go through ``adb_command()`` to ensure the
 from __future__ import annotations
 
 import subprocess
+import shlex
 from typing import Any
-
-from testagent.common.logging import get_logger
-
-logger = get_logger(__name__)
 
 
 def adb_command(
@@ -44,7 +41,6 @@ def adb_command(
         cmd = ["adb", "-s", udid, *args]
     else:
         cmd = ["adb", *args]
-    logger.debug("adb_command: %s", " ".join(cmd))
     return subprocess.run(cmd, capture_output=capture_output, text=text,
                           timeout=timeout, encoding=encoding, errors=errors,
                           **kwargs)

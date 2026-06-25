@@ -247,12 +247,5 @@ class PlanConfig(BaseModel):
     abort_policy: AbortPolicy = Field(default_factory=AbortPolicy)
     popup_rules: list[PopupRule] = Field(default_factory=list)
     max_workers: int = 1
-    # ── Device assignment fields (populated by DeviceManager) ──
-    device_udid: str = ""
-    """Target device serial (e.g. ``emulator-5554``). Set by DeviceManager."""
-    appium_url: str = "http://localhost:4723"
-    """Appium server URL for this device. Set by DeviceManager."""
-    system_port: int = 8200
-    """UiAutomator2 systemPort for this device. Set by DeviceManager."""
     cache_enabled: bool = True
     cache_verify_after_tap: bool = False
