@@ -2014,15 +2014,57 @@ async def run_multi_device_plan(
         bat_path.write_text("\n".join(lines), encoding="utf-8")
         bat_files.append((name, udid, bat_path))
 
-    # ── Launch windows via os.startfile ─────────────────────────────────────
-    console.print(f"\n  🚀 正在为 {len(assignments)} 台设备启动独立测试窗口...\n")
+    # ── Launch: Windows Terminal split-pane or fallback to os.startfile ────
+    import shutil
+    import subprocess as _sp
 
-    for name, udid, bat_path in bat_files:
-        os.startfile(str(bat_path))
-        console.print(f"    📱 {name} ({udid})")
+    has_wt = shutil.which("wt") is not None
 
-    console.print(f"\n  📁 批处理文件: {log_dir}/")
-    console.print("  💡 关闭窗口即结束，各窗口完全独立操作\n")
+    if has_wt and len(assignments) > 1:
+        # Windows Terminal: split-pane mode (all panes in one window)
+        console.print(f"\n  🚀 正在启动 Windows Terminal 分屏...\n")
+
+        # Build wt command with absolute paths
+        wt_args = []
+        for i, (name, udid, bat_path) in enumerate(bat_files):
+            abs_bat = str(bat_path.resolve())
+            if i == 0:
+                wt_args.extend([
+                    "-w", "0",
+                    "--title", f"{name} ({udid})",
+                    "cmd", "/c", abs_bat,
+                ])
+            else:
+                wt_args.extend([
+                    ";", "split-pane", "-V",
+                    "--title", f"{name} ({udid})",
+                    "cmd", "/c", abs_bat,
+                ])
+
+        try:
+            _sp.Popen(["wt"] + wt_args)
+            for name, udid, _ in bat_files:
+                console.print(f"    📱 {name} ({udid})")
+            console.print(f"\n  💡 点击不同面板切换焦点，各面板独立操作\n")
+        except Exception as exc:
+            # Fallback to separate windows
+            console.print(f"  ⚠️ wt 启动失败 ({exc}), 改用独立窗口...\n")
+            for name, udid, bat_path in bat_files:
+                os.startfile(str(bat_path))
+                console.print(f"    📱 {name} ({udid})")
+            console.print()
+
+    else:
+        # Fallback: separate windows via os.startfile
+        console.print(f"\n  🚀 正在为 {len(assignments)} 台设备启动独立测试窗口...\n")
+
+        for name, udid, bat_path in bat_files:
+            os.startfile(str(bat_path))
+            console.print(f"    📱 {name} ({udid})")
+
+        console.print(f"\n  💡 关闭窗口即结束，各窗口完全独立操作\n")
+
+    console.print(f"  📁 脚本目录: {log_dir}/\n")
 
     return PlanResult(
         status="launched",
