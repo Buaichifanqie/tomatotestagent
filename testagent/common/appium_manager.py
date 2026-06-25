@@ -189,7 +189,7 @@ async def ensure_appium_running() -> bool:
 @dataclass
 class AppiumInstance:
     port: int
-    process: asyncio.subprocess.Process
+    process: Any  # asyncio.subprocess.Process or subprocess.Popen
     log_path: str
     url: str
 
@@ -202,6 +202,8 @@ class AppiumManager:
 
     async def ensure_appium_running(self, udid: str, port: int, log_path: str = "") -> AppiumInstance:
         """Start Appium server for *udid* on *port* (or return existing one)."""
+        import subprocess as _sp
+
         if udid in self._instances:
             inst = self._instances[udid]
             if await self._is_healthy(inst.url):
@@ -211,7 +213,7 @@ class AppiumManager:
         if not log_path:
             log_path = os.path.join(tempfile.gettempdir(), f"appium_{udid.replace(':', '_')}.log")
 
-        # Use the existing module-level _kill_process_on_port
+        # Kill anything on the port first
         await _kill_process_on_port(port)
         await asyncio.sleep(1)
 
@@ -225,10 +227,10 @@ class AppiumManager:
         env = {**os.environ, **extra_env}
 
         log_fh = open(log_path, "a", encoding="utf-8")
-        proc = await asyncio.create_subprocess_exec(
-            appium_path,
-            "-p", str(port),
-            "--allow-insecure", "*:adb_shell",
+
+        # Use subprocess.Popen (works reliably on Windows with .cmd files)
+        proc = _sp.Popen(
+            [appium_path, "-p", str(port), "--allow-insecure", "*:adb_shell"],
             stdout=log_fh,
             stderr=log_fh,
             env=env,
@@ -242,9 +244,13 @@ class AppiumManager:
         for _ in range(30):
             await asyncio.sleep(1)
             if await self._is_healthy(url):
+                logger.info(f"Appium started on port {port} for device {udid}")
                 return inst
 
-        raise RuntimeError(f"Appium server on port {port} did not start within 30s for device {udid}")
+        raise RuntimeError(
+            f"Appium server on port {port} did not start within 30s for device {udid}. "
+            f"Check log: {log_path}"
+        )
 
     async def stop(self, udid: str) -> None:
         """Stop Appium server for a single device."""
