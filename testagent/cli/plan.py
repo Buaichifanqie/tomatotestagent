@@ -1922,10 +1922,12 @@ async def run_multi_device_plan(
 ) -> PlanResult:
     """Run multiple test plans across multiple devices in parallel.
 
-    Each device runs as a separate subprocess to avoid signal/stdout conflicts.
+    Each device launches in a separate terminal window (Windows Terminal tab
+    or ``start`` fallback) so output streams in real-time without conflicts.
     """
     import subprocess as _sp
     import sys as _sys
+    import shutil
     from datetime import datetime
     from pathlib import Path
 
@@ -1953,40 +1955,48 @@ async def run_multi_device_plan(
     log_dir = Path("multi_device_logs") / datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    _log(f"\n🚀 Launching {len(assignments)} device(s) in parallel...")
-    _log(f"📁 Logs: {log_dir}\n")
+    _log(f"\n🚀 Opening {len(assignments)} terminal window(s)...\n")
 
-    # Launch each device as a subprocess running `run_single_plan`
-    procs: dict[str, tuple[_sp.Popen, Path, DeviceInfo]] = {}
+    # Detect Windows Terminal availability
+    has_wt = shutil.which("wt") is not None
+
+    procs: list[tuple[str, _sp.Popen, Path]] = []
     for a in assignments:
         udid = a.device.udid
         safe = udid.replace(":", "_").replace(".", "_")
         log_path = log_dir / f"{safe}.log"
-        log_fh = open(log_path, "w", encoding="utf-8")
 
-        cmd = [
-            _sys.executable, "-m", "testagent.cli.plan",
-            "run-single",
-            "--requirement", a.plan_path,
-            "--device-udid", udid,
-            "--appium-url", a.device.appium_url,
-            "--system-port", str(a.device.system_port),
-            "--auto-yes",
-        ]
-        proc = _sp.Popen(cmd, stdout=log_fh, stderr=_sp.STDOUT)
-        procs[udid] = (proc, log_path, a.device)
+        inner_cmd = (
+            f'{_sys.executable} -m testagent.cli.plan run-single '
+            f'--requirement "{a.plan_path}" '
+            f'--device-udid {udid} '
+            f'--appium-url {a.device.appium_url} '
+            f'--system-port {a.device.system_port} '
+            f'--auto-yes'
+        )
+
+        # Append " & pause" so the window stays open after completion
+        full_cmd = f'{inner_cmd} & echo. & echo === Done. Press any key to close === & pause > nul'
+
+        if has_wt:
+            # Windows Terminal: open a new tab per device
+            cmd = ["wt", "--title", f"{a.device.name} ({udid})", "cmd", "/c", full_cmd]
+        else:
+            # Fallback: separate cmd.exe windows
+            cmd = ["cmd", "/c", "start", f'"{a.device.name} ({udid})"', "cmd", "/c", full_cmd]
+
+        proc = _sp.Popen(cmd)
+        procs.append((udid, proc, log_path))
         _log(f"  📱 {a.device.name} ({udid}): {a.plan_path[:50]}")
 
     # Wait for all subprocesses
-    _log("")
+    _log("\nWaiting for all devices to finish...\n")
     results: dict[str, PlanResult] = {}
-    pending_tcs: list[TestCase] = []
 
-    for udid, (proc, log_path, device) in procs.items():
+    for udid, proc, log_path in procs:
         proc.wait()
         icon = "✅" if proc.returncode == 0 else "❌"
-        _log(f"  {icon} {device.name} ({udid}) — exit code {proc.returncode} — log: {log_path}")
-        # Parse result from log file (best-effort)
+        _log(f"  {icon} {udid} — exit code {proc.returncode}")
         results[udid] = PlanResult(
             status="completed" if proc.returncode == 0 else "failed",
             requirement_source="multi-device",
@@ -2002,7 +2012,6 @@ async def run_multi_device_plan(
     return PlanResult(
         status="completed" if failed == 0 else "partial",
         requirement_source="multi-device",
-        test_cases=pending_tcs,
         summary=summary,
         case_count=total,
         passed=completed,
