@@ -586,14 +586,26 @@ async def _run_appium_tests(appium_srv: Any) -> list[dict[str, Any]]:
         if not healthy:
             return tasks
 
-        # 2. 创建 Appium Session
+        # 2. 创建 Appium Session — auto-detect first connected device
+        import subprocess as _sp
+        _detected_udid = "emulator-5554"  # fallback
+        try:
+            _dev_result = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
+            for _line in _dev_result.stdout.splitlines():
+                _parts = _line.strip().split()
+                if len(_parts) >= 2 and _parts[1] == "device":
+                    _detected_udid = _parts[0]
+                    break
+        except Exception:
+            pass
+
         session_caps = {
             "capabilities": {
                 "alwaysMatch": {
                     "platformName": "Android",
                     "appium:automationName": "UiAutomator2",
-                    "appium:deviceName": "emulator-5554",
-                    "appium:udid": "emulator-5554",
+                    "appium:deviceName": _detected_udid,
+                    "appium:udid": _detected_udid,
                     "appium:noReset": True,
                     "appium:autoGrantPermissions": True,
                     "appium:newCommandTimeout": 60,

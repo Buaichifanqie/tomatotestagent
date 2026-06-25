@@ -37,10 +37,12 @@ class ADBRecorder:
         output_dir: str,
         tc_id: str,
         adb_path: str = "adb",
+        device_udid: str = "",
     ) -> None:
         self._output_dir = Path(output_dir) / "recordings"
         self._tc_id = tc_id
         self._adb_path = adb_path
+        self._device_udid = device_udid
         self._process: asyncio.subprocess.Process | None = None
         self._output_path: Path | None = None
         self._is_recording = False
@@ -54,8 +56,9 @@ class ADBRecorder:
             # Use adb exec-out to stream raw H264 from the device,
             # pipe to ffmpeg to save as MP4 on the host.
             # No time limit - recording stops when we kill the process.
+            adb_s = f"{self._adb_path} -s {self._device_udid}" if self._device_udid else self._adb_path
             cmd = (
-                f"{self._adb_path} exec-out screenrecord "
+                f"{adb_s} exec-out screenrecord "
                 f"--output-format=h264 --size 540x960 - "
                 f"| ffmpeg -i - -c copy -y \"{self._output_path}\""
             )
@@ -116,11 +119,15 @@ class ADBRecorder:
         return None
 
     @staticmethod
-    def is_available(adb_path: str = "adb") -> bool:
+    def is_available(adb_path: str = "adb", device_udid: str = "") -> bool:
         """Check if adb exec-out screenrecord is available."""
         try:
+            cmd = [adb_path]
+            if device_udid:
+                cmd += ["-s", device_udid]
+            cmd += ["exec-out", "screenrecord", "--help"]
             result = subprocess.run(
-                [adb_path, "exec-out", "screenrecord", "--help"],
+                cmd,
                 capture_output=True,
                 timeout=5,
             )

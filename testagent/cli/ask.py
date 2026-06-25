@@ -548,11 +548,24 @@ async def _create_session() -> str | None:
     2. 再试 androidHome（部分旧版兼容）
     """
     android_home = _ensure_android_home()
+    # Auto-detect first connected device UDID
+    import subprocess as _sp
+    _detected_udid = "emulator-5554"  # fallback default
+    try:
+        _dev_result = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
+        for _line in _dev_result.stdout.splitlines():
+            _parts = _line.strip().split()
+            if len(_parts) >= 2 and _parts[1] == "device":
+                _detected_udid = _parts[0]
+                break
+    except Exception:
+        pass
+
     always_match: dict[str, object] = {
         "platformName": "Android",
         "appium:automationName": "UiAutomator2",
-        "appium:deviceName": "emulator-5554",
-        "appium:udid": "emulator-5554",
+        "appium:deviceName": _detected_udid,
+        "appium:udid": _detected_udid,
         "appium:noReset": True,
         "appium:autoGrantPermissions": True,
         "appium:newCommandTimeout": 120,
