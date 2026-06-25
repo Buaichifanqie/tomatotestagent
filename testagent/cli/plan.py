@@ -1903,31 +1903,15 @@ def interactive_device_menu() -> list[DevicePlanAssignment]:
         typer.echo("❌ 未选择任何设备。")
         raise typer.Exit(1)
 
-    from pathlib import Path
-    plan_dir = Path("plans")
-    available_plans = list(plan_dir.glob("*.yaml")) + list(plan_dir.glob("*.yml"))
-    if not available_plans:
-        typer.echo("⚠️ 未在 plans/ 目录下找到测试计划文件。直接输入路径。")
-        available_plans = []
-
     assignments: list[DevicePlanAssignment] = []
     typer.echo()
     for d in selected_devices:
-        typer.echo(f"📋 为 {d['name']} ({d['udid']}) 选择测试计划:")
-        if available_plans:
-            for i, p in enumerate(available_plans, 1):
-                typer.echo(f"    [{i}] {p.name}")
-            choice = typer.prompt("  请输入编号或直接输入路径", default="1")
-            try:
-                idx = int(choice) - 1
-                plan_path = str(available_plans[idx])
-            except (ValueError, IndexError):
-                plan_path = choice
-        else:
-            plan_path = typer.prompt("  请输入测试计划路径")
+        typer.echo(f"📋 为 {d['name']} ({d['udid']}) 输入测试需求:")
+        typer.echo("    可以是：产品需求文档路径（.md/.txt） 或 自然语言描述")
+        requirement = typer.prompt("  需求")
 
         device_info = DeviceInfo(udid=d["udid"], name=d["name"])
-        assignments.append(DevicePlanAssignment(device=device_info, plan_path=plan_path))
+        assignments.append(DevicePlanAssignment(device=device_info, plan_path=requirement))
 
     return assignments
 
@@ -1969,10 +1953,10 @@ async def run_multi_device_plan(
         import asyncio
         udid = assignment.device.udid
         try:
-            tui.update_log(udid, f"Starting plan: {assignment.plan_path}", "info")
+            tui.update_log(udid, f"Starting plan: {assignment.plan_path[:50]}...", "info")
             report_path, overall, executed_tcs = asyncio.run(
                 _plan_command_async(
-                    requirement=assignment.plan_path,
+                    requirement=assignment.plan_path,  # requirement text or file path
                     app_package="",
                     app_activity="",
                     auto_yes=True,
