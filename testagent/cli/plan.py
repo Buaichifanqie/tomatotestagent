@@ -1983,7 +1983,7 @@ async def run_multi_device_plan(
         except Exception as exc:
             tui.update_log(udid, f"FAILED: {exc}", "error")
             tui.update_summary(udid, "failed")
-            return udid, PlanResult(status="failed", error=str(exc))
+            return udid, PlanResult(status="failed", requirement_source=assignment.plan_path, error=str(exc))
 
     with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
         futures = {
