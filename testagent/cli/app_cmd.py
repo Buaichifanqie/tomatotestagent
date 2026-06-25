@@ -161,15 +161,7 @@ def plan(
     ),
     device_udid: str = typer.Option(
         "", "--device-udid",
-        help="指定目标设备 UDID（如 emulator-5554）。不指定则自动进入交互式多设备菜单。"
-    ),
-    requirement_file: str = typer.Option(
-        "", "--requirement-file",
-        help="从文件读取测试需求（避免命令行中文编码问题）"
-    ),
-    multi_config: str = typer.Option(
-        "", "--multi-config", "-m",
-        help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"
+        help="指定目标设备 UDID（如 emulator-5554）。"
     ),
     show_help: bool = typer.Option(
         False, "--help", "-h", is_eager=True,
@@ -182,27 +174,14 @@ def plan(
         return
 
     import asyncio
-    from pathlib import Path
     from testagent.cli.plan import run_single_plan
 
     def _log(msg: str) -> None:
         typer.echo(msg)
 
-    # Resolve requirement: from file or argument
-    if requirement_file:
-        requirement = Path(requirement_file).read_text(encoding="utf-8").strip()
-
-    # Multi-device mode: --multi-config YAML
-    if multi_config:
-        from testagent.cli.plan import run_multi_device_plan
-        asyncio.run(run_multi_device_plan(config=multi_config, log_fn=_log))
-        return
-
-    # Interactive multi-device menu: no arguments at all
     if not requirement and not resume:
-        from testagent.cli.plan import run_multi_device_plan
-        asyncio.run(run_multi_device_plan(log_fn=_log))
-        return
+        typer.echo("Error: 请提供需求文档路径或使用 --resume 恢复中断的计划。")
+        raise typer.Exit(1)
 
     result = asyncio.run(run_single_plan(
         requirement,
@@ -390,14 +369,11 @@ def _plan_backward_compat(
     auto_yes: bool = typer.Option(False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"),
     resume: str = typer.Option("", "--resume", "-r", help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"),
     device_udid: str = typer.Option("", "--device-udid", help="指定目标设备 UDID"),
-    requirement_file: str = typer.Option("", "--requirement-file", help="从文件读取测试需求"),
-    multi_config: str = typer.Option("", "--multi-config", "-m", help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"),
 ) -> None:
     """[已迁移] 请使用 testagent app tpilot plan"""
     typer.echo("ℹ️  \x1b[33mtestagent app plan 已迁移到 testagent app tpilot plan\x1b[0m")
     typer.echo("   正在自动跳转...\n")
 
-    # 直接调用 tpilot 下的 plan（同文件内可访问）
     plan(
         requirement=requirement,
         name=name,
@@ -407,6 +383,4 @@ def _plan_backward_compat(
         auto_yes=auto_yes,
         resume=resume,
         device_udid=device_udid,
-        requirement_file=requirement_file,
-        multi_config=multi_config,
     )
