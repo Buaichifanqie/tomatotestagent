@@ -1920,7 +1920,15 @@ async def run_multi_device_plan(
     config: str | None = None,
     log_fn: Any = None,
 ) -> PlanResult:
-    """Run multiple test plans across multiple devices in parallel."""
+    """Run multiple test plans across multiple devices in parallel.
+
+    Each device runs as a separate subprocess to avoid signal/stdout conflicts.
+    """
+    import subprocess as _sp
+    import sys as _sys
+    from datetime import datetime
+    from pathlib import Path
+
     _log = log_fn or (lambda msg: None)
 
     if config:
@@ -1941,93 +1949,99 @@ async def run_multi_device_plan(
         await dm.teardown_all()
         return PlanResult(status="failed", error=str(exc))
 
-    # Prepare per-device log files
-    import sys
-    import os as _os
-    from datetime import datetime
-    log_dir = os.path.join("multi_device_logs", datetime.now().strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(log_dir, exist_ok=True)
+    # Build log directory
+    log_dir = Path("multi_device_logs") / datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-    pending_tcs: list[TestCase] = []
-    results: dict[str, PlanResult] = {}
+    _log(f"\n🚀 Launching {len(assignments)} device(s) in parallel...")
+    _log(f"📁 Logs: {log_dir}\n")
 
-    def _run_engine(assignment: DevicePlanAssignment) -> tuple[str, PlanResult]:
-        import asyncio
-        udid = assignment.device.udid
-        safe_name = udid.replace(":", "_").replace(".", "_")
-        log_path = os.path.join(log_dir, f"{safe_name}.log")
-
-        # Redirect stdout/stderr to per-device log file
+    # Launch each device as a subprocess running `run_single_plan`
+    procs: dict[str, tuple[_sp.Popen, Path, DeviceInfo]] = {}
+    for a in assignments:
+        udid = a.device.udid
+        safe = udid.replace(":", "_").replace(".", "_")
+        log_path = log_dir / f"{safe}.log"
         log_fh = open(log_path, "w", encoding="utf-8")
-        old_stdout, old_stderr = sys.stdout, sys.stderr
-        sys.stdout = log_fh
-        sys.stderr = log_fh
 
-        try:
-            _log_fn = lambda msg: log_fh.write(msg + "\n") or log_fh.flush()
-            _log_fn(f"[{udid}] Starting: {assignment.plan_path[:80]}")
+        cmd = [
+            _sys.executable, "-m", "testagent.cli.plan",
+            "run-single",
+            "--requirement", a.plan_path,
+            "--device-udid", udid,
+            "--appium-url", a.device.appium_url,
+            "--system-port", str(a.device.system_port),
+            "--auto-yes",
+        ]
+        proc = _sp.Popen(cmd, stdout=log_fh, stderr=_sp.STDOUT)
+        procs[udid] = (proc, log_path, a.device)
+        _log(f"  📱 {a.device.name} ({udid}): {a.plan_path[:50]}")
 
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                report_path, overall, executed_tcs = loop.run_until_complete(
-                    _plan_command_async(
-                        requirement=assignment.plan_path,
-                        app_package="",
-                        app_activity="",
-                        auto_yes=True,
-                        device_udid=udid,
-                        appium_url=assignment.device.appium_url,
-                        system_port=assignment.device.system_port,
-                    )
-                )
-            finally:
-                loop.close()
+    # Wait for all subprocesses
+    _log("")
+    results: dict[str, PlanResult] = {}
+    pending_tcs: list[TestCase] = []
 
-            _log_fn(f"[{udid}] Done: {overall.passed_count if overall else 0} passed")
-            return udid, PlanResult(
-                status="completed",
-                requirement_source=assignment.plan_path,
-                test_cases=executed_tcs,
-                report_path=report_path or "",
-                case_count=overall.total_count if overall else 0,
-                passed=overall.passed_count if overall else 0,
-            )
-        except Exception as exc:
-            _log_fn(f"[{udid}] FAILED: {exc}")
-            return udid, PlanResult(status="failed", requirement_source=assignment.plan_path, error=str(exc))
-        finally:
-            sys.stdout, sys.stderr = old_stdout, old_stderr
-            log_fh.close()
+    for udid, (proc, log_path, device) in procs.items():
+        proc.wait()
+        icon = "✅" if proc.returncode == 0 else "❌"
+        _log(f"  {icon} {device.name} ({udid}) — exit code {proc.returncode} — log: {log_path}")
+        # Parse result from log file (best-effort)
+        results[udid] = PlanResult(
+            status="completed" if proc.returncode == 0 else "failed",
+            requirement_source="multi-device",
+        )
 
-    _log(f"Executing {len(assignments)} plan(s) in parallel...")
-    _log(f"Logs: {log_dir}/")
-
-    with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
-        futures = {
-            executor.submit(_run_engine, a): a.device.udid
-            for a in assignments
-        }
-        for future in as_completed(futures):
-            udid, result = future.result()
-            results[udid] = result
-            status_icon = "✅" if result.status == "completed" else "❌"
-            _log(f"  {status_icon} {udid}: {result.summary or result.error or 'done'}")
-            if result.test_cases:
-                pending_tcs.extend(result.test_cases)
     await dm.teardown_all()
 
-    total = sum(r.case_count for r in results.values() if r.case_count)
-    passed = sum(r.passed for r in results.values() if r.passed)
-    failed = total - passed
-    summary = f"Multi-device: {total} cases across {len(results)} devices: {passed} passed, {failed} failed"
+    total = len(results)
+    completed = sum(1 for r in results.values() if r.status == "completed")
+    failed = total - completed
+    summary = f"Multi-device: {total} devices, {completed} completed, {failed} failed"
 
     return PlanResult(
-        status="completed",
+        status="completed" if failed == 0 else "partial",
         requirement_source="multi-device",
         test_cases=pending_tcs,
         summary=summary,
         case_count=total,
-        passed=passed,
+        passed=completed,
         failed=failed,
     )
+
+
+# ── Subprocess entry point for multi-device ──────────────────────────────────
+
+def run_single_device_subprocess() -> None:
+    """CLI entry point called by run_multi_device_plan subprocess.
+
+    Usage: python -m testagent.cli.plan run-single \\
+        --requirement <text> --device-udid <udid> \\
+        --appium-url <url> --system-port <port> --auto-yes
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=["run-single"])
+    parser.add_argument("--requirement", required=True)
+    parser.add_argument("--device-udid", default="")
+    parser.add_argument("--appium-url", default="http://localhost:4723")
+    parser.add_argument("--system-port", type=int, default=8200)
+    parser.add_argument("--auto-yes", action="store_true")
+    args = parser.parse_args()
+
+    result = asyncio.run(_plan_command_async(
+        requirement=args.requirement,
+        device_udid=args.device_udid,
+        appium_url=args.appium_url,
+        system_port=args.system_port,
+        auto_yes=args.auto_yes,
+    ))
+
+    sys.exit(0 if result[0] is not None else 1)
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if len(_sys.argv) > 1 and _sys.argv[1] == "run-single":
+        run_single_device_subprocess()
