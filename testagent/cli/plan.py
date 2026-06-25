@@ -1954,17 +1954,23 @@ async def run_multi_device_plan(
         udid = assignment.device.udid
         try:
             tui.update_log(udid, f"Starting plan: {assignment.plan_path[:50]}...", "info")
-            report_path, overall, executed_tcs = asyncio.run(
-                _plan_command_async(
-                    requirement=assignment.plan_path,  # requirement text or file path
-                    app_package="",
-                    app_activity="",
-                    auto_yes=True,
-                    device_udid=udid,
-                    appium_url=assignment.device.appium_url,
-                    system_port=assignment.device.system_port,
+            # Use new_event_loop() instead of asyncio.run() — signal only works in main thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                report_path, overall, executed_tcs = loop.run_until_complete(
+                    _plan_command_async(
+                        requirement=assignment.plan_path,  # requirement text or file path
+                        app_package="",
+                        app_activity="",
+                        auto_yes=True,
+                        device_udid=udid,
+                        appium_url=assignment.device.appium_url,
+                        system_port=assignment.device.system_port,
+                    )
                 )
-            )
+            finally:
+                loop.close()
             tui.update_summary(udid, "completed")
             return udid, PlanResult(
                 status="completed",
