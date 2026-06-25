@@ -1301,14 +1301,17 @@ async def _plan_command_async(
     # Ensure Appium is still healthy before execution
     from testagent.common.appium_manager import ensure_appium_running
 
-    typer.echo("  [Checking Appium server...]")
-    if not await ensure_appium_running():
-        typer.echo("  [Appium not running, attempting to start...]")
-        if not await ensure_appium_running():
-            typer.echo("❌ Failed to start Appium server.")
+    # Parse port from appium_url (e.g. "http://localhost:4723" → 4723)
+    _appium_port = int(config.appium_url.rsplit(":", 1)[-1]) if config.appium_url else 4723
+
+    typer.echo(f"  [Checking Appium server on port {_appium_port}...]")
+    if not await ensure_appium_running(udid=config.device_udid, port=_appium_port):
+        typer.echo(f"  [Appium not running on port {_appium_port}, attempting to start...]")
+        if not await ensure_appium_running(udid=config.device_udid, port=_appium_port):
+            typer.echo(f"❌ Failed to start Appium server on port {_appium_port}.")
             typer.echo("   Please start it manually: appium")
             raise typer.Exit(1)
-    typer.echo("  [Appium server OK]")
+    typer.echo(f"  [Appium server OK on port {_appium_port}]")
 
     # ── Infer states for execution (order preserved as generated) ───────
     from testagent.plan.scheduler import reorder_for_execution
@@ -1686,8 +1689,9 @@ async def _resume_plan(
 
         from testagent.common.appium_manager import ensure_appium_running
 
-        if not await ensure_appium_running():
-            _log("Error: Appium server is not available.")
+        _port = int(config.appium_url.rsplit(":", 1)[-1]) if config.appium_url else 4723
+        if not await ensure_appium_running(udid=config.device_udid, port=_port):
+            _log(f"Error: Appium server is not available on port {_port}.")
             return None, None, completed_tcs + remaining_tcs
 
         engine = ExecutionEngine(

@@ -173,13 +173,17 @@ async def _close_test_session(sid: str) -> None:
         pass
 
 
-async def ensure_appium_running() -> bool:
-    """Legacy wrapper — delegates to AppiumManager singleton on port 4723."""
+async def ensure_appium_running(udid: str = "", port: int = 4723) -> bool:
+    """Ensure an Appium server is running for the given device.
+
+    If *udid* is empty, defaults to checking port 4723 (legacy behavior).
+    Each device gets its own Appium instance on a dedicated port.
+    """
     global _appium_manager
     try:
         await _appium_manager.ensure_appium_running(
-            udid="emulator-5554",
-            port=4723,
+            udid=udid or "default",
+            port=port,
         )
         return True
     except RuntimeError:
