@@ -1088,6 +1088,7 @@ class ExecutionEngine:
         _recorder = SegmentedRecorder(
             output_dir=self.config.output_dir,
             tc_id=tc.id,
+            device_udid=self.device_udid,
         )
         await _recorder.start()
 
