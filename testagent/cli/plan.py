@@ -50,7 +50,7 @@ class PlanResult:
 # ── helper functions ─────────────────────────────────────────────────────────
 
 
-async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
+async def _detect_app_package(requirement: str, device_udid: str = "") -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Auto-detect app package from connected Android device.
 
     Uses ``adb`` to list third-party packages on the connected device, then
@@ -60,17 +60,17 @@ async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEval
     Returns:
         The matched package name, or ``None`` if detection fails.
     """
-    import subprocess
+    from testagent.common.adb_utils import adb_command
 
     # ── Check device connection ────────────────────────────────────────────
     try:
+        import subprocess
         result = subprocess.run(
             ["adb", "devices"],
             capture_output=True, text=True, timeout=5,
             encoding="utf-8", errors="replace",
         )
         lines = [l.strip() for l in result.stdout.split("\n") if l.strip()]
-        # lines[0] is "List of devices attached"; anything after with \t means connected
         devices = [l for l in lines[1:] if "\tdevice" in l]
         if not devices:
             typer.echo("  [adb: no device connected, cannot auto-detect app package]")
@@ -84,8 +84,8 @@ async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEval
 
     # ── List 3rd-party packages ────────────────────────────────────────────
     try:
-        result = subprocess.run(
-            ["adb", "shell", "pm", "list", "packages", "-3"],
+        result = adb_command(
+            device_udid, "shell", "pm", "list", "packages", "-3",
             capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace",
         )
@@ -140,7 +140,7 @@ async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEval
     return None
 
 
-async def _detect_app_version(package: str) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
+async def _detect_app_version(package: str, device_udid: str = "") -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Auto-detect app version from connected Android device.
 
     Uses ``adb shell dumpsys package`` to extract the versionName of the
@@ -149,11 +149,11 @@ async def _detect_app_version(package: str) -> tuple[str | None, OverallEvaluati
     Returns:
         The version string (e.g. "8.95.0"), or ``None`` if detection fails.
     """
-    import subprocess
+    from testagent.common.adb_utils import adb_command
 
     try:
-        result = subprocess.run(
-            ["adb", "shell", "dumpsys", "package", package],
+        result = adb_command(
+            device_udid, "shell", "dumpsys", "package", package,
             capture_output=True, text=True, timeout=15,
             encoding="utf-8", errors="replace",
         )
@@ -704,7 +704,7 @@ async def _plan_command_async(
 
     # ── Auto-detect app package if not provided ──────────────────────────
     if not app_package:
-        detected = await _detect_app_package(requirement)
+        detected = await _detect_app_package(requirement, device_udid=device_udid)
         if detected:
             app_package = detected
 
@@ -714,7 +714,7 @@ async def _plan_command_async(
     # ── Auto-detect app version from device ─────────────────────────────
     detected_version: str | None = None
     if app_package:
-        detected_version = await _detect_app_version(app_package)
+        detected_version = await _detect_app_version(app_package, device_udid=device_udid)
         if detected_version:
             typer.echo(f"  [auto-detected app version: {detected_version}]")
 
@@ -1301,9 +1301,14 @@ async def _plan_command_async(
     # Ensure Appium is still healthy before execution
     from testagent.common.appium_manager import ensure_appium_running
 
+    typer.echo("  [Checking Appium server...]")
     if not await ensure_appium_running():
-        typer.echo("❌ Appium server is not available. Please start Appium manually.")
-        raise typer.Exit(1)
+        typer.echo("  [Appium not running, attempting to start...]")
+        if not await ensure_appium_running():
+            typer.echo("❌ Failed to start Appium server.")
+            typer.echo("   Please start it manually: appium")
+            raise typer.Exit(1)
+    typer.echo("  [Appium server OK]")
 
     # ── Infer states for execution (order preserved as generated) ───────
     from testagent.plan.scheduler import reorder_for_execution
