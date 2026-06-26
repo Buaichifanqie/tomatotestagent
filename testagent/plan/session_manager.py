@@ -38,6 +38,8 @@ class SessionManager:
         self.appium_url = appium_url
         self._session_id: str | None = None
         self.session_state = SessionState()
+        self._device_udid: str = ""
+        self._system_port: int = 8200
 
     @property
     def session_id(self) -> str | None:
@@ -59,8 +61,14 @@ class SessionManager:
         Returns:
             The session ID string, or None if creation failed.
         """
+        # Store for later recovery
+        if device_udid:
+            self._device_udid = device_udid
+        if system_port != 8200:
+            self._system_port = system_port
+
         android_home = ensure_android_home()
-        udid = device_udid or "emulator-5554"
+        udid = device_udid or self._device_udid or "emulator-5554"
         caps: dict[str, object] = {
             "platformName": "Android",
             "appium:automationName": "UiAutomator2",
@@ -154,7 +162,10 @@ class SessionManager:
         self._session_id = None
         self.session_state.mark_disconnected()
         self.session_state.record_recovery()
-        sid = self.create_session()
+        sid = self.create_session(
+            device_udid=self._device_udid,
+            system_port=self._system_port,
+        )
         if sid:
             # Successful recovery — reset the counter so a stable
             # session doesn't exhaust the retry limit.

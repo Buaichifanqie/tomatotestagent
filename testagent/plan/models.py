@@ -243,9 +243,24 @@ class PlanConfig(BaseModel):
     app_activity: str = ""
     output_dir: str = ""
     auto_yes: bool = False
+    device_udid: str = ""
+    appium_url: str = "http://localhost:4723"
+    system_port: int = 8200
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     abort_policy: AbortPolicy = Field(default_factory=AbortPolicy)
     popup_rules: list[PopupRule] = Field(default_factory=list)
     max_workers: int = 1
     cache_enabled: bool = True
     cache_verify_after_tap: bool = False
+
+    def get_effective_system_port(self) -> int:
+        """Return the system port to use for this device.
+
+        When ``system_port`` is the default 8200 and a ``device_udid`` is set,
+        auto-assign a unique port (8200-8299) based on the device UDID hash.
+        This allows multiple devices to share one Appium server without
+        systemPort conflicts.
+        """
+        if self.system_port != 8200 or not self.device_udid:
+            return self.system_port
+        return 8200 + (sum(ord(c) for c in self.device_udid) % 100)

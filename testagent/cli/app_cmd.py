@@ -17,6 +17,8 @@ def _interactive_help() -> None:
         ("--app-package", "App package name（如 com.example.app）"),
         ("--app-activity","App launch activity"),
         ("--app-id",      "App 标识（如 com.example.app），默认使用 app-package"),
+        ("--device-udid/-d", "目标设备序列号，多设备时必须指定"),
+        ("--appium-port",  "Appium 服务器端口（默认 4723）"),
         ("--auto-yes/-y", "跳过确认步骤，直接执行"),
         ("--resume/-r",   "恢复中断的测试计划"),
     ]
@@ -56,6 +58,30 @@ def _interactive_help() -> None:
             "  默认使用 app-package 的值。\n\n"
             "  示例：\n"
             "    testagent app plan \"需求.md\" --app-id com.example.app"
+        ),
+        "--device-udid/-d": (
+            "目标设备序列号（UDID）。\n"
+            "  多设备并行测试时必须指定，确保每个终端连接到正确的设备。\n"
+            "  可通过 `adb devices` 查看已连接设备的序列号。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" -d emulator-5554\n"
+            "    testagent app plan \"需求.md\" -d 192.168.1.100:5555\n\n"
+            "  多设备并行（共享一个 Appium 服务器）：\n"
+            "    终端1: testagent app plan \"视频播放\" -d emulator-5554 --name video\n"
+            "    终端2: testagent app plan \"搜索功能\" -d emulator-5556 --name search"
+        ),
+        "--appium-port": (
+            "Appium 服务器端口。默认 4723。\n\n"
+            "  方式一：多设备共用一个 Appium（推荐，systemPort 自动分配）\n"
+            "    只需启动一个 Appium，两个终端都用默认端口：\n"
+            "    终端1: testagent app plan \"视频\" -d emulator-5554\n"
+            "    终端2: testagent app plan \"搜索\" -d emulator-5556\n\n"
+            "  方式二：每台设备用独立的 Appium 服务器\n"
+            "    分别启动两个 Appium（不同端口），然后各自指定：\n"
+            "    appium -p 4723   (给 emulator-5554)\n"
+            "    appium -p 4724   (给 emulator-5556)\n"
+            "    终端1: testagent app plan \"视频\" -d emulator-5554 --appium-port 4723\n"
+            "    终端2: testagent app plan \"搜索\" -d emulator-5556 --appium-port 4724"
         ),
         "--auto-yes/-y": (
             "跳过确认步骤，生成用例后直接执行。\n"
@@ -125,6 +151,14 @@ def plan(
     app_package: str = typer.Option("", "--app-package", "-p", help="App package name"),
     app_activity: str = typer.Option("", "--app-activity", "-a", help="App launch activity"),
     app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.example.app），默认使用 app-package"),
+    device_udid: str = typer.Option(
+        "", "--device-udid", "-d",
+        help="目标设备序列号（如 emulator-5554、192.168.1.100:5555）。多设备时必须指定。"
+    ),
+    appium_port: int = typer.Option(
+        4723, "--appium-port",
+        help="Appium 服务器端口。多设备共用一个 Appium 时不需要指定；每台设备用独立 Appium 时分别指定不同端口。"
+    ),
     auto_yes: bool = typer.Option(
         False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"
     ),
@@ -167,6 +201,8 @@ def plan(
         app_package=app_package,
         app_activity=app_activity,
         app_id=app_id,
+        device_udid=device_udid,
+        appium_url=f"http://localhost:{appium_port}",
         auto_yes=auto_yes,
         name=name,
         log_fn=_log,

@@ -47,9 +47,11 @@ class SegmentedRecorder:
         self,
         output_dir: str,
         tc_id: str,
+        device_udid: str = "",
     ) -> None:
         self._output_dir = Path(output_dir) / "recordings" / tc_id
         self._tc_id = tc_id
+        self._device_udid = device_udid
 
         self._segment_paths: list[str] = []   # local paths of saved segments
         self._device_path: str = ""            # current segment's device path
@@ -57,6 +59,12 @@ class SegmentedRecorder:
         self._segment_counter = 0
         self._adb_process: asyncio.subprocess.Process | None = None
         self._is_recording = False
+
+    def _adb_cmd(self, *args: str) -> list[str]:
+        """Build an ADB command with optional device targeting."""
+        if self._device_udid:
+            return ["adb", "-s", self._device_udid, *args]
+        return ["adb", *args]
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -103,10 +111,9 @@ class SegmentedRecorder:
 
         try:
             self._adb_process = await asyncio.create_subprocess_exec(
-                "adb", "shell", "screenrecord",
-                "--time-limit", str(_SEGMENT_LIMIT_S),
-                "--bit-rate", "2000000",
-                self._device_path,
+                *self._adb_cmd("shell", "screenrecord",
+                               "--time-limit", str(_SEGMENT_LIMIT_S),
+                               self._device_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -137,7 +144,7 @@ class SegmentedRecorder:
         # This makes screenrecord finalise the MP4 file and exit cleanly.
         try:
             kill_proc = await asyncio.create_subprocess_exec(
-                "adb", "shell", "pkill", "-2", "screenrecord",
+                *self._adb_cmd("shell", "pkill", "-2", "screenrecord"),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -169,7 +176,7 @@ class SegmentedRecorder:
 
         try:
             pull = await asyncio.create_subprocess_exec(
-                "adb", "pull", self._device_path, self._local_path,
+                *self._adb_cmd("pull", self._device_path, self._local_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -193,7 +200,7 @@ class SegmentedRecorder:
             # Clean up device file
             try:
                 rm_proc = await asyncio.create_subprocess_exec(
-                    "adb", "shell", "rm", "-f", self._device_path,
+                    *self._adb_cmd("shell", "rm", "-f", self._device_path),
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )

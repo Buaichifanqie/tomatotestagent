@@ -173,17 +173,56 @@ async def _close_test_session(sid: str) -> None:
         pass
 
 
-async def ensure_appium_running() -> bool:
-    """Legacy wrapper — delegates to AppiumManager singleton on port 4723."""
+async def ensure_appium_running(
+    udid: str = "",
+    port: int = 4723,
+    appium_url: str = "",
+) -> str | None:
+    """Ensure an Appium server is running for the given device.
+
+    When multiple devices are used, each gets its own Appium instance on a
+    unique port (4723 + hash(udid) % 100). This avoids port conflicts when
+    two processes start simultaneously.
+
+    Retries up to 3 times if the first start attempt fails.
+
+    Args:
+        udid: Device serial. Empty string uses legacy default.
+        port: Appium server port (base port, may be auto-adjusted).
+        appium_url: If provided, extracts port from URL (overrides *port*).
+
+    Returns:
+        The actual Appium URL if successful, None if failed.
+    """
     global _appium_manager
-    try:
-        await _appium_manager.ensure_appium_running(
-            udid="emulator-5554",
-            port=4723,
-        )
-        return True
-    except RuntimeError:
-        return False
+    # Extract port from URL if provided
+    if appium_url:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(appium_url)
+            if parsed.port:
+                port = parsed.port
+        except Exception:
+            pass
+    actual_udid = udid or "emulator-5554"
+    # Auto-assign unique port per device (avoid conflicts in multi-device mode)
+    # Use deterministic hash so the same udid always gets the same port
+    if udid and port == 4723:
+        port = 4723 + (sum(ord(c) for c in udid) % 100)
+
+    for attempt in range(3):
+        try:
+            inst = await _appium_manager.ensure_appium_running(udid=actual_udid, port=port)
+            return inst.url
+        except RuntimeError:
+            if attempt < 2:
+                logger.warning("Appium start attempt %d/3 failed for %s on port %d, retrying...",
+                               attempt + 1, actual_udid, port)
+                await asyncio.sleep(3)
+            else:
+                logger.error("Appium failed to start after 3 attempts for %s on port %d",
+                             actual_udid, port)
+    return None
 
 
 @dataclass

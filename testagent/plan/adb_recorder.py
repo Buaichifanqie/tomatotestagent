@@ -37,10 +37,12 @@ class ADBRecorder:
         output_dir: str,
         tc_id: str,
         adb_path: str = "adb",
+        device_udid: str = "",
     ) -> None:
         self._output_dir = Path(output_dir) / "recordings"
         self._tc_id = tc_id
         self._adb_path = adb_path
+        self._device_udid = device_udid
         self._process: asyncio.subprocess.Process | None = None
         self._output_path: Path | None = None
         self._is_recording = False
@@ -54,8 +56,9 @@ class ADBRecorder:
             # Use adb exec-out to stream raw H264 from the device,
             # pipe to ffmpeg to save as MP4 on the host.
             # No time limit - recording stops when we kill the process.
+            device_flag = f"-s {self._device_udid} " if self._device_udid else ""
             cmd = (
-                f"{self._adb_path} exec-out screenrecord "
+                f"{self._adb_path} {device_flag}exec-out screenrecord "
                 f"--output-format=h264 --size 540x960 - "
                 f"| ffmpeg -i - -c copy -y \"{self._output_path}\""
             )

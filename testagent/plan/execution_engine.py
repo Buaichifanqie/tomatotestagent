@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from testagent.common.adb_utils import adb_command
 from testagent.common.appium_manager import ensure_appium_running
 from testagent.plan.scheduler import _has_state_conflict, _infer_state
 from testagent.mcp_servers.appium_server.tools import (
@@ -93,6 +94,7 @@ class ExecutionEngine:
         self._token_tracker = token_tracker
         self.session_manager = session_manager or SessionManager(
             retry_limit=config.retry.session,
+            appium_url=config.appium_url,
         )
         self._consecutive_blocked = 0
         self._start_time: float = 0.0
@@ -178,13 +180,12 @@ class ExecutionEngine:
         _keyboard_keywords = ("键盘搜索", "键盘回车", "keyboard search", "keyboard enter", "enter键", "回车键")
         if any(kw in (step.target or "").lower() for kw in _keyboard_keywords):
             self._log(f"  [Keyboard target detected: '{step.target}', sending KEYCODE_ENTER]")
-            import subprocess
             try:
                 await asyncio.to_thread(
-                    subprocess.run,
-                    ["adb", "shell", "input", "keyevent", "KEYCODE_ENTER"],
+                    adb_command,
+                    self.config.device_udid,
+                    "shell", "input", "keyevent", "KEYCODE_ENTER",
                     capture_output=True, text=True, timeout=10,
-                    encoding="utf-8", errors="replace",
                 )
                 await asyncio.sleep(1)
                 return {"_source": "adb:KEYCODE_ENTER"}
@@ -796,7 +797,10 @@ class ExecutionEngine:
         for attempt in range(1, max_attempts + 1):
             if self._interrupted:
                 return None
-            sid = self.session_manager.create_session()
+            sid = self.session_manager.create_session(
+                device_udid=self.config.device_udid,
+                system_port=self.config.get_effective_system_port(),
+            )
             if sid:
                 return sid
             if attempt < max_attempts:
@@ -816,14 +820,18 @@ class ExecutionEngine:
         return None
 
     async def _recover_session(self) -> None:
-        """Attempt to recover a dead Appium session before taking a failure screenshot."""
-        try:
-            new_sid = self.session_manager.recover_session()
-            if new_sid:
-                self._log(f"  [Session recovered: {new_sid[:12]}...]")
-                await asyncio.sleep(2)
-        except Exception as exc:
-            self._log(f"  [Session recovery failed: {exc}]")
+        """Attempt to recover a dead Appium session.
+
+        Uses _retry_create_session which retries up to 5 times with 5s delays,
+        giving UiAutomator2 enough time to restart after force-stop.
+        """
+        self._log("  [Session unhealthy — recovering...]")
+        new_sid = self._retry_create_session(max_attempts=5, delay=5.0)
+        if new_sid:
+            self._log(f"  [Session recovered: {new_sid[:12]}...]")
+            await asyncio.sleep(2)
+        else:
+            self._log("  [Session recovery failed]")
 
     async def execute_all(self, test_cases: list[TestCase]) -> list[TestCase]:
         """Execute all test cases sequentially.
@@ -850,7 +858,13 @@ class ExecutionEngine:
         signal.signal(signal.SIGINT, self._handle_interrupt)
 
         # ── Create Appium session before execution ────────────────────────
-        sid = self.session_manager.create_session()
+        effective_port = self.config.get_effective_system_port()
+        if effective_port != self.config.system_port:
+            self._log(f"[Auto-assigned system_port={effective_port} for device {self.config.device_udid}]")
+        sid = self.session_manager.create_session(
+            device_udid=self.config.device_udid,
+            system_port=effective_port,
+        )
         if sid:
             self._log(f"[Appium session created: {sid[:12]}...]")
         else:
@@ -916,7 +930,11 @@ class ExecutionEngine:
                         current_app_state = set()
 
                         # ── Appium server health check — restart if process died ──
-                        if not await ensure_appium_running():
+                        actual_url = await ensure_appium_running(
+                            udid=self.config.device_udid,
+                            appium_url=self.config.appium_url,
+                        )
+                        if not actual_url:
                             self._consecutive_session_failures += 1
                             self._log(
                                 f"[Appium 恢复失败 ({self._consecutive_session_failures}/"
@@ -1088,6 +1106,7 @@ class ExecutionEngine:
         _recorder = SegmentedRecorder(
             output_dir=self.config.output_dir,
             tc_id=tc.id,
+            device_udid=self.config.device_udid,
         )
         await _recorder.start()
 
@@ -1204,14 +1223,13 @@ class ExecutionEngine:
             except Exception as exc:
                 self._log(f"  [Final screenshot error (non-fatal): {exc}]")
 
-            if _recorder is not None:
-                await _recorder.stop()
-                for seg_path in _recorder.get_segments():
-                    seg_rel = f"recordings/{tc.id}/{Path(seg_path).name}"
-                    tc.execution.evidence.append(
-                        EvidenceItem(type="recording", path=seg_rel)
-                    )
-                    self._log(f"  [Recording saved: {seg_rel}]")
+            await _recorder.stop()
+            for seg_path in _recorder.get_segments():
+                seg_rel = f"recordings/{tc.id}/{Path(seg_path).name}"
+                tc.execution.evidence.append(
+                    EvidenceItem(type="recording", path=seg_rel)
+                )
+                self._log(f"  [Recording saved: {seg_rel}]")
             # Log screenshot count for visibility
             scr_count = sum(1 for ev in tc.execution.evidence if ev.type == "screenshot")
             if scr_count:
@@ -1592,14 +1610,13 @@ class ExecutionEngine:
                 # Appium mobile:shell, because mobile:shell can trigger adbd
                 # crashes (especially on network-affecting commands like
                 # svc wifi disable) which kills the Appium session.
-                import subprocess
                 cmd = step.value or step.target
                 try:
                     proc = await asyncio.to_thread(
-                        subprocess.run,
-                        ["adb", "shell", cmd],
+                        adb_command,
+                        self.config.device_udid,
+                        "shell", cmd,
                         capture_output=True, text=True, timeout=15,
-                        encoding="utf-8", errors="replace",
                     )
                     result = {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
                     # After KEYCODE_HOME (切后台), ensure app is brought back
@@ -1649,6 +1666,11 @@ class ExecutionEngine:
                 "invalid session id",
                 "session is either terminated",
                 "instrumentation process is not running",
+                "ReadTimeout",
+                "ConnectError",
+                "timed out",
+                "connection refused",
+                "cannot be proxied",
             )
             if any(p in result_str for p in _dead_patterns):
                 new_sid = self.session_manager.recover_session()
@@ -1678,10 +1700,11 @@ class ExecutionEngine:
 
                 if not _session_healthy:
                     self._log("  [Session unhealthy after step failure — recovering...]")
-                    new_sid = self.session_manager.recover_session()
+                    new_sid = self._retry_create_session(max_attempts=5, delay=5.0)
                     if new_sid:
                         _sid = new_sid
                         session_id = new_sid
+                        self._log(f"  [Session recovered: {new_sid[:12]}...]")
                         await asyncio.sleep(2)
                         result = await _exec_action()
                         result_str = str(result)
@@ -1895,10 +1918,10 @@ class ExecutionEngine:
 
         # Force-stop before launch to ensure cold start (prevents apps
         # from restoring previous page state on warm start)
-        import subprocess
         try:
-            subprocess.run(
-                ["adb", "shell", "am", "force-stop", pkg],
+            adb_command(
+                self.config.device_udid,
+                "shell", "am", "force-stop", pkg,
                 capture_output=True, timeout=10,
             )
         except Exception:
@@ -1921,8 +1944,21 @@ class ExecutionEngine:
             await asyncio.sleep(3)
             if not result.get("error"):
                 self._log(f"App launched (retry): {pkg}")
-            else:
-                self._log(f"App launch failed: {result.get('error', '')[:80]}")
+
+        # ── Wait until app is actually responsive ──
+        # After launch, the app may still be loading (splash screen, content).
+        # Poll app_get_source until we get a non-empty page source, up to 10s.
+        for _attempt in range(5):
+            try:
+                src_result = await app_get_source(
+                    appium_url=url, session_id=sid, timeout=5,
+                )
+                if src_result.get("source"):
+                    return  # App is responsive
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+        self._log("  [Warning: app may not be fully loaded after launch]")
 
     def _check_precondition(self, tc: TestCase) -> bool:
         """Check and execute precondition setup with retry.
@@ -1971,13 +2007,12 @@ class ExecutionEngine:
         ``force-stop`` clears all in-memory state (page stack, runtime vars,
         caches), so the next TC's ``launch`` starts from a cold boot.
         """
-        import subprocess
-
         pkg = self.config.app_package or ""
         if pkg:
             try:
-                subprocess.run(
-                    ["adb", "shell", "am", "force-stop", pkg],
+                adb_command(
+                    self.config.device_udid,
+                    "shell", "am", "force-stop", pkg,
                     capture_output=True, timeout=10,
                 )
             except Exception:
@@ -1987,8 +2022,9 @@ class ExecutionEngine:
         # because mobile:shell can trigger adbd crashes on network commands).
         for _cmd in ("svc wifi enable", "svc data enable"):
             try:
-                subprocess.run(
-                    ["adb", "shell", _cmd],
+                adb_command(
+                    self.config.device_udid,
+                    "shell", _cmd,
                     capture_output=True, timeout=10,
                 )
             except Exception:
@@ -2418,26 +2454,24 @@ class ExecutionEngine:
 
     def _logcat_start(self, tc_id: str) -> None:
         """Clear logcat buffer before a test case."""
-        import subprocess
         try:
-            subprocess.run(
-                ["adb", "logcat", "-c"],
+            adb_command(
+                self.config.device_udid,
+                "logcat", "-c",
                 capture_output=True, timeout=5,
-                encoding="utf-8", errors="replace",
             )
         except Exception:
             pass
 
     def _logcat_stop(self, tc: TestCase) -> None:
         """If TC failed, dump last 20 lines of device log."""
-        import subprocess
         if tc.execution.status not in (ExecutionStatus.FAILED, ExecutionStatus.ABORTED):
             return
         try:
-            result = subprocess.run(
-                ["adb", "logcat", "-v", "time", "-d", "-t", "20"],
+            result = adb_command(
+                self.config.device_udid,
+                "logcat", "-v", "time", "-d", "-t", "20",
                 capture_output=True, text=True, timeout=5,
-                encoding="utf-8", errors="replace",
             )
             if result.stdout.strip():
                 self._log(f"Last device logs ({tc.id}):")

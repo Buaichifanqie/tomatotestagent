@@ -27,16 +27,19 @@ async def _appium_post(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     if ":sessionId" in path and not session_id:
-        return {"error": "No Appium session — call create_session() first"}
+        return {"error": "No Appium session — call create_session() first", "status_code": 0, "body": {}}
     if session_id:
         path = path.replace(":sessionId", session_id)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-        response = await client.post(f"{appium_url}{path}", json=payload or {})
     try:
-        body: dict[str, Any] = response.json()
-    except Exception:
-        body = {"raw": response.text}
-    return {"status_code": response.status_code, "body": body}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            response = await client.post(f"{appium_url}{path}", json=payload or {})
+        try:
+            body: dict[str, Any] = response.json()
+        except Exception:
+            body = {"raw": response.text}
+        return {"status_code": response.status_code, "body": body}
+    except Exception as exc:
+        return {"error": f"Appium request failed: {exc}", "status_code": 0, "body": {}}
 
 
 async def _appium_delete(
@@ -46,16 +49,19 @@ async def _appium_delete(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     if ":sessionId" in path and not session_id:
-        return {"error": "No Appium session — call create_session() first"}
+        return {"error": "No Appium session — call create_session() first", "status_code": 0, "body": {}}
     if session_id:
         path = path.replace(":sessionId", session_id)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-        response = await client.delete(f"{appium_url}{path}")
     try:
-        body: dict[str, Any] = response.json()
-    except Exception:
-        body = {"raw": response.text}
-    return {"status_code": response.status_code, "body": body}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            response = await client.delete(f"{appium_url}{path}")
+        try:
+            body: dict[str, Any] = response.json()
+        except Exception:
+            body = {"raw": response.text}
+        return {"status_code": response.status_code, "body": body}
+    except Exception as exc:
+        return {"error": f"Appium request failed: {exc}", "status_code": 0, "body": {}}
 
 
 async def _appium_get(
@@ -65,16 +71,19 @@ async def _appium_get(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     if ":sessionId" in path and not session_id:
-        return {"error": "No Appium session — call create_session() first"}
+        return {"error": "No Appium session — call create_session() first", "status_code": 0, "body": {}}
     if session_id:
         path = path.replace(":sessionId", session_id)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-        response = await client.get(f"{appium_url}{path}")
     try:
-        body: dict[str, Any] = response.json()
-    except Exception:
-        body = {"raw": response.text}
-    return {"status_code": response.status_code, "body": body}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            response = await client.get(f"{appium_url}{path}")
+        try:
+            body: dict[str, Any] = response.json()
+        except Exception:
+            body = {"raw": response.text}
+        return {"status_code": response.status_code, "body": body}
+    except Exception as exc:
+        return {"error": f"Appium request failed: {exc}", "status_code": 0, "body": {}}
 
 
 async def _find_element(

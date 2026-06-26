@@ -13,7 +13,6 @@ import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
-from testagent.plan.device_manager import DeviceManager, DeviceInfo, DevicePlanAssignment
 from testagent.plan.execution_engine import ExecutionEngine
 from testagent.plan.session_manager import SessionManager
 from testagent.plan.evaluator import PerTCEvaluator
@@ -28,6 +27,22 @@ from testagent.rag.app_memory import (
 )
 
 from dataclasses import dataclass, field
+
+
+@dataclass
+class DeviceInfo:
+    """Minimal device descriptor for multi-device orchestration."""
+    udid: str
+    name: str = ""
+    appium_url: str = "http://localhost:4723"
+    system_port: int = 8200
+
+
+@dataclass
+class DevicePlanAssignment:
+    """Pairs a device with a test plan path."""
+    device: DeviceInfo
+    plan_path: str
 
 
 @dataclass
@@ -50,7 +65,7 @@ class PlanResult:
 # ── helper functions ─────────────────────────────────────────────────────────
 
 
-async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
+async def _detect_app_package(requirement: str, device_udid: str = "") -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Auto-detect app package from connected Android device.
 
     Uses ``adb`` to list third-party packages on the connected device, then
@@ -60,14 +75,13 @@ async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEval
     Returns:
         The matched package name, or ``None`` if detection fails.
     """
-    import subprocess
+    from testagent.common.adb_utils import adb_command
 
     # ── Check device connection ────────────────────────────────────────────
     try:
-        result = subprocess.run(
-            ["adb", "devices"],
+        result = adb_command(
+            device_udid, "devices",
             capture_output=True, text=True, timeout=5,
-            encoding="utf-8", errors="replace",
         )
         lines = [l.strip() for l in result.stdout.split("\n") if l.strip()]
         # lines[0] is "List of devices attached"; anything after with \t means connected
@@ -84,10 +98,9 @@ async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEval
 
     # ── List 3rd-party packages ────────────────────────────────────────────
     try:
-        result = subprocess.run(
-            ["adb", "shell", "pm", "list", "packages", "-3"],
+        result = adb_command(
+            device_udid, "shell", "pm", "list", "packages", "-3",
             capture_output=True, text=True, timeout=10,
-            encoding="utf-8", errors="replace",
         )
         packages = [
             line.replace("package:", "").strip()
@@ -140,7 +153,7 @@ async def _detect_app_package(requirement: str) -> tuple[str | None, OverallEval
     return None
 
 
-async def _detect_app_version(package: str) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
+async def _detect_app_version(package: str, device_udid: str = "") -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Auto-detect app version from connected Android device.
 
     Uses ``adb shell dumpsys package`` to extract the versionName of the
@@ -149,13 +162,12 @@ async def _detect_app_version(package: str) -> tuple[str | None, OverallEvaluati
     Returns:
         The version string (e.g. "8.95.0"), or ``None`` if detection fails.
     """
-    import subprocess
+    from testagent.common.adb_utils import adb_command
 
     try:
-        result = subprocess.run(
-            ["adb", "shell", "dumpsys", "package", package],
+        result = adb_command(
+            device_udid, "shell", "dumpsys", "package", package,
             capture_output=True, text=True, timeout=15,
-            encoding="utf-8", errors="replace",
         )
         for line in result.stdout.split("\n"):
             stripped = line.strip()
@@ -704,7 +716,7 @@ async def _plan_command_async(
 
     # ── Auto-detect app package if not provided ──────────────────────────
     if not app_package:
-        detected = await _detect_app_package(requirement)
+        detected = await _detect_app_package(requirement, device_udid=device_udid)
         if detected:
             app_package = detected
 
@@ -714,7 +726,7 @@ async def _plan_command_async(
     # ── Auto-detect app version from device ─────────────────────────────
     detected_version: str | None = None
     if app_package:
-        detected_version = await _detect_app_version(app_package)
+        detected_version = await _detect_app_version(app_package, device_udid=device_udid)
         if detected_version:
             typer.echo(f"  [auto-detected app version: {detected_version}]")
 
@@ -1301,9 +1313,16 @@ async def _plan_command_async(
     # Ensure Appium is still healthy before execution
     from testagent.common.appium_manager import ensure_appium_running
 
-    if not await ensure_appium_running():
+    actual_url = await ensure_appium_running(
+        udid=config.device_udid, appium_url=config.appium_url,
+    )
+    if not actual_url:
         typer.echo("❌ Appium server is not available. Please start Appium manually.")
         raise typer.Exit(1)
+    # Update config with the actual Appium URL (may differ if port was auto-assigned)
+    if actual_url != config.appium_url:
+        typer.echo(f"  [Appium: {actual_url}]")
+        config.appium_url = actual_url
 
     # ── Infer states for execution (order preserved as generated) ───────
     from testagent.plan.scheduler import reorder_for_execution
@@ -1681,9 +1700,15 @@ async def _resume_plan(
 
         from testagent.common.appium_manager import ensure_appium_running
 
-        if not await ensure_appium_running():
+        actual_url = await ensure_appium_running(
+            udid=config.device_udid, appium_url=config.appium_url,
+        )
+        if not actual_url:
             _log("Error: Appium server is not available.")
             return None, None, completed_tcs + remaining_tcs
+        if actual_url != config.appium_url:
+            _log(f"  [Appium: {actual_url}]")
+            config.appium_url = actual_url
 
         engine = ExecutionEngine(
             config,
@@ -1733,6 +1758,8 @@ async def run_single_plan(
     app_package: str = "",
     app_activity: str = "",
     app_id: str = "",
+    device_udid: str = "",
+    appium_url: str = "http://localhost:4723",
     auto_yes: bool = True,
     name: str = "",
     log_fn: Any = None,
@@ -1748,6 +1775,8 @@ async def run_single_plan(
         app_package: Android app package name (auto-detected if empty).
         app_activity: Android launch activity.
         app_id: App identifier for App Context Memory.
+        device_udid: Target device serial (e.g. emulator-5554).
+        appium_url: Appium server URL (e.g. http://localhost:4723).
         auto_yes: Skip interactive confirmation (always True for batch).
         name: Custom plan name.
         log_fn: Optional callable(str) for progress messages.
@@ -1769,6 +1798,8 @@ async def run_single_plan(
             app_package=app_package,
             app_activity=app_activity,
             app_id=app_id,
+            device_udid=device_udid,
+            appium_url=appium_url,
             auto_yes=auto_yes,
             resume_dir=resume_dir,
         )
@@ -1936,6 +1967,9 @@ async def run_multi_device_plan(
     log_fn: Any = None,
 ) -> PlanResult:
     """Run multiple test plans across multiple devices in parallel."""
+    from testagent.common.appium_manager import AppiumManager
+    from testagent.plan.port_allocator import PortAllocator
+
     _log = log_fn or (lambda msg: None)
 
     if config:
@@ -1946,15 +1980,23 @@ async def run_multi_device_plan(
     if not assignments:
         return PlanResult(status="failed", error="No device-plan assignments")
 
-    dm = DeviceManager()
-    devices = [a.device for a in assignments]
-    _log(f"Preparing {len(devices)} device(s)...")
-    try:
-        await dm.prepare_all(devices)
-    except Exception as exc:
-        _log(f"Device preparation failed: {exc}")
-        await dm.teardown_all()
-        return PlanResult(status="failed", error=str(exc))
+    # Assign ports and start per-device Appium servers
+    allocator = PortAllocator()
+    appium_mgr = AppiumManager()
+    _log(f"Preparing {len(assignments)} device(s)...")
+    for a in assignments:
+        port_pair = allocator.allocate()
+        a.device.appium_url = f"http://localhost:{port_pair.appium_port}"
+        a.device.system_port = port_pair.system_port
+        try:
+            await appium_mgr.ensure_appium_running(
+                udid=a.device.udid, port=port_pair.appium_port,
+            )
+            _log(f"  Appium ready for {a.device.udid} on port {port_pair.appium_port}")
+        except Exception as exc:
+            _log(f"  Appium start failed for {a.device.udid}: {exc}")
+            await appium_mgr.stop_all()
+            return PlanResult(status="failed", error=str(exc))
 
     pending_tcs: list[TestCase] = []
     results: dict[str, PlanResult] = {}
@@ -1996,7 +2038,7 @@ async def run_multi_device_plan(
             if result.test_cases:
                 pending_tcs.extend(result.test_cases)
 
-    await dm.teardown_all()
+    await appium_mgr.stop_all()
 
     total = sum(r.case_count for r in results.values() if r.case_count)
     passed = sum(r.passed for r in results.values() if r.passed)
