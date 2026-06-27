@@ -160,7 +160,9 @@ class VolcanoVisionClient:
         }
 
         last_exception: Exception | None = None
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout)) as client:
+        # Use shorter connect timeout to fail fast on DNS errors
+        httpx_timeout = httpx.Timeout(connect=10, read=self._timeout, write=self._timeout, pool=10)
+        async with httpx.AsyncClient(timeout=httpx_timeout) as client:
             for attempt in range(self._max_retries):
                 try:
                     endpoint = self._api_url.rstrip("/") + _CHAT_COMPLETIONS_PATH

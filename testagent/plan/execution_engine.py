@@ -30,6 +30,7 @@ from testagent.plan.coordinate_cache import CoordinateCache
 from testagent.plan.models import (
     EvidenceItem,
     ExecutionStatus,
+    ExecutionVerdict,
     FailureType,
     PlanConfig,
     StepExecution,
@@ -776,24 +777,25 @@ class ExecutionEngine:
 
         return False
 
-    def _retry_create_session(self, max_attempts: int = 5, delay: float = 5.0) -> str | None:
-        """Create a new Appium session with retries and delay between attempts.
+    def _retry_create_session(self, max_attempts: int = 3, delay: float = 2.0) -> str | None:
+        """Create a new Appium session with retries and exponential backoff.
 
         After force-stop kills the app and UiAutomator2, Appium needs time to
-        clean up the stale session state before accepting a new session. This
-        method retries with delays instead of failing immediately, avoiding
-        wasted TC iterations in ``execute_all()``.
+        clean up the stale session state before accepting a new session. Uses
+        exponential backoff (2s, 4s, 8s) to avoid wasting time on quick retries
+        while still giving the server enough time to recover.
 
         Args:
-            max_attempts: Maximum number of creation attempts.
-            delay: Seconds to wait between attempts.
+            max_attempts: Maximum number of creation attempts (default 3).
+            delay: Base delay in seconds (doubled each retry).
 
         Returns:
             The new session ID string, or None if all attempts failed.
         """
         # Small initial wait for Appium to register the UiAutomator2 death
-        time.sleep(2)
+        time.sleep(1)
 
+        current_delay = delay
         for attempt in range(1, max_attempts + 1):
             if self._interrupted:
                 return None
@@ -806,13 +808,14 @@ class ExecutionEngine:
             if attempt < max_attempts:
                 self._log(
                     f"  [Session creation attempt {attempt}/{max_attempts} "
-                    f"failed, retrying in {delay}s...]"
+                    f"failed, retrying in {current_delay:.0f}s...]"
                 )
                 # Interruptible sleep: check flag every 0.5s
-                for _ in range(int(delay * 2)):
+                for _ in range(int(current_delay * 2)):
                     if self._interrupted:
                         return None
                     time.sleep(0.5)
+                current_delay *= 2  # Exponential backoff
 
         self._log(
             f"  [Session creation failed after {max_attempts} attempts, giving up]"
@@ -865,6 +868,10 @@ class ExecutionEngine:
             device_udid=self.config.device_udid,
             system_port=effective_port,
         )
+        if not sid:
+            # First attempt failed — retry with backoff
+            self._log("[Session creation failed, retrying...]")
+            sid = self._retry_create_session(max_attempts=3, delay=2.0)
         if sid:
             self._log(f"[Appium session created: {sid[:12]}...]")
         else:
@@ -875,6 +882,8 @@ class ExecutionEngine:
         # ── State-aware execution ────────────────────────────────────────
         current_app_state: set[str] = set()
         _MAX_CONSECUTIVE_SESSION_FAILURES = 2
+        _MAX_TOTAL_SESSION_FAILURES = 5  # Abort plan after this many total session failures
+        _total_session_failures = 0
         _DEVICE_DEAD_REASON = (
             "设备连接中断，无法创建 Appium 会话。可能原因：\n"
             "1. 模拟器已崩溃或被关闭\n"
@@ -895,6 +904,9 @@ class ExecutionEngine:
                     # ── Check if device is dead — abort all remaining TCs ──────
                     if self._consecutive_session_failures >= _MAX_CONSECUTIVE_SESSION_FAILURES:
                         self._mark_aborted(tc, _DEVICE_DEAD_REASON)
+                        continue
+                    if _total_session_failures >= _MAX_TOTAL_SESSION_FAILURES:
+                        self._mark_aborted(tc, f"设备多次会话失败（{_total_session_failures}次），中止剩余用例")
                         continue
 
                     # ── Determine if teardown is needed ─────────────────────────
@@ -919,7 +931,7 @@ class ExecutionEngine:
                         if not get_login_config(pkg):
                             self._log(f"  [No login config for {pkg}, skipping {tc.id}]")
                             tc.execution.status = ExecutionStatus.EXECUTED
-                            tc.execution.verdict = "SKIP"
+                            tc.execution.verdict = ExecutionVerdict.SKIP
                             tc.execution.error_message = f"No login config for {pkg}"
                             continue
 
@@ -936,9 +948,11 @@ class ExecutionEngine:
                         )
                         if not actual_url:
                             self._consecutive_session_failures += 1
+                            _total_session_failures += 1
                             self._log(
                                 f"[Appium 恢复失败 ({self._consecutive_session_failures}/"
-                                f"{_MAX_CONSECUTIVE_SESSION_FAILURES})]"
+                                f"{_MAX_CONSECUTIVE_SESSION_FAILURES}, "
+                                f"总计 {_total_session_failures}/{_MAX_TOTAL_SESSION_FAILURES})]"
                             )
                             self._mark_aborted(tc, _DEVICE_DEAD_REASON)
                             continue
@@ -1908,16 +1922,16 @@ class ExecutionEngine:
         """Launch the app before executing test steps.
 
         The app is force-stopped between TCs, so every TC starts from a
-        clean state. This method ensures the app is in the foreground
-        before any step executes — regardless of whether the LLM
-        generated a correct ``launch`` step or not.
+        clean state. Uses ``am start`` with MAIN/LAUNCHER intent to bypass
+        Android's state restoration (savedInstanceState), which would
+        otherwise restore the app to its last page (e.g. video detail)
+        instead of the homepage.
         """
         pkg = self.config.app_package
         if not pkg:
             return
 
-        # Force-stop before launch to ensure cold start (prevents apps
-        # from restoring previous page state on warm start)
+        # Force-stop before launch to ensure cold start
         try:
             adb_command(
                 self.config.device_udid,
@@ -1927,31 +1941,33 @@ class ExecutionEngine:
         except Exception:
             pass
 
-        sid = self.session_manager.session_id
-        url = self.session_manager.appium_url
-        result = await app_launch(
-            package=pkg, appium_url=url, session_id=sid,
-        )
-        if not result.get("error"):
-            self._log(f"App launched: {pkg}")
-            await asyncio.sleep(3)
-        else:
-            # Retry once
-            await asyncio.sleep(2)
-            result = await app_launch(
-                package=pkg, appium_url=url, session_id=sid,
+        # Launch via MAIN/LAUNCHER intent — bypasses savedInstanceState
+        # and forces the app to start from its launcher activity (homepage).
+        # This prevents apps like Bilibili from restoring to a video detail
+        # page after force-stop.
+        try:
+            adb_command(
+                self.config.device_udid,
+                "shell", "am", "start",
+                "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.LAUNCHER",
+                pkg,
+                capture_output=True, timeout=10,
             )
-            await asyncio.sleep(3)
-            if not result.get("error"):
-                self._log(f"App launched (retry): {pkg}")
+            self._log(f"App launched: {pkg}")
+        except Exception:
+            pass
+
+        await asyncio.sleep(3)
 
         # ── Wait until app is actually responsive ──
-        # After launch, the app may still be loading (splash screen, content).
         # Poll app_get_source until we get a non-empty page source, up to 10s.
+        sid = self.session_manager.session_id
+        url = self.session_manager.appium_url
         for _attempt in range(5):
             try:
                 src_result = await app_get_source(
-                    appium_url=url, session_id=sid, timeout=5,
+                    appium_url=url, session_id=sid,
                 )
                 if src_result.get("source"):
                     return  # App is responsive
@@ -2058,7 +2074,7 @@ class ExecutionEngine:
         if not login_cfg:
             self._log(f"  [No login config for {pkg}, marking {tc.id} as SKIPPED]")
             tc.execution.status = ExecutionStatus.EXECUTED
-            tc.execution.verdict = "SKIP"
+            tc.execution.verdict = ExecutionVerdict.SKIP
             tc.execution.error_message = f"No login config for {pkg}"
             return False
 
@@ -2084,7 +2100,7 @@ class ExecutionEngine:
             if not nav_ok:
                 self._log(f"  [Failed to navigate to login page, marking {tc.id} as SKIPPED]")
                 tc.execution.status = ExecutionStatus.EXECUTED
-                tc.execution.verdict = "SKIP"
+                tc.execution.verdict = ExecutionVerdict.SKIP
                 tc.execution.error_message = "Failed to navigate to login page"
                 return False
 
@@ -2095,7 +2111,7 @@ class ExecutionEngine:
         if not login_ok:
             self._log(f"  [Login failed, marking {tc.id} as SKIPPED]")
             tc.execution.status = ExecutionStatus.EXECUTED
-            tc.execution.verdict = "SKIP"
+            tc.execution.verdict = ExecutionVerdict.SKIP
             tc.execution.error_message = "Login failed"
             return False
 
@@ -2132,7 +2148,6 @@ class ExecutionEngine:
             src_result = await app_get_source(
                 appium_url=self.session_manager.appium_url,
                 session_id=self.session_manager.session_id,
-                timeout=10,
             )
             source = src_result.get("source", "")
             if not source:

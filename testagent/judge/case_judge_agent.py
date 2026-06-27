@@ -139,9 +139,9 @@ class CaseJudgeAgent:
         if recording_paths:
             fps = self._fps if level == "light" else min(self._fps * 2, 3.0)
             raw = await self._call_vision_api_sdk(recording_paths, prompt, fps)
-            if not raw:
-                _logger.info("CaseJudgeAgent: SDK failed, falling back to httpx + base64")
-                raw = await self._call_vision_api_httpx(recording_paths, prompt, fps)
+            # Skip httpx video fallback — it consistently fails with 400 errors
+            # because base64 video payloads are too large for the Chat API.
+            # Go straight to screenshot fallback instead.
 
         if not raw:
             # Both video paths failed → try screenshots as last resort
@@ -268,6 +268,11 @@ class CaseJudgeAgent:
 
             images = []
             for path in sampled:
+                img_size = Path(path).stat().st_size
+                # Skip screenshots larger than 5MB to avoid API errors
+                if img_size > 5 * 1024 * 1024:
+                    _logger.warning("CaseJudgeAgent: skipping large screenshot %s (%.1f MB)", path, img_size / (1024*1024))
+                    continue
                 b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
                 images.append(b64)
 
@@ -294,75 +299,16 @@ class CaseJudgeAgent:
             import httpx
             async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout)) as client:
                 response = await client.post(endpoint, headers=headers, json=payload)
-                response.raise_for_status()
+                if response.status_code != 200:
+                    _logger.error(
+                        "CaseJudgeAgent: screenshot fallback HTTP %d: %s",
+                        response.status_code, response.text[:200],
+                    )
+                    return None
                 result = response.json()
                 return result["choices"][0]["message"]["content"]
         except Exception as e:
-            _logger.error("CaseJudgeAgent: screenshot fallback failed: %s", e)
-            return None
-
-    @staticmethod
-    def _reencode_video(input_path: str) -> str | None:
-        """Re-encode video to standard H.264 MP4 via ffmpeg.
-
-        Some video sources (e.g. Android emulators) produce MP4 files with
-        non-standard codecs that Volcengine's preprocessor cannot handle.
-        Re-encoding to baseline H.264 ensures compatibility.
-
-        Returns:
-            Path to the re-encoded file, or None if ffmpeg is unavailable
-            or re-encoding failed.
-        """
-        import shutil
-        import subprocess
-        import tempfile
-        from pathlib import Path
-
-        if not shutil.which("ffmpeg"):
-            _logger.warning("CaseJudgeAgent: ffmpeg not found, skipping re-encode")
-            return None
-
-        input_p = Path(input_path)
-        if not input_p.exists() or input_p.stat().st_size < 1024:
-            _logger.warning("CaseJudgeAgent: input video too small or missing: %s", input_path)
-            return None
-
-        output_path = str(Path(tempfile.gettempdir()) / f"reencoded_{input_p.name}")
-        try:
-            # Use shell=True on Windows for reliable stderr capture
-            cmd = (
-                f'ffmpeg -y -i "{input_path}" '
-                f'-c:v libx264 -preset fast -crf 23 '
-                f'-pix_fmt yuv420p -movflags +faststart '
-                f'"{output_path}"'
-            )
-            result = subprocess.run(
-                cmd, shell=True, capture_output=True, timeout=120,
-            )
-            output_p = Path(output_path)
-            if result.returncode == 0 and output_p.exists() and output_p.stat().st_size > 1024:
-                _logger.info(
-                    "CaseJudgeAgent: re-encoded %s (%.1f MB) -> %s (%.1f MB)",
-                    input_path, input_p.stat().st_size / (1024*1024),
-                    output_path, output_p.stat().st_size / (1024*1024),
-                )
-                return output_path
-            else:
-                stderr_text = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else "(empty)"
-                stdout_text = result.stdout.decode("utf-8", errors="replace")[:200] if result.stdout else "(empty)"
-                _logger.warning(
-                    "CaseJudgeAgent: ffmpeg re-encode failed (rc=%d): stderr=%s stdout=%s",
-                    result.returncode, stderr_text, stdout_text,
-                )
-                # Clean up partial output
-                if output_p.exists():
-                    output_p.unlink(missing_ok=True)
-                return None
-        except subprocess.TimeoutExpired:
-            _logger.warning("CaseJudgeAgent: ffmpeg re-encode timed out for %s", input_path)
-            return None
-        except Exception as e:
-            _logger.warning("CaseJudgeAgent: re-encode error: %s", e)
+            _logger.error("CaseJudgeAgent: screenshot fallback failed: %s: %s", type(e).__name__, e)
             return None
 
     async def _call_vision_api_sdk(
@@ -392,11 +338,6 @@ class CaseJudgeAgent:
                     _logger.warning("CaseJudgeAgent: skipping tiny video %s (%d bytes)", vp, file_size)
                     continue
 
-                # Re-encode to standard H.264 for Volcengine compatibility
-                # TEMPORARILY DISABLED — testing if removing invalid
-                # preprocess_configs params is sufficient.
-                # reencoded = self._reencode_video(vp)
-                reencoded = None
                 upload_path = vp
 
                 _logger.info("CaseJudgeAgent: uploading video %s (%.1f MB, fps=%.1f)",
@@ -413,13 +354,6 @@ class CaseJudgeAgent:
                     )
                 file_id = file_obj.id
                 _logger.info("CaseJudgeAgent: uploaded, file_id=%s", file_id)
-
-                # Clean up re-encoded temp file
-                if reencoded:
-                    try:
-                        os.unlink(reencoded)
-                    except Exception:
-                        pass
 
                 client.files.wait_for_processing(file_id)
 
@@ -503,12 +437,6 @@ class CaseJudgeAgent:
         # Use the last (most recent) segment — it shows the most relevant state
         vp = video_paths[-1]
 
-        # Re-encode to standard H.264 for compatibility
-        # TEMPORARILY DISABLED — testing if removing invalid
-        # preprocess_configs params is sufficient.
-        # reencoded = self._reencode_video(vp)
-        reencoded = None
-
         # Skip large videos — base64 inline has payload limits
         file_size = os.path.getsize(vp)
         MAX_HTTPX_VIDEO_BYTES = 10 * 1024 * 1024  # 10MB
@@ -524,13 +452,6 @@ class CaseJudgeAgent:
         except Exception as e:
             _logger.error("CaseJudgeAgent: failed to read video for httpx fallback: %s", e)
             return None
-        finally:
-            # Clean up re-encoded temp file
-            if reencoded:
-                try:
-                    os.unlink(reencoded)
-                except Exception:
-                    pass
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",

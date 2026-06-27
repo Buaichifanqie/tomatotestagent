@@ -1413,7 +1413,7 @@ async def _plan_command_async(
                 elif status == ExecutionStatus.FAILED:
                     typer.echo(f"  \033[31m❌ {tc.id} → FAILED\033[0m")
                 else:
-                    typer.echo(f"  \033[33m{tc.id} → {status.value}\033[0m")
+                    typer.echo(f"  \033[33m{tc.id} → {getattr(status, 'value', status)}\033[0m")
 
             # 6. Print token usage for this TC
             try:
@@ -1485,7 +1485,7 @@ async def _plan_command_async(
             tc.execution.previous_attempts.append(first_attempt)
 
             # Reset execution state for retry
-            tc.execution.status = "PENDING"
+            tc.execution.status = ExecutionStatus.PENDING
             tc.execution.verdict = None
             tc.execution.steps = []
             tc.execution.error_message = ""
@@ -1533,7 +1533,7 @@ async def _plan_command_async(
                 typer.echo(f"  {tc.id} → {verdict_str} (retry)")
 
         # Count results
-        retry_passed = sum(1 for tc in retried_tcs if tc.execution.verdict == "PASS")
+        retry_passed = sum(1 for tc in retried_tcs if tc.execution.verdict == ExecutionVerdict.PASS)
         retry_failed = len(retried_tcs) - retry_passed
         typer.echo(f"  Retry results: {retry_passed} passed, {retry_failed} still failed")
 
