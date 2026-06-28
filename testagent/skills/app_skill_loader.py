@@ -153,6 +153,40 @@ class AppSkillLoader:
 
         return "\n\n---\n\n".join(matched_parts)
 
+    def get_hard_rules(self, app_name: str, user_intent: str = "") -> str:
+        """提取所有匹配的子 skill 中的「硬性约束」段落。
+
+        硬性约束（如"不要点击竖屏视频"）必须完整注入 prompt，不做截断。
+        只加载与 user_intent 匹配的子 skill（与 get_matching_content 一致）。
+
+        Returns:
+            所有硬性约束段落的拼接文本，或空字符串。
+        """
+        import re as _re
+
+        files = self.load_app(app_name)
+        if not files:
+            return ""
+
+        intent_lower = user_intent.lower()
+        rules: list[str] = []
+
+        for f in files:
+            if not f.body.strip():
+                continue
+            # 主 skill 总是加载；子 skill 按 trigger 匹配
+            if not f.is_main:
+                trigger = str(f.meta.get("trigger", ""))
+                if trigger and user_intent:
+                    keywords = [kw.strip() for kw in trigger.split("|") if kw.strip()]
+                    if not any(kw in intent_lower for kw in keywords):
+                        continue
+            section = self._extract_section(f.body, "硬性约束")
+            if section:
+                rules.append(section)
+
+        return "\n\n".join(rules)
+
     def get_ui_knowledge(self, app_name: str, user_intent: str) -> str:
         """根据用户意图返回 UI 知识层内容（视觉特征库 + 元素名称 + 交互快捷方式），不包含执行策略。
 
@@ -280,6 +314,135 @@ class AppSkillLoader:
             )
             return None
 
+    @staticmethod
+    def _expand_keywords(keywords: list[str]) -> list[str]:
+        """扩展关键词：对中文长词提取 2 字符滑动窗口子串。
+
+        例：「全屏按钮」→ ['全屏按钮', '全屏', '屏按', '按钮']
+        这样能匹配到只包含「全屏」但不包含「全屏按钮」的段落。
+        无意义子串（如「屏按」）不会匹配任何内容，不影响结果。
+        """
+        expanded = list(keywords)
+        for kw in keywords:
+            if len(kw) > 2:
+                for i in range(len(kw) - 1):
+                    sub = kw[i:i + 2]
+                    if any('一' <= c <= '鿿' for c in sub):
+                        expanded.append(sub)
+        return expanded
+
+    def get_relevant_sections(
+        self,
+        app_name: str,
+        user_intent: str = "",
+        keywords: list[str] | None = None,
+        max_length: int = 3000,
+    ) -> str:
+        """根据关键词从匹配的 skill 中提取相关段落。
+
+        按关键词匹配度评分排序，优先返回最相关的段落，
+        总长度不超过 max_length。
+        自动排除「硬性约束」段落（已通过 get_hard_rules 单独注入）。
+        """
+        if not keywords:
+            return ""
+
+        files = self.load_app(app_name)
+        if not files:
+            return ""
+
+        intent_lower = user_intent.lower()
+        expanded_kws = self._expand_keywords(keywords)
+
+        # 原始关键词权重 3，扩展子串权重 1
+        kw_weights: list[tuple[str, int]] = []
+        for kw in keywords:
+            kw_weights.append((kw.lower(), 3))
+        for kw in expanded_kws:
+            kw_lower = kw.lower()
+            if kw_lower not in {w for w, _ in kw_weights}:
+                kw_weights.append((kw_lower, 1))
+
+        scored_sections: list[tuple[int, str]] = []  # (score, text)
+
+        for f in files:
+            if not f.body.strip():
+                continue
+            if not f.is_main:
+                trigger = str(f.meta.get("trigger", ""))
+                if trigger and user_intent:
+                    trigger_kws = [kw.strip() for kw in trigger.split("|") if kw.strip()]
+                    if not any(kw in intent_lower for kw in trigger_kws):
+                        continue
+
+            for heading, content in self._parse_sections(f.body):
+                # 跳过硬性约束段落（已单独注入，避免重复）
+                heading_text = heading.lstrip("#").strip()
+                if heading_text.startswith("硬性约束"):
+                    continue
+
+                section_text = f"{heading}\n{content}" if heading else content
+                section_lower = section_text.lower()
+
+                # 计算加权匹配分数
+                score = sum(
+                    weight for kw, weight in kw_weights if kw in section_lower
+                )
+                if score > 0:
+                    scored_sections.append((score, section_text))
+
+        if not scored_sections:
+            return ""
+
+        # 按分数降序排列
+        scored_sections.sort(key=lambda x: x[0], reverse=True)
+
+        # 按分数从高到低填充，不超过 max_length
+        result_parts: list[str] = []
+        total_len = 0
+        for _, section_text in scored_sections:
+            if total_len + len(section_text) > max_length:
+                remaining = max_length - total_len
+                if remaining > 100:
+                    result_parts.append(section_text[:remaining])
+                break
+            result_parts.append(section_text)
+            total_len += len(section_text)
+
+        return "\n\n".join(result_parts)
+
+    @staticmethod
+    def _parse_sections(body: str) -> list[tuple[str, str]]:
+        """将 markdown body 按 ## 标题拆分为 (heading, content) 列表。
+
+        标题前的裸文本用空字符串作 heading。
+        只按 ## 拆分，### 及以下视为段落内容。
+        """
+        lines = body.split("\n")
+        sections: list[tuple[str, str]] = []
+        current_heading = ""
+        current_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            # 精确匹配 ##：只有 2 个 # 才算段落边界
+            if stripped.startswith("#"):
+                n_hashes = len(stripped) - len(stripped.lstrip("#"))
+                if n_hashes == 2:
+                    content = "\n".join(current_lines).strip()
+                    if content:
+                        sections.append((current_heading, content))
+                    current_heading = stripped
+                    current_lines = []
+                    continue
+            current_lines.append(line)
+
+        content = "\n".join(current_lines).strip()
+        if content:
+            sections.append((current_heading, content))
+
+        return sections
+
     def _extract_section(self, body: str, section_title: str) -> str:
         """从 markdown body 中提取指定章节内容。"""
         lines = body.split("\n")
@@ -291,7 +454,7 @@ class AppSkillLoader:
             stripped = line.strip()
             if stripped.startswith("#"):
                 heading = stripped.lstrip("#").strip()
-                if heading == section_title:
+                if heading == section_title or heading.startswith(section_title):
                     in_section = True
                     section_level = len(stripped) - len(stripped.lstrip("#"))
                     continue

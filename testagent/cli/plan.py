@@ -347,7 +347,7 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider:
         typer.echo(summary)
         typer.echo("")
         typer.echo("  [y] 执行所有用例  [e] 编辑用例  [n] 取消")
-        choice = typer.prompt("  请选择", default="y", show_default=False)
+        choice = typer.prompt("  请选择")
 
         if choice.lower() == "y":
             return True
@@ -1335,10 +1335,12 @@ async def _plan_command_async(
     ckpt = CheckpointManager(output_dir)
     ckpt.save(name, config, test_cases)
 
-    # ── Extract toggle groups from loaded skill (app-specific) ─────────
+    # ── Extract toggle groups and hard rules from loaded skill ─────────
     skill_toggle_groups: list[list[str]] = []
+    skill_hard_rules: str = ""
     if skill_app_name and _skill_loader is not None:
         skill_toggle_groups = _skill_loader.get_toggle_groups(skill_app_name)
+        skill_hard_rules = _skill_loader.get_hard_rules(skill_app_name, requirement)
 
     # ── Init per-TC evaluator and judge ───────────────────────────────
     evaluator = PerTCEvaluator()
@@ -1432,6 +1434,9 @@ async def _plan_command_async(
         config,
         llm_provider=llm_provider,
         app_skill_context=skill_full_content,
+        skill_hard_rules=skill_hard_rules,
+        skill_app_name=skill_app_name or "",
+        skill_user_intent=requirement,
         toggle_groups=skill_toggle_groups,
         on_tc_start=_on_tc_start,
         on_tc_complete=_on_tc_judged,
@@ -1471,7 +1476,14 @@ async def _plan_command_async(
         typer.echo(f"  [Interrupted — skipping retry of {len(failed_tcs)} failed case(s)]")
     if failed_tcs and not was_interrupted:
         typer.echo(f"  Retrying {len(failed_tcs)} failed case(s)...")
-        retry_engine = ExecutionEngine(config, llm_provider=llm_provider)
+        retry_engine = ExecutionEngine(
+            config,
+            llm_provider=llm_provider,
+            app_skill_context=skill_full_content,
+            skill_hard_rules=skill_hard_rules,
+            skill_app_name=skill_app_name or "",
+            skill_user_intent=requirement,
+        )
         for tc in failed_tcs:
             # Save first attempt data before clearing
             first_attempt = {

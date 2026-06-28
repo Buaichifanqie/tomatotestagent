@@ -119,3 +119,9 @@ class LLMRateLimitError(LLMError):
 
 class LLMTokenLimitError(LLMError):
     pass
+
+
+class EnvironmentSetupError(TestAgentError):
+    """Test environment could not be prepared (e.g. app not on homepage)."""
+
+    pass

@@ -355,13 +355,22 @@ class CaseJudgeAgent:
                 file_id = file_obj.id
                 _logger.info("CaseJudgeAgent: uploaded, file_id=%s", file_id)
 
-                client.files.wait_for_processing(file_id)
+                # Wait for processing with explicit polling
+                import time as _time
+                for _poll in range(30):  # max 60 seconds
+                    _time.sleep(2)
+                    file_info = client.files.retrieve(file_id)
+                    file_status = getattr(file_info, "status", "unknown")
+                    if file_status != "processing":
+                        break
+                else:
+                    file_status = "timeout"
 
-                # Check if processing succeeded
-                file_info = client.files.retrieve(file_id)
-                file_status = getattr(file_info, "status", "unknown")
                 if file_status == "failed":
                     _logger.warning("CaseJudgeAgent: file %s processing failed, skipping", file_id)
+                    continue
+                if file_status == "timeout":
+                    _logger.warning("CaseJudgeAgent: file %s processing timed out, skipping", file_id)
                     continue
                 _logger.info("CaseJudgeAgent: file %s processed (status=%s)", file_id, file_status)
                 file_ids.append(file_id)
@@ -418,7 +427,17 @@ class CaseJudgeAgent:
             return None
 
         except Exception as e:
-            _logger.error("CaseJudgeAgent: SDK call failed: %s", e)
+            _logger.error(
+                "CaseJudgeAgent: SDK call failed: %s: %s",
+                type(e).__name__, e,
+                extra={"extra_data": {
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                    "api_url": self._api_url,
+                    "model": self._model,
+                    "api_key_present": bool(self._api_key),
+                }},
+            )
             return None
 
     async def _call_vision_api_httpx(

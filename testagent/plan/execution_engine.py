@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from testagent.common.adb_utils import adb_command
 from testagent.common.appium_manager import ensure_appium_running
+from testagent.common.errors import EnvironmentSetupError
 from testagent.plan.scheduler import _has_state_conflict, _infer_state
 from testagent.mcp_servers.appium_server.tools import (
     app_assert_element,
@@ -82,6 +83,9 @@ class ExecutionEngine:
         session_manager: SessionManager | None = None,
         llm_provider: Any = None,
         app_skill_context: str = "",
+        skill_hard_rules: str = "",
+        skill_app_name: str = "",
+        skill_user_intent: str = "",
         toggle_groups: list[list[str]] | None = None,
         on_tc_start: Callable[[TestCase], Any] | None = None,
         on_tc_complete: Callable[[TestCase], Any] | None = None,
@@ -91,6 +95,10 @@ class ExecutionEngine:
         self.config = config
         self.popup_handler = popup_handler or PopupHandler()
         self._app_skill_context = app_skill_context
+        self._skill_hard_rules = skill_hard_rules
+        self._skill_app_name = skill_app_name
+        self._skill_user_intent = skill_user_intent
+        self._skill_loader: Any = None  # 懒加载，复用
         self._toggle_groups = toggle_groups or []
         self._token_tracker = token_tracker
         self.session_manager = session_manager or SessionManager(
@@ -105,8 +113,6 @@ class ExecutionEngine:
         self._suppressed_rules: set[str] = set()
         self._current_recording_tc: str = ""
         self._current_recording_session_id: str = ""
-        self._screen_w: int = 0
-        self._screen_h: int = 0
         self._coordinate_cache = CoordinateCache()
         self._tap_first_chain_cache: dict[str, dict] = {}  # tap_first 原子动作链缓存
         self._action_context_stack: list[str] = []
@@ -695,14 +701,20 @@ class ExecutionEngine:
         res["y"] = coords["y"]
         return res
 
-    # ── screen size (lazy) ──────────────────────────────────────────────
+    # ── screen size ─────────────────────────────────────────────────────
 
     async def _get_screen_size(self) -> tuple[int, int]:
-        """Get real device screen size via adb shell wm size (cached)."""
-        if self._screen_w > 0 and self._screen_h > 0:
-            return self._screen_w, self._screen_h
+        """Get current device screen size accounting for rotation.
+
+        Returns (width, height) matching the current orientation.
+        In portrait: (1080, 2400). In landscape: (2400, 1080).
+        This is critical for Vision coordinate mapping — the Vision model
+        returns coordinates relative to the screenshot dimensions, so we
+        must pass the correct oriented size.
+        """
         import re
         try:
+            # Get physical screen size
             result = await app_exec(
                 command="wm size",
                 appium_url=self.session_manager.appium_url,
@@ -712,13 +724,28 @@ class ExecutionEngine:
             value = str(body.get("value", ""))
             m = re.search(r"(\d+)x(\d+)", value)
             if m:
-                self._screen_w = int(m.group(1))
-                self._screen_h = int(m.group(2))
+                w, h = int(m.group(1)), int(m.group(2))
             else:
-                self._screen_w, self._screen_h = 1080, 2400
+                w, h = 1080, 2400
+
+            # Get current rotation (0=portrait, 1=landscape, 2=reverse portrait, 3=reverse landscape)
+            rot_result = await app_exec(
+                command="dumpsys display | grep 'mCurrentOrientation'",
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            rot_value = str(rot_result.get("body", {}).get("value", ""))
+            # Try to extract orientation number
+            rot_match = re.search(r"mCurrentOrientation[=:]\s*(\d+)", rot_value)
+            orientation = int(rot_match.group(1)) if rot_match else 0
+
+            # Swap dimensions for landscape orientations
+            if orientation in (1, 3):
+                w, h = h, w
+
+            return w, h
         except Exception:
-            self._screen_w, self._screen_h = 1080, 2400
-        return self._screen_w, self._screen_h
+            return 1080, 2400
 
     # ── vision client (lazy) ─────────────────────────────────────────────────
 
@@ -1042,10 +1069,18 @@ class ExecutionEngine:
                 except Exception as exc:
                     # ── Catch unexpected TC errors so the plan doesn't crash ──
                     err_msg = str(exc) or "Unhandled exception (empty error)"
-                    self._log(f"  [TC {tc.id} crashed: {err_msg}]")
-                    if tc.execution.status in (None, ExecutionStatus.RUNNING):
-                        tc.execution.status = ExecutionStatus.FAILED
-                        tc.execution.error_message = err_msg
+                    if isinstance(exc, EnvironmentSetupError):
+                        # Environment issue (e.g. can't reach homepage)
+                        # → mark as BLOCKED, not FAILED
+                        self._log(f"  [TC {tc.id} blocked: {err_msg}]")
+                        if tc.execution.status in (None, ExecutionStatus.RUNNING):
+                            tc.execution.status = ExecutionStatus.BLOCKED
+                            tc.execution.error_message = err_msg
+                    else:
+                        self._log(f"  [TC {tc.id} crashed: {err_msg}]")
+                        if tc.execution.status in (None, ExecutionStatus.RUNNING):
+                            tc.execution.status = ExecutionStatus.FAILED
+                            tc.execution.error_message = err_msg
                     self._consecutive_blocked += 1
                     current_app_state = set()
 
@@ -1704,7 +1739,7 @@ class ExecutionEngine:
                 _session_healthy = True
                 try:
                     _check = await app_get_source(
-                        appium_url=appium_url, session_id=_sid, timeout=5,
+                        appium_url=appium_url, session_id=_sid,
                     )
                     _src = _check.get("source", "")
                     if not _src:
@@ -1941,10 +1976,7 @@ class ExecutionEngine:
         except Exception:
             pass
 
-        # Launch via MAIN/LAUNCHER intent — bypasses savedInstanceState
-        # and forces the app to start from its launcher activity (homepage).
-        # This prevents apps like Bilibili from restoring to a video detail
-        # page after force-stop.
+        # Launch the app normally via Appium
         try:
             adb_command(
                 self.config.device_udid,
@@ -1970,11 +2002,271 @@ class ExecutionEngine:
                     appium_url=url, session_id=sid,
                 )
                 if src_result.get("source"):
-                    return  # App is responsive
+                    return
             except Exception:
                 pass
             await asyncio.sleep(2)
         self._log("  [Warning: app may not be fully loaded after launch]")
+
+        # ── Skill-based homepage recovery ───────────────────────────────
+        # If the app skill defines "启动后页面恢复", use Vision to check
+        # if we're on the homepage and navigate back if not.
+        if self._app_skill_context and "启动后页面恢复" in self._app_skill_context:
+            await self._recover_to_homepage_with_vision()
+
+    async def _recover_to_homepage_with_vision(self) -> None:
+        """Use Vision + Skill knowledge to recover to homepage after launch.
+
+        Extracts the '## 启动后页面恢复' section from the skill context
+        and passes it directly to the Vision model. The model reads the
+        documentation and decides the recovery action (tap coordinates,
+        press back, or none). No hardcoded parsing or heuristics.
+
+        Raises:
+            RuntimeError: If all recovery attempts fail including the
+                fallback restart. This prevents the test from running
+                in a bad state (not on homepage).
+        """
+        skill_text = self._app_skill_context
+
+        # Extract the whole "## 启动后页面恢复" section
+        start_idx = skill_text.find("## 启动后页面恢复")
+        if start_idx == -1:
+            return
+
+        end_idx = skill_text.find("\n## ", start_idx + 1)
+        if end_idx == -1:
+            end_idx = len(skill_text)
+
+        recovery_section = skill_text[start_idx:end_idx].strip()
+        if not recovery_section:
+            return
+
+        self._log("  [Skill defines homepage recovery, using Vision to check...]")
+
+        sid = self.session_manager.session_id
+        url = self.session_manager.appium_url
+
+        for attempt in range(3):
+            try:
+                # 1. Screenshot
+                scr_result = await app_screenshot(appium_url=url, session_id=sid)
+                scr_id = scr_result.get("screenshot_id", "")
+                if not scr_id:
+                    break
+
+                from testagent.mcp_servers.shared_cache import get_screenshot
+                b64 = get_screenshot(scr_id)
+                if not b64:
+                    break
+
+                client = self._init_vision_client()
+                if not client:
+                    break
+
+                dw, dh = await self._get_screen_size()
+
+                # 2. Build prompt — pass the whole skill section to Vision
+                prompt = (
+                    "你是一个手机 App 自动化测试助手。这是当前 App 的截图。\n\n"
+                    "以下是该 App 关于'首页'和'页面恢复'的说明文档：\n"
+                    f"{recovery_section}\n\n"
+                    "请根据截图和文档，执行以下任务：\n"
+                    "1. 判断当前是否在 App 首页。\n"
+                    "2. 如果不在首页，请根据文档中的'恢复策略'，给出下一步最合适的操作建议。\n\n"
+                    "只返回一个合法的 JSON 对象，不要包含任何 markdown 代码块、解释文字或前后缀。\n"
+                    "格式如下：\n"
+                    '{"is_homepage": true, "reason": "在首页", "action": "none", "coordinates": null}\n'
+                    "或\n"
+                    '{"is_homepage": false, "reason": "在视频详情页", "action": "tap", "coordinates": [540, 2300]}\n'
+                    "或\n"
+                    '{"is_homepage": false, "reason": "在游戏详情页", "action": "press_back", "coordinates": null}'
+                )
+
+                result = await client.analyze(b64, prompt, device_width=dw, device_height=dh)
+                content = result.get("content", "")
+                if not content:
+                    break
+
+                # 3. Parse Vision response — handle markdown code blocks
+                import json as _json
+                import re as _re
+                # Strip markdown code block wrapper if present
+                cleaned = _re.sub(r"```(?:json)?\s*", "", content).strip()
+                cleaned = cleaned.rstrip("`").strip()
+                start = cleaned.find("{")
+                end = cleaned.rfind("}") + 1
+                if start == -1 or end <= start:
+                    self._log(f"  [Vision returned non-JSON response, skipping]")
+                    break
+
+                data = _json.loads(cleaned[start:end])
+                is_homepage = data.get("is_homepage", True)
+
+                if is_homepage:
+                    self._log("  [Vision confirmed: on homepage]")
+                    return
+
+                # 4. Execute Vision's recommended recovery action
+                action = data.get("action", "none")
+                reason = data.get("reason", "")
+                self._log(f"  [Not on homepage: {reason}]")
+                self._log(f"  [Recovery action: {action}] (attempt {attempt + 1}/3)")
+
+                if action == "tap":
+                    coords = data.get("coordinates")
+                    if coords and len(coords) == 2:
+                        await app_tap(
+                            x=int(coords[0]), y=int(coords[1]),
+                            appium_url=url, session_id=sid,
+                        )
+                        await asyncio.sleep(3)  # Wait for page transition
+                        continue
+                    else:
+                        self._log("  [Vision returned tap but no valid coordinates]")
+                        break
+
+                elif action == "press_back":
+                    adb_command(
+                        self.config.device_udid,
+                        "shell", "input", "keyevent", "KEYCODE_BACK",
+                        capture_output=True, timeout=5,
+                    )
+                    await asyncio.sleep(3)
+                    continue
+
+                elif action == "none":
+                    self._log("  [Vision cannot suggest action]")
+                    break
+
+            except _json.JSONDecodeError as e:
+                self._log(f"  [Vision returned invalid JSON: {e}]")
+                break
+            except Exception as e:
+                self._log(f"  [Vision recovery error: {e}]")
+                break
+
+        # 5. Fallback: force-stop + restart
+        self._log("  [Vision recovery failed, force-stopping and restarting]")
+        pkg = self.config.app_package
+        if pkg:
+            try:
+                adb_command(
+                    self.config.device_udid,
+                    "shell", "am", "force-stop", pkg,
+                    capture_output=True, timeout=10,
+                )
+                await asyncio.sleep(2)
+                adb_command(
+                    self.config.device_udid,
+                    "shell", "am", "start",
+                    "-a", "android.intent.action.MAIN",
+                    "-c", "android.intent.category.LAUNCHER",
+                    pkg,
+                    capture_output=True, timeout=10,
+                )
+                await asyncio.sleep(5)
+            except Exception:
+                pass
+
+        # 6. Final check — if still not on homepage, raise error
+        # rather than letting the test run in a bad state.
+        try:
+            scr_result = await app_screenshot(appium_url=url, session_id=sid)
+            scr_id = scr_result.get("screenshot_id", "")
+            if scr_id:
+                from testagent.mcp_servers.shared_cache import get_screenshot
+                b64 = get_screenshot(scr_id)
+                if b64:
+                    client = self._init_vision_client()
+                    if client:
+                        dw, dh = await self._get_screen_size()
+                        check_prompt = (
+                            "这是 App 重启后的截图。请判断当前是否在首页。\n"
+                            f"{recovery_section}\n\n"
+                            "只返回 JSON: {\"is_homepage\": true/false}"
+                        )
+                        result = await client.analyze(b64, check_prompt, device_width=dw, device_height=dh)
+                        content = result.get("content", "")
+                        if content:
+                            import re as _re
+                            cleaned = _re.sub(r"```(?:json)?\s*", "", content).strip()
+                            cleaned = cleaned.rstrip("`").strip()
+                            start = cleaned.find("{")
+                            end = cleaned.rfind("}") + 1
+                            if start >= 0 and end > start:
+                                data = _json.loads(cleaned[start:end])
+                                if data.get("is_homepage", False):
+                                    self._log("  [Restart confirmed: now on homepage]")
+                                    return
+        except Exception:
+            pass
+
+        # Still not on homepage after all attempts — fail the test
+        # instead of running in a bad state.
+        raise EnvironmentSetupError(
+            "无法恢复到 App 首页。Vision 恢复和 force-stop 重启均未能让 App 回到首页。"
+            "当前测试用例无法在非首页状态下可靠执行。",
+            code="HOMEPAGE_RECOVERY_FAILED",
+        )
+
+    def _ensure_skill_loader(self) -> Any:
+        """懒加载并缓存 AppSkillLoader，整个执行周期只创建一次。"""
+        if self._skill_loader is None and self._skill_app_name:
+            try:
+                from testagent.skills.app_skill_loader import AppSkillLoader
+                self._skill_loader = AppSkillLoader("skills/apps")
+            except Exception:
+                pass
+        return self._skill_loader
+
+    def _get_skill_context_for_step(self, step: TestStep) -> str:
+        """根据当前步骤提取相关的 skill 内容。
+
+        从步骤的 target 和 tap_first 中提取关键词，然后从 skill 中
+        选取包含这些关键词的段落。不使用 step.action（太泛化）。
+        """
+        keywords: list[str] = []
+        if step.target:
+            keywords.append(step.target)
+        if step.tap_first:
+            keywords.append(step.tap_first)
+        # 不使用 step.action："tap"/"input"/"swipe" 太泛化，会匹配所有段落
+        return self._get_skill_context_for_keywords(keywords)
+
+    def _get_skill_context_for_keywords(self, keywords: list[str]) -> str:
+        """根据关键词提取相关的 skill 内容。
+
+        从 skill 中选取标题或内容包含关键词的段落，
+        按匹配度排序，总长度不超过 3000 字符。
+        无关键词时返回截断的全文（兜底）。
+        """
+        if not self._app_skill_context:
+            return ""
+
+        if not keywords:
+            return self._app_skill_context[:2000]
+
+        loader = self._ensure_skill_loader()
+        if loader and self._skill_app_name:
+            try:
+                relevant = loader.get_relevant_sections(
+                    self._skill_app_name,
+                    user_intent=self._skill_user_intent,
+                    keywords=keywords,
+                )
+                if relevant:
+                    self._log(
+                        f"  [Skill: dynamic selection keywords={keywords}, "
+                        f"result={len(relevant)} chars]"
+                    )
+                    return relevant
+                self._log(f"  [Skill: no match for {keywords}, using fallback]")
+            except Exception:
+                self._log(f"  [Skill: dynamic selection failed, using fallback]")
+
+        # 兜底：截断全文
+        return self._app_skill_context[:2000]
 
     def _check_precondition(self, tc: TestCase) -> bool:
         """Check and execute precondition setup with retry.
@@ -2841,8 +3133,11 @@ class ExecutionEngine:
             screen_height=dh,
         )
 
-        if self._app_skill_context:
-            prompt += f"\n\n## App 测试知识\n\n{self._app_skill_context[:2000]}"
+        if self._skill_hard_rules:
+            prompt += f"\n\n## 硬性约束（必须遵守）\n\n{self._skill_hard_rules}"
+        skill_ctx = self._get_skill_context_for_step(step)
+        if skill_ctx:
+            prompt += f"\n\n## App 测试知识\n\n{skill_ctx}"
 
         try:
             response = await self._llm_provider.chat(
@@ -3102,8 +3397,14 @@ class ExecutionEngine:
         if context:
             prompt = f"之前的屏幕分析：{context}\n\n{prompt}"
 
+        if self._skill_hard_rules:
+            prompt += f"\n\n## 硬性约束（必须遵守）\n\n{self._skill_hard_rules}"
+        # 动态选取与 target 相关的 skill 段落
         if self._app_skill_context:
-            prompt += f"\n\n## App 测试知识\n\n{self._app_skill_context[:2000]}"
+            keywords = [target] if target else []
+            skill_ctx = self._get_skill_context_for_keywords(keywords)
+            if skill_ctx:
+                prompt += f"\n\n## App 测试知识\n\n{skill_ctx}"
 
         dw, dh = await self._get_screen_size()
         try:
