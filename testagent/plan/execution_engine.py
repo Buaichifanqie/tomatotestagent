@@ -1568,33 +1568,6 @@ class ExecutionEngine:
             nonlocal session_id
             sid = session_id or self.session_manager.session_id
 
-            # ── via 机制：先通过 via 打开瞬态菜单，再立即点击目标 ──
-            # 用于「更多按钮 → 2.0x」这类弹出菜单操作，避免菜单自动关闭
-            if step.via and step.action == "tap":
-                via_step = TestStep(
-                    step=step.step, action="tap",
-                    target=step.via,
-                    tap_first=step.tap_first or "",
-                    expected=step.expected,
-                )
-                self._log(f"  [Via: tapping '{step.via}' to open transient menu...]")
-                via_result = await self._execute_tap_with_tap_first(via_step, tc.id)
-                if via_result.get("error"):
-                    return via_result
-                # 清除 Reveal Probe 缓存——菜单弹出后屏幕布局已变，旧坐标全部失效
-                self._tap_first_chain_cache.clear()
-                self._log(f"  [Via: cleared probe cache, menu opened...]")
-                await asyncio.sleep(0.4)  # 等菜单弹出动画
-                self._log(f"  [Via: menu opened, now tapping '{step.target}'...]")
-                # 构造不带 tap_first 的 step——菜单已打开，不需要再唤出控制栏
-                target_step = TestStep(
-                    step=step.step, action="tap",
-                    target=step.target,
-                    tap_first="",
-                    expected=step.expected,
-                )
-                return await self._execute_tap_with_cache(target_step, tc.id)
-
             if step.action == "tap":
                 # ── 复合动作：先点击触发区域让隐藏控件浮现 ──
                 if step.tap_first:
