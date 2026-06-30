@@ -528,7 +528,14 @@ class ExecutionEngine:
             if back_ok:
                 return {"success": True, "_source": "adb:KEYCODE_BACK"}
 
-        # Layer 4: Content fallback
+        # Layer 4: Content fallback (UI controls only — skip for content items)
+        if self._is_ui_control_target(step.target):
+            self._log(
+                f"  [Skip content fallback: '{step.target}' is a UI control — "
+                f"random tap would be dangerous]"
+            )
+            return {"error": f"Element '{step.target}' not found (all layers exhausted)"}
+
         self._log(f"  [Content fallback: looking for any clickable content item...]")
         coords = await self._vision_find_any_content()
         if coords:
@@ -541,6 +548,29 @@ class ExecutionEngine:
                 return res
 
         return {"error": f"Element '{step.target}' not found (vision + LLM + vision retry)"}
+
+    @staticmethod
+    def _is_ui_control_target(target: str) -> bool:
+        """判断 tap 目标是否为 UI 控件而非内容项。
+
+        UI 控件（按钮、开关、输入框、进度条、特定数值）不应该使用 content fallback
+        随机点击，否则可能触发不可逆导航。
+        内容项（视频卡片、列表项等）可以使用 content fallback 作为兜底。
+        """
+        import re
+        # 以结构化 UI 控件后缀结尾
+        if re.search(r"(?:按钮|开关|输入框|搜索框|进度条|区域|栏)$", target):
+            return True
+        # 倍速值：2.0x, 1.5x, 0.5x
+        if re.match(r"^\d+\.?\d*[xX]$", target):
+            return True
+        # 清晰度值：720P, 1080P, 4K
+        if re.match(r"^\d{3,4}[pP]$", target) or target == "4K":
+            return True
+        # 单字/双字 UI 标签
+        if target in ("自动", "更多", "关闭", "确认", "取消", "搜索"):
+            return True
+        return False
 
     @staticmethod
     def _is_back_target(target: str) -> bool:
@@ -1538,6 +1568,33 @@ class ExecutionEngine:
             nonlocal session_id
             sid = session_id or self.session_manager.session_id
 
+            # ── via 机制：先通过 via 打开瞬态菜单，再立即点击目标 ──
+            # 用于「更多按钮 → 2.0x」这类弹出菜单操作，避免菜单自动关闭
+            if step.via and step.action == "tap":
+                via_step = TestStep(
+                    step=step.step, action="tap",
+                    target=step.via,
+                    tap_first=step.tap_first or "",
+                    expected=step.expected,
+                )
+                self._log(f"  [Via: tapping '{step.via}' to open transient menu...]")
+                via_result = await self._execute_tap_with_tap_first(via_step, tc.id)
+                if via_result.get("error"):
+                    return via_result
+                # 清除 Reveal Probe 缓存——菜单弹出后屏幕布局已变，旧坐标全部失效
+                self._tap_first_chain_cache.clear()
+                self._log(f"  [Via: cleared probe cache, menu opened...]")
+                await asyncio.sleep(0.4)  # 等菜单弹出动画
+                self._log(f"  [Via: menu opened, now tapping '{step.target}'...]")
+                # 构造不带 tap_first 的 step——菜单已打开，不需要再唤出控制栏
+                target_step = TestStep(
+                    step=step.step, action="tap",
+                    target=step.target,
+                    tap_first="",
+                    expected=step.expected,
+                )
+                return await self._execute_tap_with_cache(target_step, tc.id)
+
             if step.action == "tap":
                 # ── 复合动作：先点击触发区域让隐藏控件浮现 ──
                 if step.tap_first:
@@ -2238,7 +2295,7 @@ class ExecutionEngine:
         """根据关键词提取相关的 skill 内容。
 
         从 skill 中选取标题或内容包含关键词的段落，
-        按匹配度排序，总长度不超过 3000 字符。
+        按匹配度排序，总长度不超过 1500 字符。
         无关键词时返回截断的全文（兜底）。
         """
         if not self._app_skill_context:
@@ -2963,7 +3020,7 @@ class ExecutionEngine:
         coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
-        if not found:
+        if not found or not coords.get("center"):
             return False
 
         center = coords["center"]
@@ -3046,7 +3103,7 @@ class ExecutionEngine:
         coords = _parse_percentage_coordinates(content, dw, dh, image_w=img_w, image_h=img_h)
         found = _parse_found_status(content) or bool(coords.get("center"))
 
-        if not found:
+        if not found or not coords.get("center"):
             self._log(
                 f"  [Vision: no dismiss button found — "
                 f"model says: {content[:100]}]"

@@ -336,7 +336,7 @@ class AppSkillLoader:
         app_name: str,
         user_intent: str = "",
         keywords: list[str] | None = None,
-        max_length: int = 3000,
+        max_length: int = 1500,
     ) -> str:
         """根据关键词从匹配的 skill 中提取相关段落。
 
@@ -381,7 +381,14 @@ class AppSkillLoader:
                 if heading_text.startswith("硬性约束"):
                     continue
 
-                section_text = f"{heading}\n{content}" if heading else content
+                # 清理 heading 格式：去掉 markdown 标记，统一分隔符
+                # "## 核心交互模式 > ### 全屏操作" → "核心交互模式 / 全屏操作"
+                if heading:
+                    clean = heading.lstrip("#").strip()
+                    clean = clean.replace(" > ### ", " / ").replace(" > ", " / ")
+                    section_text = f"{clean}\n{content}" if clean else content
+                else:
+                    section_text = content
                 section_lower = section_text.lower()
 
                 # 计算加权匹配分数
@@ -413,33 +420,53 @@ class AppSkillLoader:
 
     @staticmethod
     def _parse_sections(body: str) -> list[tuple[str, str]]:
-        """将 markdown body 按 ## 标题拆分为 (heading, content) 列表。
+        """将 markdown body 按 ## 和 ### 拆分为 (heading, content) 列表。
 
-        标题前的裸文本用空字符串作 heading。
-        只按 ## 拆分，### 及以下视为段落内容。
+        - ## 段落：段落边界，独立存储
+        - ### 段落：继承父 ## 标题的 intro 文本作为上下文前缀
+        - #### 及以下：不视为段落边界，属于 ### 段落内容
         """
         lines = body.split("\n")
         sections: list[tuple[str, str]] = []
         current_heading = ""
+        current_h2 = ""
+        h2_intro_lines: list[str] = []   # ## 和第一个 ### 之间的内容（父段落上下文）
         current_lines: list[str] = []
+
+        def _flush():
+            nonlocal current_lines
+            content = "\n".join(current_lines).strip()
+            if content:
+                sections.append((current_heading, content))
+            current_lines = []
 
         for line in lines:
             stripped = line.strip()
-            # 精确匹配 ##：只有 2 个 # 才算段落边界
             if stripped.startswith("#"):
                 n_hashes = len(stripped) - len(stripped.lstrip("#"))
                 if n_hashes == 2:
-                    content = "\n".join(current_lines).strip()
-                    if content:
-                        sections.append((current_heading, content))
+                    _flush()
+                    current_h2 = stripped
                     current_heading = stripped
-                    current_lines = []
-                    continue
+                    h2_intro_lines = []         # 重置，留待收集
+                elif n_hashes == 3:
+                    # 把 ## 和首个 ### 之间的内容保存为 intro
+                    if current_lines and not h2_intro_lines:
+                        h2_intro_lines = list(current_lines)
+                    _flush()
+                    parent = current_h2.lstrip("#").strip() if current_h2 else ""
+                    child = stripped.lstrip("#").strip()
+                    current_heading = f"{parent} > {child}" if parent else child
+                    # ### 段落预填充父 intro 作为上下文
+                    if h2_intro_lines:
+                        current_lines = list(h2_intro_lines)
+                else:
+                    # #### 及以下：视为内容，不拆分
+                    current_lines.append(line)
+                continue
             current_lines.append(line)
 
-        content = "\n".join(current_lines).strip()
-        if content:
-            sections.append((current_heading, content))
+        _flush()
 
         return sections
 

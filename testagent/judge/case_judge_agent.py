@@ -367,7 +367,13 @@ class CaseJudgeAgent:
                     file_status = "timeout"
 
                 if file_status == "failed":
-                    _logger.warning("CaseJudgeAgent: file %s processing failed, skipping", file_id)
+                    # Log error reason from server response for debugging
+                    error_info = getattr(file_info, "error", None)
+                    error_msg = str(error_info) if error_info else "unknown"
+                    _logger.warning(
+                        "CaseJudgeAgent: file %s processing failed (error=%s), skipping",
+                        file_id, error_msg,
+                    )
                     continue
                 if file_status == "timeout":
                     _logger.warning("CaseJudgeAgent: file %s processing timed out, skipping", file_id)
