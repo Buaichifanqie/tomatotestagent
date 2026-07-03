@@ -1,0 +1,203 @@
+"""CLI sub-commands for the eval subsystem.
+
+Usage::
+
+    testagent eval list
+    testagent eval run <suite_name>
+    testagent eval history
+"""
+
+from __future__ import annotations
+
+import asyncio
+import fnmatch
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from testagent.eval.loader import discover_suites, load_suite
+from testagent.eval.reports.json_reporter import JsonReporter
+from testagent.eval.reports.markdown_reporter import MarkdownReporter
+from testagent.eval.runner import EvalRunner
+
+eval_app = typer.Typer(name="eval", help="AI Agent 评测")
+console = Console()
+_DEFAULT_REPORT_DIR = Path("reports") / "eval"
+
+
+# ── Helper ──────────────────────────────────────────────────────────────────────
+
+
+def _collect_mcp_tools() -> list[dict[str, Any]]:
+    """Collect MCP tools (MVP stub — returns an empty list).
+
+    Real MCP tool discovery can be wired in later.
+    """
+    return []
+
+
+def _resolve_output_dir(suite_name: str, run_id: str, output: str = "") -> Path:
+    """Determine the output directory for reports."""
+    if output:
+        return Path(output)
+    return _DEFAULT_REPORT_DIR / suite_name / run_id
+
+
+# ── Commands ────────────────────────────────────────────────────────────────────
+
+
+@eval_app.command()
+def run(
+    suite_name: str = typer.Argument(..., help="套件名称或路径"),
+    trials: int = typer.Option(0, "--trials", "-t", help="覆盖默认试次数（0=使用YAML定义）"),
+    filter: str = typer.Option("", "--filter", "-f", help="按任务ID过滤（glob模式）"),  # noqa: A002
+    output: str = typer.Option("", "--output", "-o", help="报告输出目录"),
+) -> None:
+    """运行评测套件。"""
+    # 1. Load suite
+    console.print(f"[bold]Loading suite:[/bold] {suite_name}")
+    try:
+        suite = load_suite(suite_name)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Error loading suite:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    # 2. Apply task filter
+    if filter:
+        original_count = len(suite.tasks)
+        suite.tasks = [t for t in suite.tasks if fnmatch.fnmatch(t.id, filter)]
+        console.print(
+            f"  Filter applied: {original_count} -> [cyan]{len(suite.tasks)}[/cyan] tasks matched '{filter}'"
+        )
+        if not suite.tasks:
+            console.print("[yellow]No tasks match the filter. Nothing to run.[/yellow]")
+            raise typer.Exit(0)
+
+    # 3. Override trials if specified
+    if trials > 0:
+        console.print(f"  Overriding trials: {suite.default_trials} -> [cyan]{trials}[/cyan]")
+        for task in suite.tasks:
+            task.trials = trials
+
+    # 4. Initialize LLM provider + MCP tools
+    console.print("  Initializing LLM provider ...")
+    try:
+        from testagent.config.settings import get_settings
+        from testagent.llm.openai_provider import OpenAIProvider
+
+        settings = get_settings()
+        llm = OpenAIProvider(settings)
+    except Exception as exc:
+        console.print(f"[red]Failed to initialize LLM provider:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    mcp_tools = _collect_mcp_tools()
+    model_name = settings.openai_model or "unknown"
+
+    # 5. Run
+    console.print(f"  Running [cyan]{len(suite.tasks)}[/cyan] tasks with [cyan]{suite.default_trials}[/cyan] trial(s) each ...")
+    console.print("")
+
+    try:
+        runner = EvalRunner(
+            llm_provider=llm,
+            mcp_tools=mcp_tools,
+            model_name=model_name,
+        )
+        result = asyncio.run(runner.run_suite(suite))
+    except Exception as exc:
+        console.print(f"[red]Execution failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    # 6. Save reports
+    run_id = result.run_id
+    output_dir = _resolve_output_dir(suite.name, run_id, output)
+
+    md_path = MarkdownReporter.save(result, output_dir)
+    json_path = JsonReporter.save(result, output_dir)
+    console.print(f"  [green]Report saved:[/green] {md_path}")
+    console.print(f"  [green]JSON saved:[/green] {json_path}")
+    console.print("")
+
+    # 7. Summary
+    console.print("[bold]Summary:[/bold]")
+    console.print(f"  Suite:     {result.suite_name}")
+    console.print(f"  Tasks:     {len(result.task_results)}")
+    console.print(f"  Duration:  {result.duration:.1f}s")
+    console.print(f"  pass@1:    {result.pass_at_1_rate:.1%}")
+    console.print(f"  pass@k:    {result.overall_pass_rate:.1%}")
+    console.print(f"  all-pass:  {result.pass_k_rate:.1%}")
+
+    total_trials = sum(len(tr.trials) for tr in result.task_results)
+    passed_trials = sum(
+        sum(1 for t in tr.trials if t.passed) for tr in result.task_results
+    )
+    console.print(f"  Trials:    {passed_trials}/{total_trials} passed")
+
+    # Exit with non-zero if any task failed
+    if result.overall_pass_rate < 1.0:
+        raise typer.Exit(1)
+
+
+@eval_app.command()
+def list() -> None:  # noqa: A001
+    """列出所有可用评测套件。"""
+    suites = discover_suites()
+
+    if not suites:
+        console.print("[yellow]未发现评测套件。[/yellow]")
+        console.print("  在 [bold]evals/tasks/[/bold] 目录下创建 YAML 套件后即可显示。")
+        return
+
+    table = Table(title="可用评测套件")
+    table.add_column("名称", style="cyan", no_wrap=True)
+    table.add_column("描述")
+    table.add_column("任务数", justify="right")
+
+    for suite in suites:
+        table.add_row(suite.name, suite.description, str(len(suite.tasks)))
+
+    console.print(table)
+
+
+@eval_app.command()
+def history() -> None:
+    """显示历史评测报告。"""
+    report_dir = _DEFAULT_REPORT_DIR
+    if not report_dir.exists():
+        console.print(f"[yellow]未发现历史报告目录: {report_dir}[/yellow]")
+        return
+
+    reports: list[dict[str, Any]] = []
+    for suite_dir in sorted(report_dir.iterdir()):
+        if not suite_dir.is_dir():
+            continue
+        for run_dir in sorted(suite_dir.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            report_md = run_dir / "report.md"
+            summary_json = run_dir / "summary.json"
+            if report_md.is_file() or summary_json.is_file():
+                reports.append({
+                    "suite": suite_dir.name,
+                    "run_id": run_dir.name,
+                    "path": str(run_dir),
+                })
+
+    if not reports:
+        console.print("[yellow]未发现历史评测报告。[/yellow]")
+        return
+
+    table = Table(title="历史评测报告")
+    table.add_column("套件", style="cyan", no_wrap=True)
+    table.add_column("运行ID")
+    table.add_column("路径")
+
+    for r in reports:
+        table.add_row(r["suite"], r["run_id"], r["path"])
+
+    console.print(table)

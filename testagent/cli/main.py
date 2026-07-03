@@ -40,6 +40,7 @@ from testagent.cli.memory_cmd import memory_typer as memory_group
 from testagent.cli.output import RichOutput
 from testagent.cli.rag_cmd import rag_index, rag_query
 from testagent.cli.skill_cmd import skill_app
+from testagent.eval.cli import eval_app
 
 app = typer.Typer(name="testagent", help="AI Testing Agent Platform")
 _output = RichOutput()
@@ -184,6 +185,7 @@ app.add_typer(skill_app)
 app.add_typer(mcp_app)
 app.add_typer(app_group)  # testagent app plan, etc.
 app.add_typer(memory_group)  # testagent memory list-patterns, approve, etc.
+app.add_typer(eval_app)  # testagent eval run, list, history
 
 
 @app.command()
