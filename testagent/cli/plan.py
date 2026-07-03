@@ -347,7 +347,7 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider:
         typer.echo(summary)
         typer.echo("")
         typer.echo("  [y] 执行所有用例  [e] 编辑用例  [n] 取消")
-        choice = typer.prompt("  请选择")
+        choice = typer.prompt("  请选择", default="y", show_default=False)
 
         if choice.lower() == "y":
             return True
@@ -1040,9 +1040,17 @@ async def _plan_command_async(
             except Exception as fallback_exc:
                 typer.echo(f"  [App Context Memory fallback retrieval also skipped: {fallback_exc}]")
 
-    # Inject history context before the user's requirement
+    # Inject history context after the user's requirement (避免锚定偏见)
     if history_context:
-        enhanced_prd = history_context + "\n\n" + enhanced_prd
+        enhanced_prd = (
+            f"{enhanced_prd}\n\n"
+            "---\n"
+            "## 附录：历史测试用例参考\n\n"
+            "以下为系统检索到的历史用例。它们仅用于参考步骤格式和断言风格，\n"
+            "**请完全忽略它们的功能范围，严格基于上方 PRD 覆盖所有功能模块**。\n"
+            "如果新生成的用例与下列用例完全重复，请跳过；否则无需参考其内容。\n\n"
+            f"{history_context}"
+        )
 
     # ── Record RetrievalTrace ────────────────────────────────────────────
     if memory_app_id and two_stage_results:
