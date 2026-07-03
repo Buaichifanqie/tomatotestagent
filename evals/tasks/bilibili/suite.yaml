@@ -1,0 +1,7 @@
+suite:
+  name: bilibili
+  description: "B站功能回归评测套件"
+  version: "1.0.0"
+  default_trials: 3
+  app: bilibili
+  tags: [app, android, regression]

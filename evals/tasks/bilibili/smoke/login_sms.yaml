@@ -1,0 +1,29 @@
+task:
+  id: "bilibili_smoke_login"
+  description: "使用短信验证码登录B站"
+  instruction: "打开B站App，进入登录页面，切换到短信验证码登录方式，输入手机号，点击获取验证码。"
+  tags: [smoke, login]
+  timeout: 60
+  setup:
+    - action: launch_app
+      params:
+        package: "tv.danmaku.bili"
+        activity: ".MainActivityV2"
+  graders:
+    - type: state_check
+      expect:
+        elements_present: ["短信登录", "手机号输入框"]
+    - type: llm_rubric
+      rubric: |
+        评分标准（1-5分，>=4通过）：
+        - 成功导航到登录页面
+        - 切换到短信验证码登录方式
+        - 手机号输入框可见并可输入
+        - 获取验证码按钮可见
+  scoring:
+    mode: hybrid
+    pass_threshold: 0.7
+    mandatory: [state_check]
+    weights:
+      state_check: 0.5
+      llm_rubric: 0.5

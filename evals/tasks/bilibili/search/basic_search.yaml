@@ -1,0 +1,29 @@
+task:
+  id: "bilibili_search_basic"
+  description: "打开B站，搜索'科技'并验证搜索结果"
+  instruction: "打开B站App，在搜索框中输入关键词'科技'，执行搜索，验证搜索结果列表正确展示。"
+  tags: [search, core]
+  timeout: 60
+  setup:
+    - action: launch_app
+      params:
+        package: "tv.danmaku.bili"
+        activity: ".MainActivityV2"
+  graders:
+    - type: state_check
+      expect:
+        current_page: "search_result"
+        elements_present: ["搜索结果", "视频"]
+    - type: llm_rubric
+      rubric: |
+        评分标准（1-5分，>=4通过）：
+        - 搜索结果页面正确展示
+        - 搜索结果与"科技"关键词相关
+        - 结果列表完整可见、可滚动
+        - 操作流程合理，无多余步骤
+  scoring:
+    mode: hybrid
+    mandatory: [state_check]
+    weights:
+      state_check: 0.5
+      llm_rubric: 0.5
