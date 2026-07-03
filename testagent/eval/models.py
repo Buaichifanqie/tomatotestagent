@@ -4,13 +4,12 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ── Configuration Models ─────────────────────────────────────────────────────
 
 
 @dataclass
 class SetupStep:
-    """环境准备步骤。"""
+    """Environment preparation step."""
 
     action: str
     params: dict[str, Any] = field(default_factory=dict)
@@ -18,9 +17,9 @@ class SetupStep:
 
 @dataclass
 class GraderConfig:
-    """评判器配置。"""
+    """Grader configuration."""
 
-    type: str
+    grader_type: str
     expect: str
     rubric: str
     required: bool = True
@@ -30,17 +29,17 @@ class GraderConfig:
 
 @dataclass
 class ScoringConfig:
-    """评分规则。"""
+    """Scoring configuration."""
 
     mode: str = "hybrid"
     pass_threshold: float = 0.8
     mandatory: list[str] = field(default_factory=list)
-    weights: dict[str, float] = field(default_factory=lambda: {"state_check": 0.5, "llm_rubric": 0.5})
+    weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class MetricConfig:
-    """指标跟踪配置。"""
+    """Metric tracking configuration."""
 
     type: str
     metrics: list[str] = field(default_factory=list)
@@ -48,7 +47,7 @@ class MetricConfig:
 
 @dataclass
 class ReferenceSolution:
-    """参考方案。"""
+    """Reference solution."""
 
     expected_outcome: str
     expected_duration: float | None = None
@@ -59,7 +58,7 @@ class ReferenceSolution:
 
 @dataclass
 class EvalTask:
-    """评测任务。"""
+    """Evaluation task."""
 
     id: str
     description: str
@@ -77,7 +76,7 @@ class EvalTask:
 
 @dataclass
 class EvalSuite:
-    """评测套件。"""
+    """Evaluation suite."""
 
     name: str
     description: str
@@ -93,7 +92,7 @@ class EvalSuite:
 
 @dataclass
 class GraderResult:
-    """单个评判器结果。"""
+    """Single grader result."""
 
     grader_type: str
     score: float = 0.0
@@ -103,7 +102,7 @@ class GraderResult:
 
 @dataclass
 class TranscriptSummary:
-    """轨迹摘要。"""
+    """Transcript summary."""
 
     n_turns: int = 0
     n_tool_calls: int = 0
@@ -116,7 +115,7 @@ class TranscriptSummary:
 
 @dataclass
 class Transcript:
-    """完整执行轨迹。"""
+    """Full execution transcript."""
 
     messages: list[dict[str, Any]] = field(default_factory=list)
     summary: TranscriptSummary | None = None
@@ -124,7 +123,7 @@ class Transcript:
 
 @dataclass
 class TrialResult:
-    """单次试次。"""
+    """Single trial result."""
 
     trial_num: int
     passed: bool = False
@@ -137,40 +136,40 @@ class TrialResult:
 
 @dataclass
 class TaskResult:
-    """多轮聚合结果。"""
+    """Multi-trial aggregated result."""
 
     task_id: str
     trials: list[TrialResult] = field(default_factory=list)
 
     @property
     def pass_at_1(self) -> bool:
-        """第一个试次是否通过。"""
+        """Whether the first trial passed."""
         if not self.trials:
             return False
         return self.trials[0].passed
 
     @property
     def pass_at_k(self) -> bool:
-        """是否有任意一个试次通过。"""
+        """Whether any trial passed."""
         return any(t.passed for t in self.trials)
 
     @property
-    def pass_k(self) -> bool:
-        """是否所有试次都通过。"""
+    def all_passed(self) -> bool:
+        """Whether all trials passed."""
         if not self.trials:
             return False
         return all(t.passed for t in self.trials)
 
     @property
     def mean_score(self) -> float:
-        """所有试次的平均分。"""
+        """Mean score across all trials."""
         if not self.trials:
             return 0.0
         return sum(t.score for t in self.trials) / len(self.trials)
 
     @property
     def score_std(self) -> float:
-        """所有试次的标准差（总体标准差）。"""
+        """Population standard deviation of scores across all trials."""
         if len(self.trials) < 2:
             return 0.0
         scores = [t.score for t in self.trials]
@@ -180,7 +179,7 @@ class TaskResult:
 
     @property
     def pass_rate(self) -> float:
-        """试次通过率。"""
+        """Pass rate across all trials."""
         if not self.trials:
             return 0.0
         return sum(1 for t in self.trials if t.passed) / len(self.trials)
@@ -188,7 +187,7 @@ class TaskResult:
 
 @dataclass
 class SuiteResult:
-    """套件级结果。"""
+    """Suite-level results."""
 
     suite_name: str
     run_id: str
@@ -199,27 +198,27 @@ class SuiteResult:
 
     @property
     def overall_pass_rate(self) -> float:
-        """整体通过率：至少有一个试次通过的任务比例。"""
+        """Overall pass rate: proportion of tasks with at least one passed trial."""
         if not self.task_results:
             return 0.0
         return sum(1 for tr in self.task_results if tr.pass_at_k) / len(self.task_results)
 
     @property
     def pass_at_1_rate(self) -> float:
-        """首次试次通过率。"""
+        """First-trial pass rate."""
         if not self.task_results:
             return 0.0
         return sum(1 for tr in self.task_results if tr.pass_at_1) / len(self.task_results)
 
     @property
     def pass_k_rate(self) -> float:
-        """全部试次通过率。"""
+        """All-trials pass rate."""
         if not self.task_results:
             return 0.0
-        return sum(1 for tr in self.task_results if tr.pass_k) / len(self.task_results)
+        return sum(1 for tr in self.task_results if tr.all_passed) / len(self.task_results)
 
     def to_dict(self) -> dict[str, Any]:
-        """返回 JSON 可序列化的字典，用于 CI 输出。"""
+        """Returns a JSON-serializable dict for CI output."""
         return {
             "suite_name": self.suite_name,
             "run_id": self.run_id,
@@ -235,7 +234,7 @@ class SuiteResult:
                     "task_id": tr.task_id,
                     "pass_at_1": tr.pass_at_1,
                     "pass_at_k": tr.pass_at_k,
-                    "pass_k": tr.pass_k,
+                    "all_passed": tr.all_passed,
                     "mean_score": tr.mean_score,
                     "score_std": tr.score_std,
                     "pass_rate": tr.pass_rate,

@@ -64,27 +64,27 @@ class TestTaskResult:
         result = TaskResult(task_id="T1", trials=[])
         assert result.pass_at_k is False
 
-    def test_pass_k_all_passed(self) -> None:
+    def test_all_passed_all_passed(self) -> None:
         trials = [
             TrialResult(trial_num=1, passed=True, score=0.9),
             TrialResult(trial_num=2, passed=True, score=0.8),
             TrialResult(trial_num=3, passed=True, score=0.95),
         ]
         result = TaskResult(task_id="T1", trials=trials)
-        assert result.pass_k is True
+        assert result.all_passed is True
 
-    def test_pass_k_one_failed(self) -> None:
+    def test_all_passed_one_failed(self) -> None:
         trials = [
             TrialResult(trial_num=1, passed=True, score=0.9),
             TrialResult(trial_num=2, passed=False, score=0.4),
             TrialResult(trial_num=3, passed=True, score=0.8),
         ]
         result = TaskResult(task_id="T1", trials=trials)
-        assert result.pass_k is False
+        assert result.all_passed is False
 
-    def test_pass_k_empty_trials(self) -> None:
+    def test_all_passed_empty_trials(self) -> None:
         result = TaskResult(task_id="T1", trials=[])
-        assert result.pass_k is False
+        assert result.all_passed is False
 
     def test_pass_rate_all_passed(self) -> None:
         trials = [
@@ -289,7 +289,7 @@ class TestSuiteResultToDict:
         assert tr_dict["task_id"] == "T1"
         assert tr_dict["pass_at_1"] is True
         assert tr_dict["pass_at_k"] is True
-        assert tr_dict["pass_k"] is True
+        assert tr_dict["all_passed"] is True
         assert tr_dict["mean_score"] == 0.9
         assert tr_dict["score_std"] == 0.0
         assert tr_dict["pass_rate"] == 1.0
@@ -331,8 +331,13 @@ class TestEvalTask:
 
     def test_with_grader_configs(self) -> None:
         graders = [
-            GraderConfig(type="state_check", expect="page=settings", rubric="Settings page visible"),
-            GraderConfig(type="llm_rubric", expect="Settings loaded", rubric="Settings loaded successfully", threshold=0.8),
+            GraderConfig(grader_type="state_check", expect="page=settings", rubric="Settings page visible"),
+            GraderConfig(
+                grader_type="llm_rubric",
+                expect="Settings loaded",
+                rubric="Settings loaded successfully",
+                threshold=0.8,
+            ),
         ]
         task = EvalTask(
             id="eval-task-002",
@@ -342,7 +347,7 @@ class TestEvalTask:
             scoring=ScoringConfig(pass_threshold=0.8),
         )
         assert len(task.graders) == 2
-        assert task.graders[0].type == "state_check"
+        assert task.graders[0].grader_type == "state_check"
         assert task.graders[0].threshold == 1.0
         assert task.graders[1].threshold == 0.8
         assert task.scoring is not None
@@ -511,14 +516,14 @@ class TestGraderConfig:
     """Test GraderConfig creation."""
 
     def test_default_threshold(self) -> None:
-        cfg = GraderConfig(type="state_check", expect="page=home", rubric="Home page visible")
+        cfg = GraderConfig(grader_type="state_check", expect="page=home", rubric="Home page visible")
         assert cfg.required is True
         assert cfg.threshold == 1.0
         assert cfg.custom_expr is None
 
     def test_optional_grader(self) -> None:
         cfg = GraderConfig(
-            type="llm_rubric",
+            grader_type="llm_rubric",
             expect="All good",
             rubric="Detailed rubric",
             required=False,
@@ -538,7 +543,7 @@ class TestScoringConfig:
         assert cfg.mode == "hybrid"
         assert cfg.pass_threshold == 0.8
         assert cfg.mandatory == []
-        assert cfg.weights == {"state_check": 0.5, "llm_rubric": 0.5}
+        assert cfg.weights == {}
 
     def test_custom(self) -> None:
         cfg = ScoringConfig(
@@ -551,6 +556,15 @@ class TestScoringConfig:
         assert cfg.pass_threshold == 0.8
         assert "state_check" in cfg.mandatory
         assert cfg.weights["llm_rubric"] == 0.4
+
+
+class TestMetricConfig:
+    """Test MetricConfig creation."""
+
+    def test_defaults(self) -> None:
+        mc = MetricConfig(type="transcript")
+        assert mc.type == "transcript"
+        assert mc.metrics == []
 
 
 class TestReferenceSolution:
