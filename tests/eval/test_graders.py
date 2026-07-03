@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from testagent.eval.graders.base import BaseGrader
+from testagent.eval.graders.llm_rubric import LlmRubricGrader
 from testagent.eval.graders.state_check import StateCheckGrader
 from testagent.eval.models import (
     EvalTask,
@@ -135,3 +138,121 @@ class TestStateCheckGrader:
         assert result.passed is False
         assert result.score == 0.0
         assert "missing-element" in result.details
+
+
+# ── Mock LLM for testing ──────────────────────────────────────────────────────────
+
+
+class MockLLM:
+    """Mock LLM provider that returns a canned response."""
+
+    def __init__(self, response_text: str, **usage_kwargs: int) -> None:
+        self.response_text = response_text
+        self._usage = type(
+            "MockUsage",
+            (),
+            {
+                "input_tokens": usage_kwargs.get("input_tokens", 50),
+                "output_tokens": usage_kwargs.get("output_tokens", 20),
+                "total_tokens": usage_kwargs.get("total_tokens", 70),
+            },
+        )()
+
+    async def chat(self, **kwargs: object) -> object:
+        class MockResp:
+            content = [{"type": "text", "text": ""}]
+            usage = None
+
+        resp = MockResp()
+        resp.content = [{"type": "text", "text": self.response_text}]
+        resp.usage = self._usage
+        return resp
+
+
+# ── LlmRubricGrader ──────────────────────────────────────────────────────────────
+
+
+class TestLlmRubricGrader:
+    """Test LlmRubricGrader (LLM-as-Judge)."""
+
+    @pytest.mark.asyncio
+    async def test_rubric_pass(self) -> None:
+        """Mock returns score=5 → passed=True, score=1.0."""
+        mock = MockLLM('{"score": 5, "passed": true, "reason": "Perfect execution"}')
+        config = GraderConfig(grader_type="llm_rubric", rubric="Test rubric")
+        grader = LlmRubricGrader(config, llm_provider=mock)
+        transcript = Transcript(messages=[], summary=TranscriptSummary())
+        task = EvalTask(id="t1", description="Test task", instruction="")
+
+        result = await grader.grade(transcript, task)
+
+        assert result.passed is True
+        assert result.score == 1.0
+        assert result.grader_type == "llm_rubric"
+
+    @pytest.mark.asyncio
+    async def test_rubric_fail(self) -> None:
+        """Mock returns score=2 → passed=False, score=0.4."""
+        mock = MockLLM('{"score": 2, "passed": false, "reason": "Bad execution"}')
+        config = GraderConfig(grader_type="llm_rubric", rubric="Test rubric")
+        grader = LlmRubricGrader(config, llm_provider=mock)
+        transcript = Transcript(messages=[], summary=TranscriptSummary())
+        task = EvalTask(id="t1", description="Test task", instruction="")
+
+        result = await grader.grade(transcript, task)
+
+        assert result.passed is False
+        assert result.score == 0.4
+        assert result.grader_type == "llm_rubric"
+
+    @pytest.mark.asyncio
+    async def test_rubric_parse_error(self) -> None:
+        """Mock returns non-JSON text → passed=False, score=0.0, details='parse error'."""
+        mock = MockLLM("This is not JSON at all")
+        config = GraderConfig(grader_type="llm_rubric", rubric="Test rubric")
+        grader = LlmRubricGrader(config, llm_provider=mock)
+        transcript = Transcript(messages=[], summary=TranscriptSummary())
+        task = EvalTask(id="t1", description="Test task", instruction="")
+
+        result = await grader.grade(transcript, task)
+
+        assert result.passed is False
+        assert result.score == 0.0
+        assert result.details == "parse error"
+
+    @pytest.mark.asyncio
+    async def test_rubric_with_recorder(self) -> None:
+        """Verify recorder.record_usage() was called with right token counts."""
+        mock = MockLLM(
+            '{"score": 5, "passed": true, "reason": "Perfect"}',
+            input_tokens=50,
+            output_tokens=20,
+            total_tokens=70,
+        )
+        recorder = MagicMock(spec=["record_usage"])
+        config = GraderConfig(grader_type="llm_rubric", rubric="Test rubric")
+        grader = LlmRubricGrader(config, llm_provider=mock, recorder=recorder)
+        transcript = Transcript(messages=[], summary=TranscriptSummary())
+        task = EvalTask(id="t1", description="Test task", instruction="")
+
+        result = await grader.grade(transcript, task)
+
+        assert result.passed is True
+        recorder.record_usage.assert_called_once_with(
+            input_tokens=50, output_tokens=20, total_tokens=70
+        )
+
+    @pytest.mark.asyncio
+    async def test_rubric_no_recorder(self) -> None:
+        """Without recorder, should not crash."""
+        mock = MockLLM('{"score": 3, "passed": false, "reason": "Ok"}')
+        config = GraderConfig(grader_type="llm_rubric", rubric="Test rubric")
+        grader = LlmRubricGrader(config, llm_provider=mock)
+        transcript = Transcript(messages=[], summary=TranscriptSummary())
+        task = EvalTask(id="t1", description="Test task", instruction="")
+
+        result = await grader.grade(transcript, task)
+
+        assert result.passed is False
+        assert result.score == 0.6
+        assert result.grader_type == "llm_rubric"
