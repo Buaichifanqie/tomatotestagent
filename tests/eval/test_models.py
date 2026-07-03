@@ -331,12 +331,10 @@ class TestEvalTask:
 
     def test_with_grader_configs(self) -> None:
         graders = [
-            GraderConfig(grader_type="state_check", expect="page=settings", rubric="Settings page visible"),
+            GraderConfig(grader_type="state_check", expect={"page": "settings"}, rubric="Settings page visible"),
             GraderConfig(
                 grader_type="llm_rubric",
-                expect="Settings loaded",
                 rubric="Settings loaded successfully",
-                threshold=0.8,
             ),
         ]
         task = EvalTask(
@@ -348,8 +346,9 @@ class TestEvalTask:
         )
         assert len(task.graders) == 2
         assert task.graders[0].grader_type == "state_check"
-        assert task.graders[0].threshold == 1.0
-        assert task.graders[1].threshold == 0.8
+        assert task.graders[0].expect == {"page": "settings"}
+        assert task.graders[1].grader_type == "llm_rubric"
+        assert task.graders[1].rubric == "Settings loaded successfully"
         assert task.scoring is not None
         assert task.scoring.pass_threshold == 0.8
 
@@ -516,24 +515,20 @@ class TestSetupStep:
 class TestGraderConfig:
     """Test GraderConfig creation."""
 
-    def test_default_threshold(self) -> None:
-        cfg = GraderConfig(grader_type="state_check", expect="page=home", rubric="Home page visible")
-        assert cfg.required is True
-        assert cfg.threshold == 1.0
-        assert cfg.custom_expr is None
+    def test_defaults(self) -> None:
+        cfg = GraderConfig(grader_type="state_check")
+        assert cfg.grader_type == "state_check"
+        assert cfg.expect is None
+        assert cfg.rubric is None
 
-    def test_optional_grader(self) -> None:
+    def test_with_expect_and_rubric(self) -> None:
         cfg = GraderConfig(
-            grader_type="llm_rubric",
-            expect="All good",
-            rubric="Detailed rubric",
-            required=False,
-            threshold=0.7,
-            custom_expr="score > 0.5",
+            grader_type="state_check",
+            expect={"page": "home"},
+            rubric="Home page visible",
         )
-        assert cfg.required is False
-        assert cfg.threshold == 0.7
-        assert cfg.custom_expr == "score > 0.5"
+        assert cfg.expect == {"page": "home"}
+        assert cfg.rubric == "Home page visible"
 
 
 class TestScoringConfig:

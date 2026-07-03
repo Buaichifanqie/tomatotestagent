@@ -17,14 +17,16 @@ class SetupStep:
 
 @dataclass
 class GraderConfig:
-    """Grader configuration."""
+    """Grader configuration.
+
+    ``expect`` is a dict of expected states (used by state_check).
+    ``rubric`` is a scoring rubric string (used by llm_rubric).
+    Each grader type uses only the fields it needs.
+    """
 
     grader_type: str
-    expect: str
-    rubric: str
-    required: bool = True
-    threshold: float = 1.0
-    custom_expr: str | None = None
+    expect: dict | None = None
+    rubric: str | None = None
 
 
 @dataclass
