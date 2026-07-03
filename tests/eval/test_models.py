@@ -384,11 +384,12 @@ class TestEvalTask:
             id="eval-task-005",
             description="Performance test",
             instruction="Measure response time",
-            tracked_metrics=MetricConfig(type="latency", metrics=["p50", "p95", "p99"]),
+            tracked_metrics=[MetricConfig(type="latency", metrics=["p50", "p95", "p99"])],
         )
         assert task.tracked_metrics is not None
-        assert task.tracked_metrics.type == "latency"
-        assert "p95" in task.tracked_metrics.metrics
+        assert len(task.tracked_metrics) == 1
+        assert task.tracked_metrics[0].type == "latency"
+        assert "p95" in task.tracked_metrics[0].metrics
 
     def test_task_default_trials(self) -> None:
         task = EvalTask(id="eval-task-006", description="Default trials", instruction="Just do it")

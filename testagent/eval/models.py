@@ -69,7 +69,7 @@ class EvalTask:
     trials: int = 3
     graders: list[GraderConfig] = field(default_factory=list)
     scoring: ScoringConfig | None = None
-    tracked_metrics: MetricConfig | None = None
+    tracked_metrics: list[MetricConfig] = field(default_factory=list)
     timeout: int = 120
     reference: ReferenceSolution | None = None
 
