@@ -33,11 +33,83 @@ _DEFAULT_REPORT_DIR = Path("reports") / "eval"
 
 
 def _collect_mcp_tools() -> list[dict[str, Any]]:
-    """Collect MCP tools (MVP stub — returns an empty list).
-
-    Real MCP tool discovery can be wired in later.
-    """
-    return []
+    """Collect MCP tools for the agent (OpenAI function-calling format)."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "screenshot",
+                "description": "Take a screenshot of the current screen. Use this to see what's on the screen before taking action.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tap",
+                "description": "Tap at specific screen coordinates (x, y). Screen coordinates are typically 0-1080 for width and 0-2400 for height.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "integer", "description": "X coordinate"},
+                        "y": {"type": "integer", "description": "Y coordinate"},
+                    },
+                    "required": ["x", "y"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "type_text",
+                "description": "Type text into the currently focused input field.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "The text to type"},
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "swipe",
+                "description": "Swipe from one coordinate to another.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start_x": {"type": "integer"}, "start_y": {"type": "integer"},
+                        "end_x": {"type": "integer"}, "end_y": {"type": "integer"},
+                    },
+                    "required": ["start_x", "start_y", "end_x", "end_y"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_page_source",
+                "description": "Get the current screen's UI structure as XML. Use this to find UI elements and their positions.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "launch_app",
+                "description": "Launch an Android app by package name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "package": {"type": "string", "description": "Android package name"},
+                    },
+                    "required": ["package"],
+                },
+            },
+        },
+    ]
 
 
 def _resolve_output_dir(suite_name: str, run_id: str, output: str = "") -> Path:
@@ -95,10 +167,54 @@ def run(
         console.print(f"[red]Failed to initialize LLM provider:[/red] {exc}")
         raise typer.Exit(1) from exc
 
+    # 5. Create Appium session + dispatch function
+    console.print("  Creating Appium session ...")
+    from testagent.mcp_servers.appium_server.tools import (
+        app_tap, app_screenshot, app_type_text, app_swipe,
+        app_get_source, app_launch,
+    )
+    from testagent.plan.session_manager import SessionManager
+
+    appium_url = "http://localhost:4723"
+    device_udid = "emulator-5554"
+
+    session_mgr = SessionManager(appium_url=appium_url)
+    session_id = session_mgr.create_session(device_udid=device_udid)
+    if not session_id:
+        console.print("[red]Failed to create Appium session[/red]")
+        raise typer.Exit(1)
+    console.print(f"  [green]Appium session created: {session_id[:12]}...[/green]")
+
+    async def dispatch_fn(tool_name: str, args: dict) -> dict:
+        """Route tool calls to actual MCP implementations."""
+        try:
+            if tool_name == "screenshot":
+                return await app_screenshot(appium_url=appium_url, session_id=session_id)
+            elif tool_name == "tap":
+                return await app_tap(x=args["x"], y=args["y"], appium_url=appium_url, session_id=session_id)
+            elif tool_name == "type_text":
+                return await app_type_text(text=args["text"], appium_url=appium_url, session_id=session_id)
+            elif tool_name == "swipe":
+                return await app_swipe(
+                    start_x=args["start_x"], start_y=args["start_y"],
+                    end_x=args["end_x"], end_y=args["end_y"],
+                    appium_url=appium_url, session_id=session_id,
+                )
+            elif tool_name == "get_page_source":
+                return await app_get_source(appium_url=appium_url, session_id=session_id)
+            elif tool_name == "launch_app":
+                return await app_launch(package=args["package"], appium_url=appium_url, session_id=session_id)
+            else:
+                return {"error": f"Unknown tool: {tool_name}"}
+        except KeyError as e:
+            return {"error": f"Missing required parameter: {e}"}
+        except Exception as e:
+            return {"error": f"{tool_name} failed: {e}"}
+
     mcp_tools = _collect_mcp_tools()
     model_name = settings.openai_model or "unknown"
 
-    # 5. Run
+    # 6. Run
     console.print(f"  Running [cyan]{len(suite.tasks)}[/cyan] tasks with [cyan]{suite.default_trials}[/cyan] trial(s) each ...")
     console.print("")
 
@@ -106,14 +222,20 @@ def run(
         runner = EvalRunner(
             llm_provider=llm,
             mcp_tools=mcp_tools,
+            dispatch_fn=dispatch_fn,
             model_name=model_name,
         )
         result = asyncio.run(runner.run_suite(suite))
     except Exception as exc:
         console.print(f"[red]Execution failed:[/red] {exc}")
         raise typer.Exit(1) from exc
+    finally:
+        try:
+            session_mgr.close_session()
+        except Exception:
+            pass
 
-    # 6. Save reports
+    # 7. Save reports
     run_id = result.run_id
     output_dir = _resolve_output_dir(suite.name, run_id, output)
 
@@ -123,7 +245,7 @@ def run(
     console.print(f"  [green]JSON saved:[/green] {json_path}")
     console.print("")
 
-    # 7. Summary
+    # 8. Summary
     console.print("[bold]Summary:[/bold]")
     console.print(f"  Suite:     {result.suite_name}")
     console.print(f"  Tasks:     {len(result.task_results)}")

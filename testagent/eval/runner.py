@@ -67,10 +67,14 @@ class EvalRunner:
     ) -> None:
         self._llm = llm_provider
         self._mcp_tools = mcp_tools
-        self._dispatch = dispatch_fn
+        self._dispatch = dispatch_fn or self._default_dispatch
         self._agent_loop_fn = agent_loop_fn or _default_agent_loop
         self._system_prompt = system_prompt
         self._model_name = model_name
+
+    async def _default_dispatch(self, tool_name: str, args: dict) -> dict:
+        """Default dispatch — logs calls when no dispatch_fn is configured."""
+        return {"result": f"Called {tool_name} with {args}", "note": "No dispatch configured"}
 
     # ── Public API ──────────────────────────────────────────────────────────
 
