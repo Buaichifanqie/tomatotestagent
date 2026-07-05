@@ -116,6 +116,8 @@ def run(
     suite_name: str = typer.Argument(..., help="套件名称或路径"),
     trials: int = typer.Option(0, "--trials", "-t", help="覆盖默认试次数（0=使用YAML定义）"),
     filter: str = typer.Option("", "--filter", "-f", help="按任务ID过滤（glob模式）"),  # noqa: A002
+    device: str = typer.Option("emulator-5554", "--device", "-d", help="Android设备序列号（adb devices）"),
+    appium_url: str = typer.Option("http://localhost:4723", "--appium-url", "-u", help="Appium服务器地址"),
     output: str = typer.Option("", "--output", "-o", help="报告输出目录"),
 ) -> None:
     """运行评测套件。"""
@@ -156,9 +158,6 @@ def run(
         console.print(f"[red]Failed to initialize LLM provider:[/red] {exc}")
         raise typer.Exit(1) from exc
 
-    # 5. Create Appium session
-    _ANDROID_SDK = r"C:\Users\kongwenshuo\AppData\Local\Android\Sdk"
-
     # 5. Create Appium session via direct HTTP POST + dispatch function
     console.print("  Creating Appium session ...")
     from testagent.mcp_servers.appium_server.tools import (
@@ -166,7 +165,6 @@ def run(
         app_get_source, app_launch,
     )
 
-    appium_url = "http://localhost:4723"
     android_sdk = r"C:\Users\kongwenshuo\AppData\Local\Android\Sdk"
 
     async def _init_session() -> tuple[str, dict[str, Any]]:
@@ -174,8 +172,8 @@ def run(
         caps: dict[str, Any] = {
             "platformName": "Android",
             "appium:automationName": "UiAutomator2",
-            "appium:deviceName": "emulator-5554",
-            "appium:udid": "emulator-5554",
+            "appium:deviceName": device,
+            "appium:udid": device,
             "appium:noReset": True,
             "appium:autoGrantPermissions": True,
             "appium:newCommandTimeout": 300,
@@ -206,6 +204,37 @@ def run(
         console.print(f"[red]Failed to create Appium session: {exc}[/red]")
         raise typer.Exit(1)
 
+    # Force-launch Bilibili — try strategies until it works
+    import time as _time
+    pkg_name = "tv.danmaku.bili"
+    pkg_activity = ".MainActivityV2"
+    from testagent.common.adb_utils import adb_command
+    try:
+        adb_command(device, "shell", "am", "force-stop", pkg_name,
+                    capture_output=True, timeout=10)
+    except Exception:
+        pass
+    _time.sleep(1)
+    for adb_args in [
+        ("shell", "am", "start", "-n", f"{pkg_name}/{pkg_activity}"),
+        ("shell", "monkey", "-p", pkg_name, "1"),
+        ("shell", "am", "start", "-a", "android.intent.action.MAIN",
+         "-c", "android.intent.category.LAUNCHER", pkg_name),
+    ]:
+        try:
+            adb_command(device, *adb_args, capture_output=True, text=True, timeout=10)
+            _time.sleep(2)
+            focus = adb_command(device, "shell", "dumpsys", "window",
+                                capture_output=True, text=True, timeout=5)
+            if pkg_name in (focus.stdout or ""):
+                console.print(f"  [green]App launched: {pkg_name}[/green]")
+                break
+        except Exception:
+            continue
+    else:
+        console.print(f"  [yellow]Could not confirm {pkg_name} is in foreground[/yellow]")
+    _time.sleep(3)
+
     async def dispatch_fn(tool_name: str, args: dict) -> dict:
         """Route tool calls to actual MCP implementations."""
         try:
@@ -225,27 +254,36 @@ def run(
                 return await app_get_source(appium_url=appium_url, session_id=session_id)
             elif tool_name == "launch_app":
                 pkg = args.get("package", "")
+                activity = args.get("activity", "")
+                force = args.get("force_stop", False)
                 if not pkg:
                     return {"error": "Missing package name"}
-                # Force-stop + cold launch via ADB (same as ExecutionEngine._ensure_app_launched)
                 from testagent.common.adb_utils import adb_command
+                if force:
+                    try:
+                        adb_command(device, "shell", "am", "force-stop", pkg,
+                                    capture_output=True, timeout=10)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
                 try:
-                    adb_command("emulator-5554", "shell", "am", "force-stop", pkg,
-                                capture_output=True, timeout=10)
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
-                try:
-                    result = adb_command("emulator-5554", "shell", "am", "start",
-                                         "-a", "android.intent.action.MAIN",
-                                         "-c", "android.intent.category.LAUNCHER",
-                                         pkg,
-                                         capture_output=True, text=True, timeout=10,
-                                         )
+                    if activity:
+                        component = f"{pkg}/{activity}" if not activity.startswith(".") else f"{pkg}{activity}"
+                        result = adb_command(
+                            device, "shell", "am", "start", "-n", component,
+                            capture_output=True, text=True, timeout=10,
+                        )
+                    else:
+                        result = adb_command(
+                            device, "shell", "am", "start",
+                            "-a", "android.intent.action.MAIN",
+                            "-c", "android.intent.category.LAUNCHER",
+                            pkg,
+                            capture_output=True, text=True, timeout=10,
+                        )
                     await asyncio.sleep(3)
                     return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
                 except Exception as e:
-                    # Fallback: try app_launch via Appium
                     return await app_launch(package=pkg, appium_url=appium_url, session_id=session_id)
             else:
                 return {"error": f"Unknown tool: {tool_name}"}
