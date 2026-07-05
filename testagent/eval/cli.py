@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -33,80 +35,67 @@ _DEFAULT_REPORT_DIR = Path("reports") / "eval"
 
 
 def _collect_mcp_tools() -> list[dict[str, Any]]:
-    """Collect MCP tools for the agent (OpenAI function-calling format)."""
+    """Collect MCP tools for the agent (inner function dict — provider adds wrapper).
+
+    The OpenAIProvider.chat() at line 96 wraps each tool as:
+        {"type": "function", "function": t}
+    so we return only the inner ``function`` dict with name/description/parameters.
+    """
     return [
         {
-            "type": "function",
-            "function": {
-                "name": "screenshot",
-                "description": "Take a screenshot of the current screen. Use this to see what's on the screen before taking action.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
+            "name": "screenshot",
+            "description": "Take a screenshot of the current screen. Use this to see what's on the screen before taking action.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
-            "type": "function",
-            "function": {
-                "name": "tap",
-                "description": "Tap at specific screen coordinates (x, y). Screen coordinates are typically 0-1080 for width and 0-2400 for height.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "x": {"type": "integer", "description": "X coordinate"},
-                        "y": {"type": "integer", "description": "Y coordinate"},
-                    },
-                    "required": ["x", "y"],
+            "name": "tap",
+            "description": "Tap at specific screen coordinates (x, y). Screen coordinates are typically 0-1080 for width and 0-2400 for height.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X coordinate"},
+                    "y": {"type": "integer", "description": "Y coordinate"},
                 },
+                "required": ["x", "y"],
             },
         },
         {
-            "type": "function",
-            "function": {
-                "name": "type_text",
-                "description": "Type text into the currently focused input field.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "The text to type"},
-                    },
-                    "required": ["text"],
+            "name": "type_text",
+            "description": "Type text into the currently focused input field.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The text to type"},
                 },
+                "required": ["text"],
             },
         },
         {
-            "type": "function",
-            "function": {
-                "name": "swipe",
-                "description": "Swipe from one coordinate to another.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "start_x": {"type": "integer"}, "start_y": {"type": "integer"},
-                        "end_x": {"type": "integer"}, "end_y": {"type": "integer"},
-                    },
-                    "required": ["start_x", "start_y", "end_x", "end_y"],
+            "name": "swipe",
+            "description": "Swipe from one coordinate to another.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer"}, "start_y": {"type": "integer"},
+                    "end_x": {"type": "integer"}, "end_y": {"type": "integer"},
                 },
+                "required": ["start_x", "start_y", "end_x", "end_y"],
             },
         },
         {
-            "type": "function",
-            "function": {
-                "name": "get_page_source",
-                "description": "Get the current screen's UI structure as XML. Use this to find UI elements and their positions.",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
+            "name": "get_page_source",
+            "description": "Get the current screen's UI structure as XML. Use this to find UI elements and their positions.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
-            "type": "function",
-            "function": {
-                "name": "launch_app",
-                "description": "Launch an Android app by package name.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "package": {"type": "string", "description": "Android package name"},
-                    },
-                    "required": ["package"],
+            "name": "launch_app",
+            "description": "Launch an Android app by package name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "description": "Android package name"},
                 },
+                "required": ["package"],
             },
         },
     ]
@@ -167,23 +156,54 @@ def run(
         console.print(f"[red]Failed to initialize LLM provider:[/red] {exc}")
         raise typer.Exit(1) from exc
 
-    # 5. Create Appium session + dispatch function
+    # 5. Create Appium session
+    _ANDROID_SDK = r"C:\Users\kongwenshuo\AppData\Local\Android\Sdk"
+
+    # 5. Create Appium session via direct HTTP POST + dispatch function
     console.print("  Creating Appium session ...")
     from testagent.mcp_servers.appium_server.tools import (
         app_tap, app_screenshot, app_type_text, app_swipe,
         app_get_source, app_launch,
     )
-    from testagent.plan.session_manager import SessionManager
 
     appium_url = "http://localhost:4723"
-    device_udid = "emulator-5554"
+    android_sdk = r"C:\Users\kongwenshuo\AppData\Local\Android\Sdk"
 
-    session_mgr = SessionManager(appium_url=appium_url)
-    session_id = session_mgr.create_session(device_udid=device_udid)
-    if not session_id:
-        console.print("[red]Failed to create Appium session[/red]")
+    async def _init_session() -> tuple[str, dict[str, Any]]:
+        """Create Appium session and return (session_id, caps)."""
+        caps: dict[str, Any] = {
+            "platformName": "Android",
+            "appium:automationName": "UiAutomator2",
+            "appium:deviceName": "emulator-5554",
+            "appium:udid": "emulator-5554",
+            "appium:noReset": True,
+            "appium:autoGrantPermissions": True,
+            "appium:newCommandTimeout": 300,
+        }
+        # Pass ANDROID_HOME via capabilities if set
+        if android_sdk:
+            caps["appium:androidHome"] = android_sdk
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{appium_url}/session",
+                json={"capabilities": {"alwaysMatch": caps, "firstMatch": [{}]}},
+            )
+            data = resp.json()
+        if resp.status_code == 200 and "value" in data:
+            sid: str = data["value"].get("sessionId") or data.get("sessionId", "")
+            return sid, caps
+        err = data.get("value", {}).get("message", data.get("message", str(resp.status_code)))
+        raise RuntimeError(f"Appium session creation failed: {err}")
+
+    try:
+        session_id, _ = asyncio.run(_init_session())
+        console.print(f"  [green]Appium session created: {session_id[:12]}...[/green]")
+    except httpx.TimeoutException:
+        console.print("[red]Appium session creation timed out. Is Appium running?[/red]")
         raise typer.Exit(1)
-    console.print(f"  [green]Appium session created: {session_id[:12]}...[/green]")
+    except Exception as exc:
+        console.print(f"[red]Failed to create Appium session: {exc}[/red]")
+        raise typer.Exit(1)
 
     async def dispatch_fn(tool_name: str, args: dict) -> dict:
         """Route tool calls to actual MCP implementations."""
@@ -230,10 +250,11 @@ def run(
         console.print(f"[red]Execution failed:[/red] {exc}")
         raise typer.Exit(1) from exc
     finally:
-        try:
-            session_mgr.close_session()
-        except Exception:
-            pass
+        if session_id:
+            try:
+                httpx.delete(f"{appium_url}/session/{session_id}", timeout=10)
+            except Exception:
+                pass
 
     # 7. Save reports
     run_id = result.run_id

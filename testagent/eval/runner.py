@@ -221,10 +221,19 @@ class EvalRunner:
 
     # ── Internal: Setup ────────────────────────────────────────────────────
 
-    async def _execute_setup(self, setup_steps: list[Any]) -> None:
-        """Execute setup steps (stub for MVP — logs only)."""
+    async def _execute_setup(self, setup_steps: list[Any] | None) -> None:
+        """Execute setup steps by dispatching to the MCP dispatch function."""
+        if not setup_steps:
+            return
         for step in setup_steps:
-            logger.info("Setup step: %s %s", step.action, step.params)
+            action = step.action if hasattr(step, "action") else step.get("action", "")
+            params = step.params if hasattr(step, "params") else step.get("params", {})
+            logger.info("Setup: %s %s", action, params)
+            if self._dispatch and action:
+                try:
+                    await self._dispatch(action, params)
+                except Exception as e:
+                    logger.warning("Setup step %s failed (non-fatal): %s", action, e)
 
     # ── Internal: System Prompt ────────────────────────────────────────────
 
