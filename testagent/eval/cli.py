@@ -179,8 +179,9 @@ def run(
             "appium:noReset": True,
             "appium:autoGrantPermissions": True,
             "appium:newCommandTimeout": 300,
+            "appium:allowInsecure": "*:adb_shell",
+            "appium:systemPort": 8200,
         }
-        # Pass ANDROID_HOME via capabilities if set
         if android_sdk:
             caps["appium:androidHome"] = android_sdk
         async with httpx.AsyncClient(timeout=30) as client:
@@ -223,7 +224,29 @@ def run(
             elif tool_name == "get_page_source":
                 return await app_get_source(appium_url=appium_url, session_id=session_id)
             elif tool_name == "launch_app":
-                return await app_launch(package=args["package"], appium_url=appium_url, session_id=session_id)
+                pkg = args.get("package", "")
+                if not pkg:
+                    return {"error": "Missing package name"}
+                # Force-stop + cold launch via ADB (same as ExecutionEngine._ensure_app_launched)
+                from testagent.common.adb_utils import adb_command
+                try:
+                    adb_command("emulator-5554", "shell", "am", "force-stop", pkg,
+                                capture_output=True, timeout=10)
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+                try:
+                    result = adb_command("emulator-5554", "shell", "am", "start",
+                                         "-a", "android.intent.action.MAIN",
+                                         "-c", "android.intent.category.LAUNCHER",
+                                         pkg,
+                                         capture_output=True, text=True, timeout=10,
+                                         )
+                    await asyncio.sleep(3)
+                    return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+                except Exception as e:
+                    # Fallback: try app_launch via Appium
+                    return await app_launch(package=pkg, appium_url=appium_url, session_id=session_id)
             else:
                 return {"error": f"Unknown tool: {tool_name}"}
         except KeyError as e:
