@@ -47,7 +47,7 @@ GENERATE_SYSTEM_PROMPT = """你是一个移动 App 测试专家。你的任务�
         {"type": "state_check", "expect": {"elements_present": ["元素1", "元素2"]}},
         {"type": "llm_rubric", "rubric": "评分标准..."}
       ],
-      "scoring": {"mode": "weighted", "pass_threshold": 0.5, "weights": {"state_check": 0.3, "llm_rubric": 0.7}}
+      "scoring": {"mode": "weighted", "pass_threshold": 0.5, "weights": {"state_check": 0.1, "llm_rubric": 0.9}}
     }
   ]
 }
@@ -259,27 +259,30 @@ async def generate_tasks_with_llm(
             if block.get("type") == "text":
                 text += str(block.get("text", ""))
 
-        # Parse JSON — strip markdown code blocks and handle extra text
+        # Parse JSON — strip markdown code blocks, handle multi-line strings
         import re as _re
-        # Remove markdown code blocks
         cleaned = _re.sub(r"```(?:json)?\s*", "", text).strip()
         cleaned = cleaned.rstrip("`").strip()
-        # Find outermost JSON object
+
+        # Handle unescaped newlines inside JSON strings
+        # First find the JSON object
         start = cleaned.find("{")
         end = cleaned.rfind("}") + 1
-        if start >= 0 and end > start:
-            data = json.loads(cleaned[start:end])
-            tasks = data.get("tasks", [])
-            if tasks:
-                return tasks
-        # Fallback: try to find JSON array directly
-        arr_start = cleaned.find("[")
-        arr_end = cleaned.rfind("]") + 1
-        if arr_start >= 0 and arr_end > arr_start:
-            tasks = json.loads(cleaned[arr_start:arr_end])
-            if isinstance(tasks, list):
-                return tasks
-        raise ValueError(f"No valid tasks found in LLM response: {cleaned[:500]}")
+        if start < 0 or end <= start:
+            raise ValueError(f"No JSON object found in LLM response: {cleaned[:500]}")
+
+        json_str = cleaned[start:end]
+        # Replace unescaped newlines in string values with \\n
+        # Simple approach: strip newlines before parsing
+        json_str = json_str.replace("\n", " ").replace("\r", " ")
+        # Collapse multiple spaces
+        json_str = _re.sub(r" {2,}", " ", json_str)
+
+        data = json.loads(json_str)
+        tasks = data.get("tasks", [])
+        if tasks:
+            return tasks
+        raise ValueError(f"No tasks array found in LLM response: {json_str[:500]}")
     except json.JSONDecodeError as e:
         raise RuntimeError(f"LLM returned invalid JSON: {e}. Response: {text[:500]}")
     except Exception as e:
@@ -287,9 +290,31 @@ async def generate_tasks_with_llm(
 
 
 def write_task_files(app_name: str, tasks: list[dict]) -> Path:
-    """Write generated tasks to evals/tasks/<app_name>/."""
+    """Write generated tasks to evals/tasks/<app_name>/.
+
+    Cleans up all previous auto-generated files first, then writes
+    fresh suite.yaml + task files.
+    """
     output_dir = _DEFAULT_TASKS_DIR / app_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean up all previous auto-generated task files (any .yaml except suite.yaml)
+    for f in output_dir.rglob("*.yaml"):
+        if f.name == "suite.yaml":
+            continue  # keep suite.yaml (may contain user edits)
+        try:
+            # Only remove files that look auto-generated (in subdirectories)
+            if f.parent != output_dir:
+                f.unlink()
+        except Exception:
+            pass
+    # Clean up empty subdirectories
+    for d in sorted(output_dir.rglob("*"), key=lambda p: len(str(p)), reverse=True):
+        if d.is_dir() and d != output_dir:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
 
     # Write suite.yaml
     suite_yaml = {
