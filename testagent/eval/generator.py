@@ -46,10 +46,9 @@ GENERATE_SYSTEM_PROMPT = """你是一个移动 App 测试专家。你的任务�
       "tags": ["smoke", "core"],
       "timeout": 120,
       "graders": [
-        {"type": "state_check", "expect": {"elements_present": ["元素1", "元素2"]}},
-        {"type": "llm_rubric", "rubric": "评分标准..."}
+        {"type": "llm_rubric", "rubric": "评分标准（1-5分，>=4通过）"}
       ],
-      "scoring": {"mode": "weighted", "pass_threshold": 0.5, "weights": {"state_check": 0.1, "llm_rubric": 0.9}}
+      "scoring": {"mode": "weighted", "pass_threshold": 0.5, "weights": {"llm_rubric": 1.0}}
     }
   ]
 }
