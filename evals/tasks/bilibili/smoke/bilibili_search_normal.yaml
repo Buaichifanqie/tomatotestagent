@@ -1,0 +1,16 @@
+task:
+  id: bilibili_search_normal
+  description: 搜索正常关键词并查看结果
+  instruction: 点击搜索按钮，在搜索框输入关键词“B站”，点击搜索按钮或键盘确认，等待搜索结果列表出现，确认至少有一个搜索结果。
+  tags:
+  - smoke
+  - core
+  timeout: 60
+  graders:
+  - type: llm_rubric
+    rubric: 1分：搜索无响应或崩溃；2分：搜索框出现但输入后无结果；3分：搜索有结果但内容不相关或结果为空；4分：搜索结果正常显示，包含相关视频和用户；5分：搜索结果丰富，包含视频、用户、专栏等多类型结果。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      llm_rubric: 1.0

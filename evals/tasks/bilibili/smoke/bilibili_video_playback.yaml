@@ -1,0 +1,16 @@
+task:
+  id: bilibili_video_playback
+  description: 播放视频并检查播放状态
+  instruction: 在首页点击任意一个视频卡片，等待视频开始播放，确认播放控制栏出现（如播放/暂停按钮、进度条等），然后等待5秒确认视频正常播放。
+  tags:
+  - smoke
+  - core
+  timeout: 120
+  graders:
+  - type: llm_rubric
+    rubric: 1分：点击视频后无反应或崩溃；2分：进入播放页但视频未加载（黑屏或旋转图标）；3分：视频加载但卡顿或很快退出；4分：视频正常播放，控制栏出现，进度条前进；5分：视频流畅播放，控制栏完整，弹幕正常显示（若开启）。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      llm_rubric: 1.0
