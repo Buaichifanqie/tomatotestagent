@@ -25,6 +25,14 @@ from testagent.eval.loader import discover_suites, load_suite
 from testagent.eval.reports.json_reporter import JsonReporter
 from testagent.eval.reports.markdown_reporter import MarkdownReporter
 from testagent.eval.runner import EvalRunner
+from testagent.eval.generator import (
+    detect_app_package,
+    get_app_activity,
+    read_skill_context,
+    explore_app_pages,
+    generate_tasks_with_llm,
+    write_task_files,
+)
 
 eval_app = typer.Typer(name="eval", help="AI Agent 评测")
 console = Console()
@@ -358,6 +366,105 @@ def run(
     # Exit with non-zero if any task failed
     if result.overall_pass_rate < 1.0:
         raise typer.Exit(1)
+
+
+@eval_app.command()
+def generate(
+    app_name: str = typer.Argument(..., help="要评测的 App 名称或包名"),
+    device: str = typer.Option("emulator-5554", "--device", "-d", help="Android设备序列号"),
+    appium_url: str = typer.Option("http://localhost:4723", "--appium-url", "-u", help="Appium服务器地址"),
+    explore: bool = typer.Option(True, "--explore/--no-explore", help="是否探索 App 页面"),
+) -> None:
+    """自动生成评测任务套件 (Phase 2)。
+
+    扫描设备上的 App，结合 SKILL.md 知识，用 LLM 自动生成 YAML 评测任务。
+    """
+    console.print(f"[bold]Generating eval suite for:[/bold] {app_name}")
+
+    async def _generate_all() -> tuple[str, str, list[dict], list[dict]]:
+        """Run the entire generation pipeline in a single async context."""
+        from testagent.config.settings import get_settings
+        from testagent.llm.openai_provider import OpenAIProvider
+        settings = get_settings()
+        llm = OpenAIProvider(settings)
+
+        # 1. Detect package
+        console.print("  Detecting app package...")
+        pkg = await detect_app_package(app_name, device, llm)
+        console.print(f"  [green]Matched: {pkg}[/green]")
+
+        # 2. Get activity + skill
+        activity = get_app_activity(device, pkg)
+        console.print(f"  Activity: {activity}")
+        skill = read_skill_context(app_name) or read_skill_context(pkg.split(".")[-1])
+        if skill:
+            console.print(f"  [green]Found SKILL.md ({len(skill)} chars)[/green]")
+        else:
+            console.print(f"  [yellow]No SKILL.md found[/yellow]")
+
+        # 3. Optional exploration
+        pages = []
+        if explore:
+            console.print("  Exploring app pages...")
+            import os as _os
+            android_sdk = r"C:\Users\kongwenshuo\AppData\Local\Android\Sdk"
+            if not _os.environ.get("ANDROID_HOME") and _os.path.isdir(android_sdk):
+                _os.environ["ANDROID_HOME"] = android_sdk
+                _os.environ["ANDROID_SDK_ROOT"] = android_sdk
+            try:
+                import httpx
+                from testagent.common.adb_utils import adb_command
+                caps = {
+                    "platformName": "Android",
+                    "appium:automationName": "UiAutomator2",
+                    "appium:deviceName": device,
+                    "appium:udid": device,
+                    "appium:noReset": True,
+                    "appium:autoGrantPermissions": True,
+                    "appium:newCommandTimeout": 300,
+                    "appium:allowInsecure": "*:adb_shell",
+                }
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        f"{appium_url}/session",
+                        json={"capabilities": {"alwaysMatch": caps, "firstMatch": [{}]}},
+                    )
+                    data = resp.json()
+                    if resp.status_code == 200:
+                        sid = data["value"].get("sessionId", "")
+                        adb_command(device, "shell", "am", "force-stop", pkg,
+                                    capture_output=True, timeout=10)
+                        import time as _t; _t.sleep(1)
+                        adb_command(device, "shell", "am", "start", "-n", f"{pkg}/{activity}",
+                                    capture_output=True, timeout=10)
+                        _t.sleep(3)
+                        pages = await explore_app_pages(device, pkg, activity, appium_url, sid, llm)
+                        await client.delete(f"{appium_url}/session/{sid}")
+                console.print(f"  Explored {len(pages)} pages")
+            except Exception as exc:
+                console.print(f"  [yellow]Explore skipped: {exc}[/yellow]")
+
+        # 4. Generate tasks
+        console.print("  Generating tasks with LLM...")
+        tasks = await generate_tasks_with_llm(llm, pkg, app_name, skill, pages)
+        return pkg, app_name, tasks, pages
+
+    # Run the entire pipeline
+    try:
+        pkg, name, tasks, _ = asyncio.run(_generate_all())
+    except Exception as exc:
+        console.print(f"[red]Generation failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if not tasks:
+        console.print("[red]LLM returned no tasks[/red]")
+        raise typer.Exit(1)
+
+    # Write YAML files
+    output_dir = write_task_files(name, tasks)
+    console.print(f"  [green]Generated {len(tasks)} tasks[/green]")
+    console.print(f"  Output: {output_dir}")
+    console.print(f"\n  Run with: testagent eval run {name}")
 
 
 @eval_app.command()

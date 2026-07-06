@@ -1,0 +1,21 @@
+task:
+  id: bilibili_fullscreen
+  description: 全屏模式切换
+  instruction: 在哔哩哔哩视频播放页面，点击全屏按钮（通常为四角箭头图标）。等待页面进入全屏模式，确认全屏状态下播放器充满屏幕，状态栏隐藏且横屏显示。再次点击全屏按钮或按下返回键退出全屏。
+  tags:
+  - interaction
+  - playback
+  timeout: 150
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 退出全屏
+  - type: llm_rubric
+    rubric: 进入全屏后，视频画面应充满屏幕并横屏显示，控制栏自动隐藏（点击屏幕可显示）。退出全屏后恢复竖屏显示，播放页面布局正常。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.2
+      llm_rubric: 0.8

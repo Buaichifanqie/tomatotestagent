@@ -1,0 +1,21 @@
+task:
+  id: bilibili_fullscreen
+  description: 测试视频全屏切换功能
+  instruction: 在视频播放页面，点击全屏按钮进入全屏模式（横屏）。等待播放器转向横屏，检查全屏按钮是否变为退出全屏按钮（如缩小图标）。点击退出全屏按钮返回竖屏模式。
+  tags:
+  - core
+  - video_playback
+  timeout: 120
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 退出全屏按钮
+  - type: llm_rubric
+    rubric: 全屏模式切换正常，进入全屏后播放器横屏，退出后恢复竖屏，控制栏按钮图标变化正确。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

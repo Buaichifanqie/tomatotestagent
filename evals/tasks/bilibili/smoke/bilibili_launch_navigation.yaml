@@ -1,0 +1,24 @@
+task:
+  id: bilibili_launch_navigation
+  description: 启动App并验证底部导航栏四个Tab的可见性和切换功能
+  instruction: 启动B站App，等待首页加载完成。检查底部导航栏是否显示'首页'、'热门'、'动态'、'我的'四个Tab。依次点击每个Tab，观察页面是否切换到对应的内容页，返回首页后结束。
+  tags:
+  - smoke
+  - core
+  timeout: 60
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 首页
+      - 热门
+      - 动态
+      - 我的
+  - type: llm_rubric
+    rubric: 底部导航栏应包含首页、热门、动态、我的四个Tab，每个Tab可点击且切换到正确页面，切换无卡顿或白屏。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

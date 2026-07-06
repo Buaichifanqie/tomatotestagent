@@ -1,0 +1,26 @@
+task:
+  id: bilibili_app_launch
+  description: App 启动与首页加载
+  instruction: 打开哔哩哔哩 App（tv.danmaku.bili），等待首页加载完成。确认底部导航栏包含「首页」「推荐」「动态」「热门」「我的」等
+    Tab，并且首页可以显示推荐视频内容。
+  tags:
+  - smoke
+  - core
+  timeout: 120
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 首页
+      - 推荐
+      - 动态
+      - 热门
+      - 我的
+  - type: llm_rubric
+    rubric: 首页应显示推荐视频的缩略图或标题，界面没有异常加载提示（如空白页、错误提示），底部导航栏各 Tab 均可点击。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

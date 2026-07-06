@@ -1,0 +1,24 @@
+task:
+  id: bilibili_video_playback
+  description: 视频播放基本功能
+  instruction: 在哔哩哔哩 App 首页，点击任意一个推荐视频，进入播放页面。等待视频加载并开始播放。确认播放器控制栏出现，包含播放/暂停按钮、进度条、弹幕开关、全屏按钮等元素。
+  tags:
+  - core
+  - playback
+  timeout: 180
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 播放
+      - 暂停
+      - 弹幕
+      - 全屏
+  - type: llm_rubric
+    rubric: 视频应正常开始播放（画面和声音正常），播放器控制栏在点击屏幕后显示，包含播放/暂停、弹幕开关、全屏、清晰度切换等控件。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

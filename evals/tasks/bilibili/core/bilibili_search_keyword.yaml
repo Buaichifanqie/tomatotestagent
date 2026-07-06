@@ -1,0 +1,23 @@
+task:
+  id: bilibili_search_keyword
+  description: 搜索关键词并查看结果
+  instruction: 在哔哩哔哩 App 首页，点击搜索栏（或底部搜索入口），输入关键词「测试视频」，点击搜索。等待搜索结果页面加载，确认结果列表中包含视频卡片或用户/专栏等条目。
+  tags:
+  - core
+  - search
+  timeout: 120
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 搜索
+      - 测试视频
+      - 视频
+  - type: llm_rubric
+    rubric: 搜索结果页应展示至少一个视频结果（有缩略图和标题），搜索输入框内显示输入的关键词，允许用户切换分类（如视频、用户、专栏）。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

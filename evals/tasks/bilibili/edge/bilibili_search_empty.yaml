@@ -1,0 +1,22 @@
+task:
+  id: bilibili_search_empty
+  description: 空搜索结果处理
+  instruction: 在哔哩哔哩 App 搜索栏中输入一个不可能存在的关键词（如「@@@@@XXXX9999」），点击搜索。确认搜索页面显示「没有找到相关结果」或类似提示信息，并检查是否有推荐搜索或纠错建议。
+  tags:
+  - edge
+  - search
+  timeout: 120
+  graders:
+  - type: state_check
+    expect:
+      elements_present:
+      - 没有找到
+      - 相关结果
+  - type: llm_rubric
+    rubric: 搜索无结果时，页面应友好提示用户未找到相关内容，并提供其他功能（如热门搜索推荐、重新搜索建议），不应出现空白页面或崩溃。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7
