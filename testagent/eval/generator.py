@@ -34,6 +34,8 @@ GENERATE_SYSTEM_PROMPT = """你是一个移动 App 测试专家。你的任务�
 2. 主要交互（搜索、播放、购买等）
 3. 边缘场景（空搜索、错误处理）
 
+重要：所有 JSON 字符串值必须在一行内，不能包含换行符。
+
 返回 JSON 格式：
 {
   "tasks": [
@@ -272,13 +274,15 @@ async def generate_tasks_with_llm(
             raise ValueError(f"No JSON object found in LLM response: {cleaned[:500]}")
 
         json_str = cleaned[start:end]
-        # Replace unescaped newlines in string values with \\n
-        # Simple approach: strip newlines before parsing
-        json_str = json_str.replace("\n", " ").replace("\r", " ")
-        # Collapse multiple spaces
-        json_str = _re.sub(r" {2,}", " ", json_str)
-
-        data = json.loads(json_str)
+        # Try parsing directly first
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Failed — likely unescaped newlines in string values
+            # Strip newlines and try again
+            json_str = json_str.replace("\n", " ").replace("\r", " ")
+            json_str = _re.sub(r" {2,}", " ", json_str)
+            data = json.loads(json_str)
         tasks = data.get("tasks", [])
         if tasks:
             return tasks
