@@ -144,9 +144,12 @@ class EvalRunner:
             # Phase 1: Setup
             await self._execute_setup(task.setup)
 
+            # Record the initial instruction
+            recorder.record_message({"role": "user", "content": task.instruction})
+
             # Phase 2: Agent execution with hard timeout
             system = self._build_system_prompt(task)
-            messages = await asyncio.wait_for(
+            await asyncio.wait_for(
                 self._agent_loop_fn(
                     messages=[
                         {"role": "user", "content": task.instruction}
@@ -159,8 +162,6 @@ class EvalRunner:
                 ),
                 timeout=task.timeout,
             )
-            for msg in messages:
-                recorder.record_message(msg)
 
         except asyncio.TimeoutError:
             recorder.stop()

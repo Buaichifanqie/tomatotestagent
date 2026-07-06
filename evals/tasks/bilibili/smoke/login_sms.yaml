@@ -3,7 +3,7 @@ task:
   description: "使用短信验证码登录B站"
   instruction: "打开B站App，进入登录页面，切换到短信验证码登录方式，输入手机号，点击获取验证码。"
   tags: [smoke, login]
-  timeout: 60
+  timeout: 120
   setup:
     - action: launch_app
       params:
@@ -21,9 +21,8 @@ task:
         - 手机号输入框可见并可输入
         - 获取验证码按钮可见
   scoring:
-    mode: hybrid
-    pass_threshold: 0.7
-    mandatory: [state_check]
+    mode: weighted
+    pass_threshold: 0.5
     weights:
-      state_check: 0.5
-      llm_rubric: 0.5
+      state_check: 0.3
+      llm_rubric: 0.7

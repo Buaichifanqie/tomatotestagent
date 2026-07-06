@@ -146,12 +146,14 @@ class TranscriptRecorder:
     ) -> None:
         """Callback hook for an agent loop's progress callback.
 
-        Records the assistant message and all tool result messages produced
-        during one round of tool use.
+        agent_loop passes: {"assistant": real_assistant_msg, "tool_calls": [...]}
+        Extract the actual assistant message and record it along with tool results.
         """
-        self.record_message(assistant_msg)
+        # agent_loop wraps the real message: {"assistant": msg, ...}
+        real_msg = assistant_msg.get("assistant", assistant_msg)
+        self.record_message(real_msg)
         for result in tool_results:
-            self.record_message(result)
+            self.record_message({"role": "tool", "content": str(result)})
 
     # ── Output ─────────────────────────────────────────────────────────────────
 

@@ -166,6 +166,11 @@ def run(
     )
 
     android_sdk = r"C:\Users\kongwenshuo\AppData\Local\Android\Sdk"
+    # Appium driver checks these at session creation time
+    import os as _os
+    if not _os.environ.get("ANDROID_HOME") and _os.path.isdir(android_sdk):
+        _os.environ["ANDROID_HOME"] = android_sdk
+        _os.environ["ANDROID_SDK_ROOT"] = android_sdk
 
     async def _init_session() -> tuple[str, dict[str, Any]]:
         """Create Appium session and return (session_id, caps)."""
@@ -269,20 +274,15 @@ def run(
                 try:
                     if activity:
                         component = f"{pkg}/{activity}" if not activity.startswith(".") else f"{pkg}{activity}"
-                        result = adb_command(
-                            device, "shell", "am", "start", "-n", component,
-                            capture_output=True, text=True, timeout=10,
-                        )
+                        adb_command(device, "shell", "am", "start", "-n", component,
+                                    capture_output=True, timeout=10)
                     else:
-                        result = adb_command(
-                            device, "shell", "am", "start",
-                            "-a", "android.intent.action.MAIN",
-                            "-c", "android.intent.category.LAUNCHER",
-                            pkg,
-                            capture_output=True, text=True, timeout=10,
-                        )
+                        adb_command(device, "shell", "am", "start",
+                                    "-a", "android.intent.action.MAIN",
+                                    "-c", "android.intent.category.LAUNCHER",
+                                    pkg, capture_output=True, timeout=10)
                     await asyncio.sleep(3)
-                    return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+                    return {"result": "launched", "package": pkg}
                 except Exception as e:
                     return await app_launch(package=pkg, appium_url=appium_url, session_id=session_id)
             else:
@@ -300,10 +300,23 @@ def run(
     console.print("")
 
     try:
+        eval_system_prompt = """你是一个手机 App 自动化测试 Agent。
+
+可用工具：screenshot(截图), tap(x,y)(点击), type_text(text)(输入), swipe(滑动), get_page_source(获取UI文本), launch_app(启动App)
+
+工作流程：
+1. 先 get_page_source 看 UI 文字，再 screenshot 看画面
+2. 执行操作（点击、输入、滑动）
+3. 再次 get_page_source + screenshot 验证
+4. 如果任务目标已达成，立即输出结论并 STOP（不要再操作）
+
+关键：完成验证后立即停止！不需要多余操作。直接用中文输出结论。"""
+
         runner = EvalRunner(
             llm_provider=llm,
             mcp_tools=mcp_tools,
             dispatch_fn=dispatch_fn,
+            system_prompt=eval_system_prompt,
             model_name=model_name,
         )
         result = asyncio.run(runner.run_suite(suite))

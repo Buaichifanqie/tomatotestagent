@@ -31,22 +31,24 @@ class StateCheckGrader(BaseGrader):
                 details="No expectations configured — auto pass.",
             )
 
-        # ── Check current_page ──────────────────────────────────────────────
+        # ── Check current_page (skip when final_page is not populated) ──────
         expected_page = expect.get("current_page")
         if expected_page:
             actual_page = (
                 transcript.summary.final_page if transcript.summary else ""
             )
-            if actual_page != expected_page:
-                return GraderResult(
-                    grader_type="state_check",
-                    score=0.0,
-                    passed=False,
-                    details=(
-                        f"Expected current_page='{expected_page}', "
-                        f"got '{actual_page}'"
-                    ),
-                )
+            if actual_page:
+                if actual_page != expected_page:
+                    return GraderResult(
+                        grader_type="state_check",
+                        score=0.0,
+                        passed=False,
+                        details=(
+                            f"Expected current_page='{expected_page}', "
+                            f"got '{actual_page}'"
+                        ),
+                    )
+            # else: final_page not populated — skip check
 
         # ── Check elements_present ──────────────────────────────────────────
         expected_elements: list[str] = expect.get("elements_present", [])

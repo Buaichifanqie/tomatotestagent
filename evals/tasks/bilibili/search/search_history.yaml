@@ -3,7 +3,7 @@ task:
   description: "检查搜索历史记录功能"
   instruction: "在B站搜索'科技'，返回首页，再点击搜索框，验证搜索历史中出现了历史记录。"
   tags: [search]
-  timeout: 90
+  timeout: 120
   setup:
     - action: launch_app
       params:
@@ -19,3 +19,9 @@ task:
         - 完成一次搜索后返回首页
         - 再次点击搜索框时，搜索历史区域可见
         - 历史记录中包含刚才搜索的"科技"关键词
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

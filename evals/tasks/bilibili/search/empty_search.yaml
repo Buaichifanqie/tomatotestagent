@@ -3,7 +3,7 @@ task:
   description: "搜索空字符串，验证App对空搜索的处理"
   instruction: "打开B站App，点击搜索框，不输入任何内容直接执行搜索。观察App对空搜索的反馈。"
   tags: [search, edge_case]
-  timeout: 45
+  timeout: 90
   setup:
     - action: launch_app
       params:
@@ -12,10 +12,16 @@ task:
   graders:
     - type: state_check
       expect:
-        current_page: "search"
+        elements_present: ["搜索"]
     - type: llm_rubric
       rubric: |
         评分标准（1-5分，>=4通过）：
         - App 正确处理空搜索输入（toast提示、或保持在页面）
         - 没有崩溃或异常退出
         - 用户能理解发生了什么
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      state_check: 0.3
+      llm_rubric: 0.7

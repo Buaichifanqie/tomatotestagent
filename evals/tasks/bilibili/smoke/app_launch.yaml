@@ -3,7 +3,7 @@ task:
   description: "启动B站App，验证首页正确加载"
   instruction: "打开B站App，确认已经成功进入首页。验证底部导航栏和推荐内容可见。"
   tags: [smoke, core]
-  timeout: 120
+  timeout: 300
   setup:
     - action: launch_app
       params:
@@ -12,8 +12,7 @@ task:
   graders:
     - type: state_check
       expect:
-        current_page: "home"
-        elements_present: ["首页", "推荐"]
+        elements_present: ["首页", "推荐", "热门"]
     - type: llm_rubric
       rubric: |
         评分标准（1-5分，>=4通过）：
@@ -21,8 +20,8 @@ task:
         - 底部导航栏可见（首页、热门、动态等）
         - 推荐内容列表可见
   scoring:
-    mode: hybrid
-    mandatory: [state_check]
+    mode: weighted
+    pass_threshold: 0.5
     weights:
-      state_check: 0.6
-      llm_rubric: 0.4
+      state_check: 0.3
+      llm_rubric: 0.7

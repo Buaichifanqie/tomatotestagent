@@ -40,8 +40,16 @@ class LlmRubricGrader(BaseGrader):
         summary, and a preview of the last 6 messages, then calls the LLM.
         Parses the JSON response into a normalized score.
         """
-        system_prompt = self._build_system_prompt()
-        user_prompt = self._build_user_prompt(transcript, task)
+        try:
+            system_prompt = self._build_system_prompt()
+            user_prompt = self._build_user_prompt(transcript, task)
+        except Exception as exc:
+            return GraderResult(
+                grader_type="llm_rubric",
+                score=0.0,
+                passed=False,
+                details=f"Prompt build error: {exc}",
+            )
 
         # ── Call LLM ──────────────────────────────────────────────────────────
         try:
@@ -136,6 +144,9 @@ class LlmRubricGrader(BaseGrader):
         if preview:
             lines.append(f"\n## Last {len(preview)} Messages")
             for i, msg in enumerate(preview):
+                if not isinstance(msg, dict):
+                    lines.append(f"[{i}] (unknown) {str(msg)[:100]}")
+                    continue
                 role = msg.get("role", "unknown")
                 content = msg.get("content", "")
                 if isinstance(content, (dict, list)):
