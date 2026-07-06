@@ -1,0 +1,21 @@
+task:
+  id: bilibili_fullscreen
+  description: 切换全屏播放
+  instruction: 在哔哩哔哩App中，先打开任意视频播放，然后点击全屏按钮（通常在播放器右下角）进入全屏模式。等待全屏模式生效，检查屏幕方向是否变为横屏或全屏界面元素可见。
+  tags:
+  - video
+  - interaction
+  timeout: 90
+  graders:
+  - type: llm_rubric
+    rubric: Agent成功进入全屏模式，视频播放界面填充整个屏幕，全屏按钮变为退出全屏图标或竖屏图标。4分以上通过。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      llm_rubric: 1.0
+  setup:
+  - action: launch_app
+    params:
+      package: tv.danmaku.bili
+      activity: .MainActivity

@@ -294,7 +294,7 @@ async def generate_tasks_with_llm(
         raise RuntimeError(f"LLM task generation failed: {e}")
 
 
-def write_task_files(app_name: str, tasks: list[dict]) -> Path:
+def write_task_files(app_name: str, tasks: list[dict], package: str = "") -> Path:
     """Write generated tasks to evals/tasks/<app_name>/.
 
     Cleans up all previous auto-generated files first, then writes
@@ -337,10 +337,17 @@ def write_task_files(app_name: str, tasks: list[dict]) -> Path:
         encoding="utf-8",
     )
 
-    # Clamp timeout to minimum 60s
+    # Clamp timeout: minimum 90s, maximum 300s
     for task in tasks:
         t = task.get("timeout", 120)
-        task["timeout"] = max(t, 60)
+        task["timeout"] = max(90, min(t, 300))
+
+    # Add launch_app setup step to each task (bring app to front, no force-stop)
+    pkg = package or output_dir.name
+    act = ".MainActivity"
+    for task in tasks:
+        if "setup" not in task or not task.get("setup"):
+            task["setup"] = [{"action": "launch_app", "params": {"package": pkg, "activity": act}}]
 
     # Write individual task files
     for task in tasks:

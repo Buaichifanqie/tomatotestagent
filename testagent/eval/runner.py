@@ -64,6 +64,8 @@ class EvalRunner:
         agent_loop_fn: Callable | None = None,
         system_prompt: str = "",
         model_name: str = "",
+        skill_context: str = "",
+        max_rounds: int = 25,
     ) -> None:
         self._llm = llm_provider
         self._mcp_tools = mcp_tools
@@ -71,6 +73,8 @@ class EvalRunner:
         self._agent_loop_fn = agent_loop_fn or _default_agent_loop
         self._system_prompt = system_prompt
         self._model_name = model_name
+        self._skill_context = skill_context
+        self._max_rounds = max_rounds
 
     async def _default_dispatch(self, tool_name: str, args: dict) -> dict:
         """Default dispatch — logs calls when no dispatch_fn is configured."""
@@ -141,7 +145,7 @@ class EvalRunner:
         recorder.start()
 
         try:
-            # Phase 1: Setup
+            # Phase 1: Setup and app foreground
             await self._execute_setup(task.setup)
 
             # Record the initial instruction
@@ -159,6 +163,7 @@ class EvalRunner:
                     llm_provider=self._llm,
                     dispatch_fn=self._dispatch,
                     progress_callback=recorder.on_round,
+                    max_rounds=self._max_rounds,
                 ),
                 timeout=task.timeout,
             )
@@ -239,14 +244,16 @@ class EvalRunner:
     # ── Internal: System Prompt ────────────────────────────────────────────
 
     def _build_system_prompt(self, task: EvalTask) -> str:
-        """Build system prompt with model name and app info.
+        """Build system prompt with model name, app info and skill knowledge.
 
-        Combines the base system prompt (if provided) with the model
-        name and the target app for the task.
+        Appends SKILL.md knowledge when available so the agent knows the app's
+        UI structure, pages, controls, and known traps without trial-and-error.
         """
         parts: list[str] = []
         if self._system_prompt:
             parts.append(self._system_prompt)
+        if self._skill_context:
+            parts.append(f"\n--- App Knowledge ---\n{self._skill_context[:3000]}")
         if self._model_name:
             parts.append(f"model: {self._model_name}")
         if task.app:
@@ -268,12 +275,14 @@ class EvalRunner:
                 result = await grader.grade(transcript, task)
                 results.append(result)
             except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
                 results.append(
                     GraderResult(
                         grader_type=config.grader_type,
                         score=0.0,
                         passed=False,
-                        details=f"Grader error: {exc}",
+                        details=f"Grader error: {exc}\n{tb[:500]}",
                     )
                 )
         return results

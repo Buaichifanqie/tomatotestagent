@@ -320,12 +320,30 @@ def run(
 
 关键：完成验证后立即停止！不需要多余操作。直接用中文输出结论。"""
 
+        # Load app skill knowledge if available
+        skill_context = ""
+        if suite.app:
+            skill_dir = Path(__file__).resolve().parent.parent.parent / "skills" / "apps" / suite.app
+            skill_file = skill_dir / "SKILL.md"
+            if skill_file.exists():
+                skill_context = skill_file.read_text(encoding="utf-8")
+                # Also include sub-skills
+                for sub in sorted(skill_dir.glob("*.md")):
+                    if sub.name != "SKILL.md":
+                        skill_context += f"\n\n--- {sub.stem} ---\n" + sub.read_text(encoding="utf-8")
+                # Limit to avoid token overflow
+                if len(skill_context) > 6000:
+                    skill_context = skill_context[:6000] + "\n...(truncated)"
+                console.print(f"  [green]Loaded skill: {suite.app}[/green]")
+
         runner = EvalRunner(
             llm_provider=llm,
             mcp_tools=mcp_tools,
             dispatch_fn=dispatch_fn,
             system_prompt=eval_system_prompt,
+            skill_context=skill_context,
             model_name=model_name,
+            max_rounds=15,
         )
         result = asyncio.run(runner.run_suite(suite))
     except Exception as exc:
@@ -461,7 +479,7 @@ def generate(
         raise typer.Exit(1)
 
     # Write YAML files
-    output_dir = write_task_files(name, tasks)
+    output_dir = write_task_files(name, tasks, package=pkg)
     console.print(f"  [green]Generated {len(tasks)} tasks[/green]")
     console.print(f"  Output: {output_dir}")
     console.print(f"\n  Run with: testagent eval run {name}")
