@@ -34,7 +34,9 @@ GENERATE_SYSTEM_PROMPT = """你是一个移动 App 测试专家。你的任务�
 2. 主要交互（搜索、播放、购买等）
 3. 边缘场景（空搜索、错误处理）
 
-重要：所有 JSON 字符串值必须在一行内，不能包含换行符。
+重要：
+1. 所有 JSON 字符串值必须在一行内，不能包含换行符。
+2. timeout 必须 >= 60，复杂任务用 120。timeout 的单位是秒。
 
 返回 JSON 格式：
 {
@@ -334,6 +336,11 @@ def write_task_files(app_name: str, tasks: list[dict]) -> Path:
         yaml.dump(suite_yaml, allow_unicode=True, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
     )
+
+    # Clamp timeout to minimum 60s
+    for task in tasks:
+        t = task.get("timeout", 120)
+        task["timeout"] = max(t, 60)
 
     # Write individual task files
     for task in tasks:
