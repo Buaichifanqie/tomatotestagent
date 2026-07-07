@@ -345,29 +345,38 @@ class CaseJudgeAgent:
 
                 # Re-encode video with h264_mf for Volcengine compatibility
                 _reencode_path = upload_path + ".conv.mp4"
-                import subprocess as _sp
                 try:
-                    _sp.run(
-                        ["ffmpeg", "-i", upload_path, "-c:v", "h264_mf", "-pix_fmt", "yuv420p", "-an", "-y", _reencode_path],
-                        capture_output=True, timeout=120,
+                    import asyncio as _asyncio
+                    proc = await _asyncio.create_subprocess_exec(
+                        "ffmpeg", "-i", upload_path, "-c:v", "h264_mf",
+                        "-pix_fmt", "yuv420p", "-an", "-y", _reencode_path,
+                        stdout=_asyncio.subprocess.DEVNULL,
+                        stderr=_asyncio.subprocess.DEVNULL,
                     )
-                    if os.path.getsize(_reencode_path) > 1024:
+                    try:
+                        await _asyncio.wait_for(proc.wait(), timeout=180)
+                    except _asyncio.TimeoutError:
+                        _logger.warning("CaseJudgeAgent: ffmpeg timed out for %s", upload_path)
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    if proc.returncode == 0 and os.path.getsize(_reencode_path) > 1024:
                         upload_path = _reencode_path
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _logger.warning("CaseJudgeAgent: ffmpeg error for %s: %s", upload_path, exc)
 
                 _logger.info("CaseJudgeAgent: uploading video %s (%.1f MB, fps=%.1f)",
                              upload_path, os.path.getsize(upload_path) / (1024 * 1024), fps)
                 upload_url = self._api_url.rstrip("/") + "/files"
                 with open(upload_path, "rb") as _f:
-                    import httpx as _httpx
-                    import os as _os
-                    _resp = _httpx.post(
-                        upload_url,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                        files={"file": (_os.path.basename(upload_path), _f, "video/mp4")},
-                        data={"purpose": "user_data"},
-                    )
+                    async with _httpx.AsyncClient(timeout=120) as _client:
+                        _resp = await _client.post(
+                            upload_url,
+                            headers={"Authorization": f"Bearer {self._api_key}"},
+                            files={"file": (_os.path.basename(upload_path), _f, "video/mp4")},
+                            data={"purpose": "user_data"},
+                        )
                 if _resp.status_code != 200:
                     _logger.warning("CaseJudgeAgent: upload failed (%d): %s", _resp.status_code, _resp.text[:200])
                     continue
