@@ -217,20 +217,13 @@ def run(
         console.print(f"[red]Failed to create Appium session: {exc}[/red]")
         raise typer.Exit(1)
 
-    # Force-launch Bilibili — try strategies until it works
+    # Launch Bilibili — bring to foreground without killing UiAutomator2
     import time as _time
     pkg_name = "tv.danmaku.bili"
     pkg_activity = ".MainActivityV2"
     from testagent.common.adb_utils import adb_command
-    try:
-        adb_command(device, "shell", "am", "force-stop", pkg_name,
-                    capture_output=True, timeout=10)
-    except Exception:
-        pass
-    _time.sleep(1)
     for adb_args in [
         ("shell", "am", "start", "-n", f"{pkg_name}/{pkg_activity}"),
-        ("shell", "monkey", "-p", pkg_name, "1"),
         ("shell", "am", "start", "-a", "android.intent.action.MAIN",
          "-c", "android.intent.category.LAUNCHER", pkg_name),
     ]:
