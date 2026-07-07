@@ -1,0 +1,22 @@
+task:
+  id: bilibili_video_playback_danmaku
+  description: 弹幕开关功能验证
+  instruction: 在哔哩哔哩App中，从一个已搜索的视频播放页开始，确认视频正在播放。找到弹幕开关按钮（通常在播放器右侧），点击关闭弹幕，观察弹幕消失；再次点击打开弹幕，观察弹幕重新出现。
+  tags:
+  - interaction
+  - video
+  - playback
+  timeout: 120
+  graders:
+  - type: llm_rubric
+    rubric: Agent成功找到弹幕开关并操作，弹幕开关状态切换正确，弹幕显示与隐藏符合预期。得1-5分，4分及以上通过。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      llm_rubric: 1.0
+  setup:
+  - action: launch_app
+    params:
+      package: tv.danmaku.bili
+      activity: .MainActivity

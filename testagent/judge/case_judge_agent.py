@@ -322,6 +322,9 @@ class CaseJudgeAgent:
         """
         try:
             from volcenginesdkarkruntime import Ark
+            import httpx as _httpx
+            import os as _os
+            import time as _time
 
             client = Ark(
                 base_url=self._api_url,
@@ -340,19 +343,35 @@ class CaseJudgeAgent:
 
                 upload_path = vp
 
+                # Re-encode video with h264_mf for Volcengine compatibility
+                _reencode_path = upload_path + ".conv.mp4"
+                import subprocess as _sp
+                try:
+                    _sp.run(
+                        ["ffmpeg", "-i", upload_path, "-c:v", "h264_mf", "-pix_fmt", "yuv420p", "-an", "-y", _reencode_path],
+                        capture_output=True, timeout=120,
+                    )
+                    if os.path.getsize(_reencode_path) > 1024:
+                        upload_path = _reencode_path
+                except Exception:
+                    pass
+
                 _logger.info("CaseJudgeAgent: uploading video %s (%.1f MB, fps=%.1f)",
                              upload_path, os.path.getsize(upload_path) / (1024 * 1024), fps)
-                with open(upload_path, "rb") as f:
-                    file_obj = client.files.create(
-                        file=f,
-                        purpose="user_data",
-                        preprocess_configs={
-                            "video": {
-                                "fps": fps,
-                            }
-                        },
+                upload_url = self._api_url.rstrip("/") + "/files"
+                with open(upload_path, "rb") as _f:
+                    import httpx as _httpx
+                    import os as _os
+                    _resp = _httpx.post(
+                        upload_url,
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        files={"file": (_os.path.basename(upload_path), _f, "video/mp4")},
+                        data={"purpose": "user_data"},
                     )
-                file_id = file_obj.id
+                if _resp.status_code != 200:
+                    _logger.warning("CaseJudgeAgent: upload failed (%d): %s", _resp.status_code, _resp.text[:200])
+                    continue
+                file_id = _resp.json().get("id", "")
                 _logger.info("CaseJudgeAgent: uploaded, file_id=%s", file_id)
 
                 # Wait for processing with explicit polling
@@ -464,7 +483,7 @@ class CaseJudgeAgent:
 
         # Skip large videos — base64 inline has payload limits
         file_size = os.path.getsize(vp)
-        MAX_HTTPX_VIDEO_BYTES = 10 * 1024 * 1024  # 10MB
+        MAX_HTTPX_VIDEO_BYTES = 50 * 1024 * 1024  # 50MB (Volcengine limit)
         if file_size > MAX_HTTPX_VIDEO_BYTES:
             _logger.warning(
                 "CaseJudgeAgent: httpx fallback skipped — video too large (%.1f MB > 10 MB limit)",

@@ -1,0 +1,21 @@
+task:
+  id: bilibili_search_no_result
+  description: 搜索无结果关键词边界场景
+  instruction: 在哔哩哔哩App首页，搜索关键词「asdfghjkl123456」，观察搜索结果页面。确认App显示“没有找到相关视频”或类似提示。
+  tags:
+  - edge
+  - search
+  timeout: 90
+  graders:
+  - type: llm_rubric
+    rubric: Agent执行无结果搜索，App应正确显示无结果提示，无崩溃或异常。得1-5分，4分及以上通过。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      llm_rubric: 1.0
+  setup:
+  - action: launch_app
+    params:
+      package: tv.danmaku.bili
+      activity: .MainActivity

@@ -1,0 +1,21 @@
+task:
+  id: bilibili_bottom_navigation
+  description: 验证底部导航栏各选项卡切换
+  instruction: 在哔哩哔哩App首页，依次点击底部导航栏的「频道」、「动态」、「我的」选项卡，每次点击后等待页面加载，确认页面内容切换正确。最后回到首页。
+  tags:
+  - core
+  - navigation
+  timeout: 90
+  graders:
+  - type: llm_rubric
+    rubric: Agent成功点击各选项卡，每个页面加载出对应的内容（频道应有分区列表，动态应有动态列表，我的应有用户信息）。切换流畅无异常。得1-5分，4分及以上通过。
+  scoring:
+    mode: weighted
+    pass_threshold: 0.5
+    weights:
+      llm_rubric: 1.0
+  setup:
+  - action: launch_app
+    params:
+      package: tv.danmaku.bili
+      activity: .MainActivity
