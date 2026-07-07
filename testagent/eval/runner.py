@@ -277,12 +277,17 @@ class EvalRunner:
             except Exception as exc:
                 import traceback
                 tb = traceback.format_exc()
+                print(f"  [Grader error] {config.grader_type}: {exc}")
+                for line in tb.split("\n")[-10:]:
+                    line = line.strip()
+                    if line and "print" not in line:
+                        print(f"    {line[:200]}")
                 results.append(
                     GraderResult(
                         grader_type=config.grader_type,
                         score=0.0,
                         passed=False,
-                        details=f"Grader error: {exc}\n{tb[:500]}",
+                        details=f"Grader error: {exc}",
                     )
                 )
         return results

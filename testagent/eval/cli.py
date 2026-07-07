@@ -316,9 +316,9 @@ def run(
 1. 先 get_page_source 看 UI 文字，再 screenshot 看画面
 2. 执行操作（点击、输入、滑动）
 3. 再次 get_page_source + screenshot 验证
-4. 如果任务目标已达成，立即输出结论并 STOP（不要再操作）
+4. 任务完成时，用中文详细总结：做了什么、看到了什么、验证结果如何
 
-关键：完成验证后立即停止！不需要多余操作。直接用中文输出结论。"""
+关键：输出详细结论，包括你验证了哪些 UI 元素。结论详尽、准确。"""
 
         # Load app skill knowledge if available
         skill_context = ""

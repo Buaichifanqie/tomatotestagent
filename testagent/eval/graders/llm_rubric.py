@@ -34,79 +34,68 @@ class LlmRubricGrader(BaseGrader):
     async def grade(
         self, transcript: Transcript, task: EvalTask, **kwargs
     ) -> GraderResult:
-        """Grade execution quality using LLM-as-Judge.
-
-        Builds a judge prompt with the task description, rubric, transcript
-        summary, and a preview of the last 6 messages, then calls the LLM.
-        Parses the JSON response into a normalized score.
-        """
+        """Grade execution quality using LLM-as-Judge."""
+        import traceback as _tb
         try:
             system_prompt = self._build_system_prompt()
             user_prompt = self._build_user_prompt(transcript, task)
-        except Exception as exc:
-            return GraderResult(
-                grader_type="llm_rubric",
-                score=0.0,
-                passed=False,
-                details=f"Prompt build error: {exc}",
-            )
 
-        # ── Call LLM ──────────────────────────────────────────────────────────
-        try:
             response = await self._llm.chat(
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 temperature=0,
                 max_tokens=512,
             )
-        except Exception:
+
+            # Record token usage
+            if self._recorder is not None:
+                usage = response.usage
+                if isinstance(usage, dict):
+                    self._recorder.record_usage(
+                        input_tokens=usage.get("input_tokens", 0) or 0,
+                        output_tokens=usage.get("output_tokens", 0) or 0,
+                        total_tokens=usage.get("total_tokens", 0) or 0,
+                    )
+                elif hasattr(usage, "input_tokens"):
+                    self._recorder.record_usage(
+                        input_tokens=int(getattr(usage, "input_tokens", 0)),
+                        output_tokens=int(getattr(usage, "output_tokens", 0)),
+                        total_tokens=int(getattr(usage, "total_tokens", 0)),
+                    )
+
+            # Parse response
+            text = self._extract_text(response)
+            parsed = self._parse_json(text)
+
+            if parsed is None:
+                return GraderResult(
+                    grader_type="llm_rubric",
+                    score=0.0,
+                    passed=False,
+                    details="parse error",
+                )
+
+            raw_score = parsed.get("score", 0)
+            passed = parsed.get("passed", False)
+            reason = parsed.get("reason", "")
+
+            normalized = max(0.0, min(1.0, raw_score / 5.0))
+
+            return GraderResult(
+                grader_type="llm_rubric",
+                score=normalized,
+                passed=bool(passed),
+                details=str(reason) if reason else "",
+            )
+
+        except Exception as exc:
+            _tb.print_exc()
             return GraderResult(
                 grader_type="llm_rubric",
                 score=0.0,
                 passed=False,
-                details="LLM error",
+                details=f"LLM judge error: {exc}",
             )
-
-        # ── Record token usage ────────────────────────────────────────────────
-        if self._recorder is not None:
-            usage = response.usage
-            if isinstance(usage, dict):
-                self._recorder.record_usage(
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
-                    total_tokens=usage.get("total_tokens", 0),
-                )
-            else:
-                self._recorder.record_usage(
-                    input_tokens=getattr(usage, "input_tokens", 0),
-                    output_tokens=getattr(usage, "output_tokens", 0),
-                    total_tokens=getattr(usage, "total_tokens", 0),
-                )
-
-        # ── Parse response ────────────────────────────────────────────────────
-        text = self._extract_text(response)
-        parsed = self._parse_json(text)
-
-        if parsed is None:
-            return GraderResult(
-                grader_type="llm_rubric",
-                score=0.0,
-                passed=False,
-                details="parse error",
-            )
-
-        raw_score = parsed.get("score", 0)
-        passed = parsed.get("passed", False)
-        reason = parsed.get("reason", "")
-
-        normalized = max(0.0, min(1.0, raw_score / 5.0))
-
-        return GraderResult(
-            grader_type="llm_rubric",
-            score=normalized,
-            passed=bool(passed),
-            details=str(reason) if reason else "",
-        )
 
     # ── Prompt builders ──────────────────────────────────────────────────────
 
@@ -185,17 +174,21 @@ class LlmRubricGrader(BaseGrader):
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any] | None:
-        """Parse JSON from LLM response text, stripping markdown fences."""
+        """Parse JSON object from LLM response text, stripping fences.
+
+        Returns ``None`` if parsing fails or the result is not a dict
+        (e.g. the LLM returns a JSON array ``[...]``).
+        """
         if not text:
             return None
 
         text = text.strip()
-        # Remove markdown code-block fences (```json ... ```)
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         text = text.strip()
 
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             return None
