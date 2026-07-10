@@ -128,6 +128,16 @@ class ExecutionEngine:
         self._db_setup_done: bool = False
         self._consecutive_vision_timeouts: int = 0
         self.device_udid: str = config.device_udid or ""
+        self._platform_obj: Any = None
+
+        # Lazy-initialize platform strategy from config
+        self._lazy_init_platform()
+
+    def _lazy_init_platform(self) -> None:
+        """Initialize platform strategy object if not already set."""
+        if self._platform_obj is None and self.config.platform:
+            from testagent.platform.factory import PlatformFactory
+            self._platform_obj = PlatformFactory.create(self.config.platform)
 
     # ── coordinate cache helpers ─────────────────────────────────────────
 
@@ -186,19 +196,20 @@ class ExecutionEngine:
         # ── Keyboard button fallback: use ADB KEYCODE_ENTER ──
         _keyboard_keywords = ("键盘搜索", "键盘回车", "keyboard search", "keyboard enter", "enter键", "回车键")
         if any(kw in (step.target or "").lower() for kw in _keyboard_keywords):
-            self._log(f"  [Keyboard target detected: '{step.target}', sending KEYCODE_ENTER]")
-            try:
-                await asyncio.to_thread(
-                    adb_command,
-                    self.config.device_udid,
-                    "shell", "input", "keyevent", "KEYCODE_ENTER",
-                    capture_output=True, text=True, timeout=10,
-                )
+            self._log(f"  [Keyboard target detected: '{step.target}', using platform strategy]")
+            self._lazy_init_platform()
+            from testagent.platform.interface import SessionInfo
+            session_info = SessionInfo(
+                appium_url=self.session_manager.appium_url or "",
+                session_id=self.session_manager.session_id or "",
+                device_udid=self.config.device_udid or "",
+            )
+            ok = await self._platform_obj.press_keyboard_done(session_info)
+            if ok:
                 await asyncio.sleep(1)
-                return {"_source": "adb:KEYCODE_ENTER"}
-            except Exception as exc:
-                self._log(f"  [KEYCODE_ENTER failed: {exc}, falling back to vision]")
-                # Fall through to normal tap logic
+                return {"_source": "platform:keyboard_done"}
+            self._log(f"  [Keyboard done failed, falling back to vision]")
+            # Fall through to normal tap logic
 
         appium_url = self.session_manager.appium_url
         session_id = self.session_manager.session_id
@@ -609,20 +620,15 @@ class ExecutionEngine:
         return False
 
     async def _try_keycode_back(self) -> bool:
-        """Send KEYCODE_BACK via ADB. Returns True if succeeded."""
-        self._log("  [Trying KEYCODE_BACK]")
-        try:
-            result = await app_exec(
-                command="input keyevent KEYCODE_BACK",
-                appium_url=self.session_manager.appium_url,
-                session_id=self.session_manager.session_id,
-            )
-            if not result.get("error"):
-                await asyncio.sleep(1)
-                return True
-        except Exception:
-            pass
-        return False
+        """Send platform back navigation. Returns True if succeeded."""
+        self._lazy_init_platform()
+        from testagent.platform.interface import SessionInfo
+        session_info = SessionInfo(
+            appium_url=self.session_manager.appium_url or "",
+            session_id=self.session_manager.session_id or "",
+            device_udid=self.config.device_udid or "",
+        )
+        return await self._platform_obj.go_back(session_info)
 
     async def _cache_tap_result(
         self, step: TestStep, tc_id: str, context_hash: str, coords: dict[str, int]
@@ -734,48 +740,15 @@ class ExecutionEngine:
     # ── screen size ─────────────────────────────────────────────────────
 
     async def _get_screen_size(self) -> tuple[int, int]:
-        """Get current device screen size accounting for rotation.
-
-        Returns (width, height) matching the current orientation.
-        In portrait: (1080, 2400). In landscape: (2400, 1080).
-        This is critical for Vision coordinate mapping — the Vision model
-        returns coordinates relative to the screenshot dimensions, so we
-        must pass the correct oriented size.
-        """
-        import re
-        try:
-            # Get physical screen size
-            result = await app_exec(
-                command="wm size",
-                appium_url=self.session_manager.appium_url,
-                session_id=self.session_manager.session_id,
-            )
-            body = result.get("body", {})
-            value = str(body.get("value", ""))
-            m = re.search(r"(\d+)x(\d+)", value)
-            if m:
-                w, h = int(m.group(1)), int(m.group(2))
-            else:
-                w, h = 1080, 2400
-
-            # Get current rotation (0=portrait, 1=landscape, 2=reverse portrait, 3=reverse landscape)
-            rot_result = await app_exec(
-                command="dumpsys display | grep 'mCurrentOrientation'",
-                appium_url=self.session_manager.appium_url,
-                session_id=self.session_manager.session_id,
-            )
-            rot_value = str(rot_result.get("body", {}).get("value", ""))
-            # Try to extract orientation number
-            rot_match = re.search(r"mCurrentOrientation[=:]\s*(\d+)", rot_value)
-            orientation = int(rot_match.group(1)) if rot_match else 0
-
-            # Swap dimensions for landscape orientations
-            if orientation in (1, 3):
-                w, h = h, w
-
-            return w, h
-        except Exception:
-            return 1080, 2400
+        """Get current device screen size via platform strategy."""
+        self._lazy_init_platform()
+        from testagent.platform.interface import SessionInfo
+        session_info = SessionInfo(
+            appium_url=self.session_manager.appium_url or "",
+            session_id=self.session_manager.session_id or "",
+            device_udid=self.config.device_udid or "",
+        )
+        return await self._platform_obj.get_screen_size(session_info)
 
     # ── vision client (lazy) ─────────────────────────────────────────────────
 
@@ -858,7 +831,9 @@ class ExecutionEngine:
                 return None
             sid = self.session_manager.create_session(
                 device_udid=self.config.device_udid,
+                platform=self.config.platform or "android",
                 system_port=self.config.get_effective_system_port(),
+                wda_local_port=self.config.wda_local_port,
             )
             if sid:
                 return sid
@@ -923,7 +898,9 @@ class ExecutionEngine:
             self._log(f"[Auto-assigned system_port={effective_port} for device {self.config.device_udid}]")
         sid = self.session_manager.create_session(
             device_udid=self.config.device_udid,
+            platform=self.config.platform or "android",
             system_port=effective_port,
+            wda_local_port=self.config.wda_local_port,
         )
         if not sid:
             # First attempt failed — retry with backoff
@@ -1179,13 +1156,12 @@ class ExecutionEngine:
         # ── Execute steps with screen recording ───────────────────────
         # Recording starts right after DB setup (before any step execution)
         # and stops after the last step + 3s buffer. Captures the full TC flow.
-        # Uses ADB direct mode with 180s segments — no ffmpeg concat needed.
-        from testagent.plan.segmented_recorder import SegmentedRecorder
-
-        _recorder = SegmentedRecorder(
+        self._lazy_init_platform()
+        _recorder = self._platform_obj.create_recorder(
             output_dir=self.config.output_dir,
             tc_id=tc.id,
             device_udid=self.config.device_udid,
+            session_manager=self.session_manager,
         )
         await _recorder.start()
 
@@ -1613,12 +1589,20 @@ class ExecutionEngine:
                     if text:
                         res = await app_type_text(text=text, appium_url=appium_url, session_id=sid)
                         if res.get("error"):
-                            # Fallback to UiAutomator type
-                            res = await app_type(
-                                selector='new UiSelector().className("android.widget.EditText").focused(true)',
-                                text=text, strategy="uiautomator",
-                                appium_url=appium_url, session_id=sid,
-                            )
+                            # Platform-specific type fallback
+                            self._lazy_init_platform()
+                            default_strategy = self._platform_obj.get_default_selector_strategy()
+                            if default_strategy == "uiautomator":
+                                selector = 'new UiSelector().className("android.widget.EditText").focused(true)'
+                            elif default_strategy == "ios_predicate":
+                                selector = 'type IN {"XCUIElementTypeTextField", "XCUIElementTypeSearchField"} AND focused == true'
+                            else:
+                                selector = ""
+                            if selector:
+                                res = await app_type(
+                                    selector=selector, text=text, strategy=default_strategy,
+                                    appium_url=appium_url, session_id=sid,
+                                )
                     else:
                         res = {"error": "No text to type"}
                 else:
@@ -1986,51 +1970,34 @@ class ExecutionEngine:
     async def _ensure_app_launched(self) -> None:
         """Launch the app before executing test steps.
 
-        The app is force-stopped between TCs, so every TC starts from a
-        clean state. Uses ``am start`` with MAIN/LAUNCHER intent to bypass
-        Android's state restoration (savedInstanceState), which would
-        otherwise restore the app to its last page (e.g. video detail)
-        instead of the homepage.
+        Uses platform strategy for app launch and teardown.
         """
-        pkg = self.config.app_package
-        if not pkg:
+        app_id = self.config.app_id or self.config.app_package or ""
+        if not app_id:
             return
 
-        # Force-stop before launch to ensure cold start
-        try:
-            adb_command(
-                self.config.device_udid,
-                "shell", "am", "force-stop", pkg,
-                capture_output=True, timeout=10,
-            )
-        except Exception:
-            pass
+        self._lazy_init_platform()
+        from testagent.platform.interface import SessionInfo
+        session_info = SessionInfo(
+            appium_url=self.session_manager.appium_url or "",
+            session_id=self.session_manager.session_id or "",
+            device_udid=self.config.device_udid or "",
+        )
 
-        # Launch the app normally via Appium
-        try:
-            adb_command(
-                self.config.device_udid,
-                "shell", "am", "start",
-                "-a", "android.intent.action.MAIN",
-                "-c", "android.intent.category.LAUNCHER",
-                pkg,
-                capture_output=True, timeout=10,
-            )
-            self._log(f"App launched: {pkg}")
-        except Exception:
-            pass
+        # Platform-specific cleanup and launch
+        await self._platform_obj.teardown_app(app_id, session_info)
+        result = await self._platform_obj.launch_app(app_id, session_info)
+        if result.get("error"):
+            self._log(f"  [Launch warning: {result['error']}]")
 
         await asyncio.sleep(3)
 
-        # ── Wait until app is actually responsive ──
-        # Poll app_get_source until we get a non-empty page source, up to 10s.
+        # Wait for app to be responsive
         sid = self.session_manager.session_id
         url = self.session_manager.appium_url
         for _attempt in range(5):
             try:
-                src_result = await app_get_source(
-                    appium_url=url, session_id=sid,
-                )
+                src_result = await app_get_source(appium_url=url, session_id=sid)
                 if src_result.get("source"):
                     return
             except Exception:
@@ -2038,9 +2005,7 @@ class ExecutionEngine:
             await asyncio.sleep(2)
         self._log("  [Warning: app may not be fully loaded after launch]")
 
-        # ── Skill-based homepage recovery ───────────────────────────────
-        # If the app skill defines "启动后页面恢复", use Vision to check
-        # if we're on the homepage and navigate back if not.
+        # Skill-based homepage recovery (Android only, but check exists)
         if self._app_skill_context and "启动后页面恢复" in self._app_skill_context:
             await self._recover_to_homepage_with_vision()
 
@@ -2335,38 +2300,19 @@ class ExecutionEngine:
         print(f"  [{ts}] {msg}", **kwargs)
 
     async def _teardown_app(self) -> None:
-        """Force-stop the app between test cases using direct ADB.
+        """Force-stop the app between test cases using platform strategy."""
+        app_id = self.config.app_id or self.config.app_package or ""
+        if not app_id:
+            return
 
-        Only kills the app process — does NOT close the Appium session.
-        The session is kept alive to avoid costly UiAutomator2 re-initialization
-        (10-20s) and session recreation failures. If the session truly dies,
-        the step-level recovery logic in _execute_step_async will handle it.
-
-        ``force-stop`` clears all in-memory state (page stack, runtime vars,
-        caches), so the next TC's ``launch`` starts from a cold boot.
-        """
-        pkg = self.config.app_package or ""
-        if pkg:
-            try:
-                adb_command(
-                    self.config.device_udid,
-                    "shell", "am", "force-stop", pkg,
-                    capture_output=True, timeout=10,
-                )
-            except Exception:
-                pass
-
-        # Also try cleanup via direct ADB subprocess (not Appium mobile:shell,
-        # because mobile:shell can trigger adbd crashes on network commands).
-        for _cmd in ("svc wifi enable", "svc data enable"):
-            try:
-                adb_command(
-                    self.config.device_udid,
-                    "shell", _cmd,
-                    capture_output=True, timeout=10,
-                )
-            except Exception:
-                pass
+        self._lazy_init_platform()
+        from testagent.platform.interface import SessionInfo
+        session_info = SessionInfo(
+            appium_url=self.session_manager.appium_url or "",
+            session_id=self.session_manager.session_id or "",
+            device_udid=self.config.device_udid or "",
+        )
+        await self._platform_obj.teardown_app(app_id, session_info)
 
     # ── state preparation (login / logout) ────────────────────────────────
 
