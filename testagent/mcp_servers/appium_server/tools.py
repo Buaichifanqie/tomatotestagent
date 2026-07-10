@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-_VALID_STRATEGIES = {"accessibility_id", "uiautomator", "xpath"}
+_VALID_STRATEGIES = {"accessibility_id", "uiautomator", "xpath", "ios_predicate", "ios_class_chain"}
 _VALID_ASSERTIONS = {"visible", "text", "attribute"}
 
 
@@ -14,6 +14,10 @@ def _build_selector(strategy: str, selector: str) -> dict[str, str]:
         return {"strategy": "accessibility id", "selector": selector}
     if strategy == "uiautomator":
         return {"strategy": "-android uiautomator", "selector": selector}
+    if strategy == "ios_predicate":
+        return {"strategy": "-ios predicate string", "selector": selector}
+    if strategy == "ios_class_chain":
+        return {"strategy": "-ios class chain", "selector": selector}
     if strategy == "xpath":
         return {"strategy": "xpath", "selector": selector}
     return {"strategy": strategy, "selector": selector}
@@ -98,11 +102,14 @@ async def _find_element(
         "accessibility_id": "accessibility id",
         "uiautomator": "-android uiautomator",
         "xpath": "xpath",
+        "ios_predicate": "-ios predicate string",
+        "ios_class_chain": "-ios class chain",
     }
     appium_strategy = strategy_map.get(strategy, strategy)
 
     # When using uiautomator strategy with a plain text selector, auto-wrap it
     # into a valid UiSelector expression to avoid the invalid `new UiSelector().<text>` error.
+    # This only applies to Android uiautomator — iOS strategies pass through unchanged.
     if strategy == "uiautomator" and selector and not re.match(r'^(new UiSelector\(\)|\.)', selector):
         # Resource-id like "com.example.app:id/search_src_text" → resourceId()
         if ":" in selector or selector.startswith("android:id/"):
@@ -398,18 +405,37 @@ async def app_stop_recording(
 
 
 async def app_launch(
-    package: str,
+    package: str = "",
+    bundle_id: str = "",
     activity: str = "",
+    platform: str = "android",
     appium_url: str = "http://localhost:4723",
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Launch an app by package name using mobile:shell.
+    """Launch an app by package name or bundle ID.
+
+    For iOS: uses mobile: launchApp with bundleId.
+    For Android: uses mobile: shell with am start / monkey.
 
     Tries three strategies in order:
     1. ``am start -n`` with the full component name (when activity is given).
     2. ``monkey -p`` — works for most apps even without knowing the activity.
     3. ``am start`` with MAIN/LAUNCHER intent as a last resort.
     """
+    if platform == "ios":
+        app_id = bundle_id or package
+        if not app_id:
+            return {"error": "bundleId required for iOS app_launch"}
+        payload: dict[str, object] = {
+            "script": "mobile: launchApp",
+            "args": [{"bundleId": app_id}],
+        }
+        return await _appium_post(
+            appium_url, "/session/:sessionId/execute/sync",
+            payload, timeout=30, session_id=session_id,
+        )
+
+    # Android path
     commands: list[str] = []
 
     if activity:

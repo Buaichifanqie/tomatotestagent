@@ -18,6 +18,7 @@ from typing import Optional
 import httpx
 
 from testagent.common.logging import get_logger
+from testagent.platform.factory import PlatformFactory
 
 logger = get_logger(__name__)
 
@@ -177,6 +178,7 @@ async def ensure_appium_running(
     udid: str = "",
     port: int = 4723,
     appium_url: str = "",
+    platform: str = "android",
 ) -> str | None:
     """Ensure an Appium server is running for the given device.
 
@@ -190,6 +192,7 @@ async def ensure_appium_running(
         udid: Device serial. Empty string uses legacy default.
         port: Appium server port (base port, may be auto-adjusted).
         appium_url: If provided, extracts port from URL (overrides *port*).
+        platform: Device platform ("android" or "ios").
 
     Returns:
         The actual Appium URL if successful, None if failed.
@@ -212,7 +215,7 @@ async def ensure_appium_running(
 
     for attempt in range(3):
         try:
-            inst = await _appium_manager.ensure_appium_running(udid=actual_udid, port=port)
+            inst = await _appium_manager.ensure_appium_running(udid=actual_udid, port=port, platform=platform)
             return inst.url
         except RuntimeError:
             if attempt < 2:
@@ -239,7 +242,7 @@ class AppiumManager:
     def __init__(self) -> None:
         self._instances: dict[str, AppiumInstance] = {}
 
-    async def ensure_appium_running(self, udid: str, port: int, log_path: str = "") -> AppiumInstance:
+    async def ensure_appium_running(self, udid: str, port: int, log_path: str = "", platform: str = "android") -> AppiumInstance:
         """Start Appium server for *udid* on *port* (or return existing one)."""
         if udid in self._instances:
             inst = self._instances[udid]
@@ -263,11 +266,14 @@ class AppiumManager:
         appium_path = _find_appium()
         env = {**os.environ, **extra_env}
 
+        platform_obj = PlatformFactory.create(platform)
+        appium_args = platform_obj.get_appium_args()
+
         log_fh = open(log_path, "a", encoding="utf-8")
         proc = await asyncio.create_subprocess_exec(
             appium_path,
             "-p", str(port),
-            "--allow-insecure", "*:adb_shell",
+            *appium_args,
             stdout=log_fh,
             stderr=log_fh,
             env=env,
