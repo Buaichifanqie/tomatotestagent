@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from testagent.common.appium_manager import ensure_android_home
+from testagent.platform.factory import PlatformFactory
 
 
 class SessionState:
@@ -51,12 +52,20 @@ class SessionManager:
         """Return the current session ID (alias for backward compatibility)."""
         return self._session_id
 
-    def create_session(self, device_udid: str = "", system_port: int = 8200) -> str | None:
+    def create_session(
+        self,
+        device_udid: str = "",
+        platform: str = "android",
+        system_port: int = 8200,
+        wda_local_port: int = 8100,
+    ) -> str | None:
         """Create an Appium session via HTTP POST.
 
         Args:
             device_udid: Target device serial (overrides default ``emulator-5554``).
-            system_port: UiAutomator2 systemPort for this device.
+            platform: "android" or "ios".
+            system_port: UiAutomator2 systemPort for Android.
+            wda_local_port: WDA local port for iOS.
 
         Returns:
             The session ID string, or None if creation failed.
@@ -67,21 +76,12 @@ class SessionManager:
         if system_port != 8200:
             self._system_port = system_port
 
-        android_home = ensure_android_home()
-        udid = device_udid or self._device_udid or "emulator-5554"
-        caps: dict[str, object] = {
-            "platformName": "Android",
-            "appium:automationName": "UiAutomator2",
-            "appium:deviceName": udid,
-            "appium:udid": udid,
-            "appium:noReset": True,
-            "appium:autoGrantPermissions": True,
-            "appium:newCommandTimeout": 300,
-            "appium:allowInsecure": "*:adb_shell",
-            "appium:systemPort": system_port,
-        }
-        if android_home:
-            caps["appium:androidHome"] = android_home
+        platform_obj = PlatformFactory.create(platform)
+        caps = platform_obj.build_capabilities(
+            udid=device_udid or self._device_udid or "emulator-5554",
+            system_port=self._system_port,
+            wda_local_port=wda_local_port,
+        )
         capabilities = {"capabilities": {"alwaysMatch": caps, "firstMatch": [{}]}}
         try:
             import httpx

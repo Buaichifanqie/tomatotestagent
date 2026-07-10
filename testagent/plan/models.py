@@ -239,13 +239,16 @@ class AbortPolicy(BaseModel):
 
 class PlanConfig(BaseModel):
     name: str = ""
+    platform: str = "android"
     app_package: str = ""
+    app_id: str = ""
     app_activity: str = ""
     output_dir: str = ""
     auto_yes: bool = False
     device_udid: str = ""
     appium_url: str = "http://localhost:4723"
     system_port: int = 8200
+    wda_local_port: int = 8100
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     abort_policy: AbortPolicy = Field(default_factory=AbortPolicy)
     popup_rules: list[PopupRule] = Field(default_factory=list)
