@@ -65,119 +65,82 @@ class PlanResult:
 # ── helper functions ─────────────────────────────────────────────────────────
 
 
-async def _detect_app_package(requirement: str, device_udid: str = "") -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
-    """Auto-detect app package from connected Android device.
+async def _detect_app_id(
+    requirement: str,
+    device_udid: str = "",
+    platform: str = "android",
+) -> str | None:
+    """Auto-detect app identifier from connected device using platform tools."""
+    from testagent.platform.factory import PlatformFactory
 
-    Uses ``adb`` to list third-party packages on the connected device, then
-    asks the LLM to match the app description (from the requirement text) to
-    one of the installed packages.
+    platform_obj = PlatformFactory.create(platform)
 
-    Returns:
-        The matched package name, or ``None`` if detection fails.
-    """
-    from testagent.common.adb_utils import adb_command
-
-    # ── Check device connection ────────────────────────────────────────────
+    # Check device connection
     try:
-        result = adb_command(
-            device_udid, "devices",
-            capture_output=True, text=True, timeout=5,
-        )
-        lines = [l.strip() for l in result.stdout.split("\n") if l.strip()]
-        # lines[0] is "List of devices attached"; anything after with \t means connected
-        devices = [l for l in lines[1:] if "\tdevice" in l]
+        devices = await platform_obj.list_connected_devices()
         if not devices:
-            typer.echo("  [adb: no device connected, cannot auto-detect app package]")
+            typer.echo(f"  [{platform}: no device connected, cannot auto-detect app]")
             return None
     except FileNotFoundError:
-        typer.echo("  [adb not found, cannot auto-detect app package]")
+        typer.echo(f"  [{platform} tools not found, cannot auto-detect app]")
         return None
     except Exception as exc:
-        typer.echo(f"  [adb check failed: {exc}]")
+        typer.echo(f"  [{platform} check failed: {exc}]")
         return None
 
-    # ── List 3rd-party packages ────────────────────────────────────────────
+    # List installed 3rd-party apps
     try:
-        result = adb_command(
-            device_udid, "shell", "pm", "list", "packages", "-3",
-            capture_output=True, text=True, timeout=10,
-        )
-        packages = [
-            line.replace("package:", "").strip()
-            for line in result.stdout.split("\n")
-            if line.startswith("package:")
-        ]
-        if not packages:
-            typer.echo("  [no third-party packages found on device]")
+        apps = await platform_obj.detect_installed_apps(device_udid)
+        if not apps:
+            typer.echo(f"  [no {platform} 3rd-party apps found on device]")
             return None
     except Exception as exc:
-        typer.echo(f"  [failed to list packages: {exc}]")
+        typer.echo(f"  [failed to list apps: {exc}]")
         return None
 
-    # ── Use LLM to match ───────────────────────────────────────────────────
+    # LLM matching
     from testagent.config.settings import get_settings
     from testagent.llm.local_provider import LLMProviderFactory
 
     settings = get_settings()
     provider = LLMProviderFactory.create(settings)
 
-    package_list = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(packages))
+    app_list = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(apps))
     prompt = (
         f"用户需求: {requirement}\n\n"
-        f"设备上已安装的第三方应用包名列表:\n{package_list}\n\n"
-        "请根据用户需求，选择最匹配的应用包名。只输出包名本身，不要任何额外文字。"
+        f"设备上已安装的{platform}第三方应用列表:\n{app_list}\n\n"
+        f"请根据用户需求，选择最匹配的{platform}应用标识符。"
+        f"只输出标识符本身，不要任何额外文字。"
     )
 
     try:
         response = await provider.chat(
-            system="你是一个 Android 工程师，擅长根据应用名称匹配包名。",
+            system=f"你是一个{platform}工程师，擅长根据应用名称匹配包名/bundleId。",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
         for block in response.content:
             if block.get("type") == "text":
                 matched = str(block.get("text", "")).strip()
-                # Validate the match is in the installed list
-                if matched in packages:
-                    typer.echo(f"  [auto-detected app package: {matched}]")
+                if matched in apps:
+                    typer.echo(f"  [auto-detected app: {matched}]")
                     return matched
-                else:
-                    typer.echo(
-                        f"  [LLM suggested '{matched}' but it's not in the installed list]"
-                    )
-                    return None
+                typer.echo(f"  [LLM suggested '{matched}' but not in the installed list]")
+                return None
     except Exception as exc:
         typer.echo(f"  [LLM matching failed: {exc}]")
-        return None
-
     return None
 
 
-async def _detect_app_version(package: str, device_udid: str = "") -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
-    """Auto-detect app version from connected Android device.
-
-    Uses ``adb shell dumpsys package`` to extract the versionName of the
-    given package.
-
-    Returns:
-        The version string (e.g. "8.95.0"), or ``None`` if detection fails.
-    """
-    from testagent.common.adb_utils import adb_command
-
-    try:
-        result = adb_command(
-            device_udid, "shell", "dumpsys", "package", package,
-            capture_output=True, text=True, timeout=15,
-        )
-        for line in result.stdout.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("versionName="):
-                version = stripped.split("=", 1)[1].strip()
-                if version:
-                    return version
-    except Exception:
-        pass
-    return None
+async def _detect_app_version(
+    app_id: str,
+    device_udid: str = "",
+    platform: str = "android",
+) -> str | None:
+    """Auto-detect app version from connected device using platform tools."""
+    from testagent.platform.factory import PlatformFactory
+    platform_obj = PlatformFactory.create(platform)
+    return await platform_obj.detect_app_version(app_id, device_udid)
 
 
 def parse_requirement(requirement: str) -> tuple[str, bool]:
@@ -617,6 +580,7 @@ def _tc_edit_steps(tc: TestCase) -> None:
 def plan_command(
     requirement: str,
     name: str = "",
+    platform: str = "android",
     app_package: str = "",
     app_activity: str = "",
     app_id: str = "",
@@ -632,6 +596,7 @@ def plan_command(
     """
     return asyncio.run(_plan_command_async(
         requirement, name=name,
+        platform=platform,
         app_package=app_package, app_activity=app_activity,
         app_id=app_id, auto_yes=auto_yes,
         device_udid=device_udid, appium_url=appium_url, system_port=system_port,
@@ -641,6 +606,7 @@ def plan_command(
 async def _plan_command_async(
     requirement: str,
     name: str = "",
+    platform: str = "android",
     app_package: str = "",
     app_activity: str = "",
     app_id: str = "",
@@ -668,8 +634,9 @@ async def _plan_command_async(
         requirement: A product requirement document path or a natural-language
             requirement description.
         name: Optional custom plan name.
-        app_package: Android app package name.
-        app_activity: Android app launch activity.
+        platform: Target platform ("android" or "ios").
+        app_package: App identifier (Android→packageName, iOS→bundleId).
+        app_activity: [Android only] App launch activity.
         auto_yes: Skip the user confirmation step.
 
     Returns:
@@ -714,9 +681,9 @@ async def _plan_command_async(
     else:
         prd_text = content
 
-    # ── Auto-detect app package if not provided ──────────────────────────
+    # ── Auto-detect app id if not provided ──────────────────────────
     if not app_package:
-        detected = await _detect_app_package(requirement, device_udid=device_udid)
+        detected = await _detect_app_id(requirement, device_udid=device_udid, platform=platform)
         if detected:
             app_package = detected
 
@@ -726,7 +693,7 @@ async def _plan_command_async(
     # ── Auto-detect app version from device ─────────────────────────────
     detected_version: str | None = None
     if app_package:
-        detected_version = await _detect_app_version(app_package, device_udid=device_udid)
+        detected_version = await _detect_app_version(app_package, device_udid=device_udid, platform=platform)
         if detected_version:
             typer.echo(f"  [auto-detected app version: {detected_version}]")
 
@@ -771,6 +738,7 @@ async def _plan_command_async(
 
     config = PlanConfig(
         name=name,
+        platform=platform,
         app_package=app_package,
         app_activity=app_activity,
         output_dir=output_dir,
@@ -904,9 +872,18 @@ async def _plan_command_async(
     # ── Inject app info into TC generation prompt ──────────────────────
     app_info_parts = []
     if app_package:
-        app_info_parts.append(f"Android app package name: {app_package}")
-    if app_activity:
-        app_info_parts.append(f"Android launch activity: {app_activity}")
+        if platform == "ios":
+            app_info_parts.append(f"Platform: iOS")
+            app_info_parts.append(f"iOS bundleId: {app_package}")
+            app_info_parts.append(f"App launch: mobile: launchApp with bundleId")
+            app_info_parts.append(f"Element strategies: accessibility_id, ios_predicate, ios_class_chain, xpath")
+            app_info_parts.append(f"Back navigation: W3C /session/back (no KEYCODE_BACK)")
+        else:
+            app_info_parts.append(f"Platform: Android")
+            app_info_parts.append(f"Android package name: {app_package}")
+            if app_activity:
+                app_info_parts.append(f"Android launch activity: {app_activity}")
+            app_info_parts.append(f"Element strategies: accessibility_id, uiautomator, xpath")
     if app_info_parts:
         enhanced_prd += "\n\n" + "\n".join(app_info_parts)
 
@@ -1775,6 +1752,7 @@ async def _resume_plan(
 
 async def run_single_plan(
     requirement: str,
+    platform: str = "android",
     app_package: str = "",
     app_activity: str = "",
     app_id: str = "",
@@ -1792,8 +1770,9 @@ async def run_single_plan(
 
     Args:
         requirement: File path, URL, or raw requirement text.
-        app_package: Android app package name (auto-detected if empty).
-        app_activity: Android launch activity.
+        platform: Target platform ("android" or "ios").
+        app_package: App identifier (Android→packageName, iOS→bundleId).
+        app_activity: [Android only] App launch activity.
         app_id: App identifier for App Context Memory.
         device_udid: Target device serial (e.g. emulator-5554).
         appium_url: Appium server URL (e.g. http://localhost:4723).
@@ -1815,6 +1794,7 @@ async def run_single_plan(
         report_path, overall, executed_tcs = await _plan_command_async(
             requirement,
             name=name,
+            platform=platform,
             app_package=app_package,
             app_activity=app_activity,
             app_id=app_id,
@@ -1895,13 +1875,15 @@ def load_multi_device_config(config_path: str) -> list[DevicePlanAssignment]:
     return assignments
 
 
-def interactive_device_menu() -> list[DevicePlanAssignment]:
+def interactive_device_menu(platform: str = "android") -> list[DevicePlanAssignment]:
     """Interactive prompt to assign plans to devices.
 
     Flow:
     1. Display discovered devices.
     2. Let user assign a test plan YAML to each selected device.
     3. Return the assignments.
+
+    TODO: Make this function platform-aware (currently only supports Android/adb).
     """
     import subprocess
     import typer

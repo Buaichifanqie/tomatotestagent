@@ -12,18 +12,27 @@ def _interactive_help() -> None:
     import msvcrt
 
     options = [
+        ("platform",      "目标平台: android / ios（必填）"),
         ("requirement",   "产品需求文档路径 或 自然语言需求描述"),
         ("--name/-n",     "自定义计划名称"),
-        ("--app-package", "App package name（如 com.example.app）"),
-        ("--app-activity","App launch activity"),
-        ("--app-id",      "App 标识（如 com.example.app），默认使用 app-package"),
-        ("--device-udid/-d", "目标设备序列号，多设备时必须指定"),
+        ("--app-package", "App 标识（Android→packageName, iOS→bundleId）"),
+        ("--app-activity","[Android only] App launch activity"),
+        ("--app-id",      "App Context Memory 标识，默认同 app-package"),
+        ("--device-udid/-d", "目标设备序列号"),
         ("--appium-port",  "Appium 服务器端口（默认 4723）"),
-        ("--auto-yes/-y", "跳过确认步骤，直接执行"),
-        ("--resume/-r",   "恢复中断的测试计划"),
+        ("--auto-yes/-y", "跳过确认直接执行"),
+        ("--resume/-r",   "恢复中断的计划"),
     ]
 
     details = {
+        "platform": (
+            "目标平台，必填参数。\n"
+            "  - android：Android App 测试（UiAutomator2）\n"
+            "  - ios：iOS App 测试（XCUITest）\n\n"
+            "  示例：\n"
+            '    testagent app plan "测试首页" -f android -p com.example.app\n'
+            '    testagent app plan "测试首页" -f ios -p com.example.app -d XXXXXXXXXXXX'
+        ),
         "requirement": (
             "位置参数，必填（除非使用 --resume）。\n"
             "  可以是：\n"
@@ -41,65 +50,59 @@ def _interactive_help() -> None:
             "    testagent app plan \"需求.md\" -n v2.0-regression"
         ),
         "--app-package": (
-            "Android App 的 package name。\n"
+            "App 标识符。\n"
+            "  - Android：packageName（如 com.example.app）\n"
+            "  - iOS：bundleId（如 com.example.app）\n"
             "  如果连接了设备，会自动检测。手动指定可跳过检测。\n\n"
             "  示例：\n"
-            "    testagent app plan \"需求.md\" -p com.example.app\n"
-            "    testagent app plan \"需求.md\" -p com.tencent.mm"
+            "    testagent app plan \"需求.md\" -p com.example.app -f android\n"
+            "    testagent app plan \"需求.md\" -p com.example.app -f ios"
         ),
         "--app-activity": (
-            "App 的启动 Activity。\n"
+            "[Android only] App 的启动 Activity。\n"
             "  通常不需要指定，Appium 会自动使用默认 Activity。\n\n"
             "  示例：\n"
             "    testagent app plan \"需求.md\" -a .MainActivity"
         ),
         "--app-id": (
-            "App 标识符，用于 App Context Memory（历史用例、学习模式）。\n"
-            "  默认使用 app-package 的值。\n\n"
+            "App Context Memory 标识，默认同 app-package。\n\n"
             "  示例：\n"
             "    testagent app plan \"需求.md\" --app-id com.example.app"
         ),
         "--device-udid/-d": (
             "目标设备序列号（UDID）。\n"
             "  多设备并行测试时必须指定，确保每个终端连接到正确的设备。\n"
-            "  可通过 `adb devices` 查看已连接设备的序列号。\n\n"
+            "  可通过 `adb devices`（Android）或 `xcrun xctrace list devices`（iOS）查看。\n\n"
             "  示例：\n"
             "    testagent app plan \"需求.md\" -d emulator-5554\n"
-            "    testagent app plan \"需求.md\" -d 192.168.1.100:5555\n\n"
-            "  多设备并行（共享一个 Appium 服务器）：\n"
-            "    终端1: testagent app plan \"视频播放\" -d emulator-5554 --name video\n"
-            "    终端2: testagent app plan \"搜索功能\" -d emulator-5556 --name search"
+            "    testagent app plan \"需求.md\" -d 00008020-XXXXXXXXXXXX\n\n"
+            "  多设备并行：\n"
+            "    终端1: testagent app plan \"视频播放\" -d <udid1> --name video\n"
+            "    终端2: testagent app plan \"搜索功能\" -d <udid2> --name search"
         ),
         "--appium-port": (
-            "Appium 服务器端口。默认 4723。\n\n"
-            "  方式一：多设备共用一个 Appium（推荐，systemPort 自动分配）\n"
-            "    只需启动一个 Appium，两个终端都用默认端口：\n"
-            "    终端1: testagent app plan \"视频\" -d emulator-5554\n"
-            "    终端2: testagent app plan \"搜索\" -d emulator-5556\n\n"
-            "  方式二：每台设备用独立的 Appium 服务器\n"
-            "    分别启动两个 Appium（不同端口），然后各自指定：\n"
-            "    appium -p 4723   (给 emulator-5554)\n"
-            "    appium -p 4724   (给 emulator-5556)\n"
-            "    终端1: testagent app plan \"视频\" -d emulator-5554 --appium-port 4723\n"
-            "    终端2: testagent app plan \"搜索\" -d emulator-5556 --appium-port 4724"
+            "Appium 服务器端口（默认 4723）。\n\n"
+            "  多设备场景：每台设备用独立 Appium 时分别指定不同端口。\n\n"
+            "  示例：\n"
+            "    testagent app plan \"需求.md\" --appium-port 4723\n"
+            "    testagent app plan \"需求.md\" --appium-port 4724"
         ),
         "--auto-yes/-y": (
             "跳过确认步骤，生成用例后直接执行。\n"
             "  适用于 CI/CD 或批量执行场景。\n\n"
             "  示例：\n"
             "    testagent app plan \"需求.md\" -y\n"
-            "    testagent app plan \"需求.md\" --app-package com.example.app -y"
+            "    testagent app plan \"需求.md\" -p com.example.app -y"
         ),
         "--resume/-r": (
             "恢复之前中断的测试计划。\n"
-            "  中断原因可以是：Ctrl+C 手动暂停、设备死机、进程崩溃等。\n"
-            "  已完成的用例不会重复运行，被中断的用例会重新执行。\n\n"
+            "  中断原因：Ctrl+C、设备死机、进程崩溃等。\n"
+            "  已完成的用例不会重复运行。\n\n"
             "  参数值：\n"
             "    latest    — 自动查找最近一次中断的计划\n"
             "    <目录路径> — 指定报告目录路径\n\n"
             "  示例：\n"
             "    testagent app plan --resume latest\n"
-            "    testagent app plan --resume reports/2026-06-11-015824-my-app/\n"
             "    testagent app plan -r latest"
         ),
     }
@@ -148,45 +151,39 @@ def plan(
         "", help="产品需求文档路径 或 自然语言需求描述"
     ),
     name: str = typer.Option("", "--name", "-n", help="自定义计划名称"),
-    app_package: str = typer.Option("", "--app-package", "-p", help="App package name"),
-    app_activity: str = typer.Option("", "--app-activity", "-a", help="App launch activity"),
-    app_id: str = typer.Option("", "--app-id", help="App 标识（如 com.example.app），默认使用 app-package"),
-    device_udid: str = typer.Option(
-        "", "--device-udid", "-d",
-        help="目标设备序列号（如 emulator-5554、192.168.1.100:5555）。多设备时必须指定。"
+    platform: str = typer.Option(
+        ..., "--platform", "-f",
+        help="目标平台: android / ios（必填）",
     ),
-    appium_port: int = typer.Option(
-        4723, "--appium-port",
-        help="Appium 服务器端口。多设备共用一个 Appium 时不需要指定；每台设备用独立 Appium 时分别指定不同端口。"
-    ),
-    auto_yes: bool = typer.Option(
-        False, "--auto-yes", "-y", help="跳过确认步骤，直接执行"
-    ),
-    resume: str = typer.Option(
-        "", "--resume", "-r",
-        help="恢复中断的计划。传入报告目录路径，或 'latest' 恢复最近的。"
-    ),
-    multi_config: str = typer.Option(
-        "", "--multi-config", "-m",
-        help="多设备配置文件路径 (YAML)。指定后并行执行多个计划。"
-    ),
-    show_help: bool = typer.Option(
-        False, "--help", "-h", is_eager=True,
-        help="显示交互式帮助。"
-    ),
+    app_package: str = typer.Option("", "--app-package", "-p", help="App 标识（Android→packageName, iOS→bundleId）"),
+    app_activity: str = typer.Option("", "--app-activity", "-a",
+        help="[Android only] App launch activity"),
+    app_id: str = typer.Option("", "--app-id", help="App Context Memory 标识，默认同 app-package"),
+    device_udid: str = typer.Option("", "--device-udid", "-d", help="目标设备序列号"),
+    appium_port: int = typer.Option(4723, "--appium-port", help="Appium 服务器端口"),
+    auto_yes: bool = typer.Option(False, "--auto-yes", "-y", help="跳过确认直接执行"),
+    resume: str = typer.Option("", "--resume", "-r", help="恢复中断的计划"),
+    multi_config: str = typer.Option("", "--multi-config", "-m", help="多设备配置文件路径 (YAML)"),
+    show_help: bool = typer.Option(False, "--help", "-h", is_eager=True, help="显示交互式帮助"),
 ) -> None:
     """根据产品需求自动生成、执行测试用例并生成结构化报告。"""
     if show_help:
         _interactive_help()
         return
 
-    import asyncio
-    from testagent.cli.plan import run_single_plan
-
-    # Validation
     if not resume and not requirement:
         typer.echo("Error: 请提供需求文档路径或使用 --resume 恢复中断的计划。")
         raise typer.Exit(1)
+
+    if platform.lower() not in ("android", "ios"):
+        typer.echo("Error: --platform / -f 必须是 'android' 或 'ios'")
+        raise typer.Exit(1)
+
+    if platform.lower() == "ios" and app_activity:
+        typer.echo("  [info] --app-activity 仅 Android 有效，iOS 侧已忽略")
+
+    import asyncio
+    from testagent.cli.plan import run_single_plan
 
     def _log(msg: str) -> None:
         typer.echo(msg)
@@ -198,6 +195,7 @@ def plan(
 
     result = asyncio.run(run_single_plan(
         requirement,
+        platform=platform,
         app_package=app_package,
         app_activity=app_activity,
         app_id=app_id,

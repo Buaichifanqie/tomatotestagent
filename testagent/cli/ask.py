@@ -214,13 +214,20 @@ APPIUM_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(platform: str = "android") -> str:
     """动态构建 system prompt，根据配置注入 DB toolkit 信息。"""
     from testagent.config.settings import get_settings
 
-    prompt = """\
-You are TestAgent, an AI-powered mobile testing assistant connected to an Android emulator via Appium.
+    if platform == "ios":
+        agent_identity = (
+            "You are TestAgent, an AI-powered mobile testing assistant connected to an iOS device via Appium.\n\n"
+        )
+    else:
+        agent_identity = (
+            "You are TestAgent, an AI-powered mobile testing assistant connected to an Android emulator via Appium.\n\n"
+        )
 
+    prompt += """\
 ## Available Tools
 - **app_launch(package, activity?)** — 通过包名启动应用
 - **app_exec(command)** — 在设备上执行 shell 命令
@@ -950,11 +957,12 @@ def _wrap_with_session_recovery(
     return _wrapped
 
 
-async def execute_natural_language(query: str) -> dict[str, Any]:
+async def execute_natural_language(query: str, platform: str = "android") -> dict[str, Any]:
     """执行自然语言测试任务。
 
     参数:
         query: 用户的自然语言描述，如 "测试一下 android 搜索框功能"
+        platform: 目标平台，'android' 或 'ios'（默认 'android'）
 
     返回:
         包含测试结果和会话信息的字典
@@ -1023,7 +1031,7 @@ async def execute_natural_language(query: str) -> dict[str, Any]:
         result_messages = await agent_loop(
             messages=messages,
             tools=APPIUM_TOOLS + DB_TOOL_DEFINITIONS,
-            system=_build_system_prompt(),
+            system=_build_system_prompt(platform=platform),
             llm_provider=llm,
             dispatch_fn=safe_dispatch,
             max_rounds=1000,
