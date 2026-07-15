@@ -299,6 +299,9 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider:
         when the user rejects or the list is empty.
     """
     if auto_yes:
+        summary = format_tc_summary(test_cases)
+        if summary:
+            typer.echo(summary)
         return True
 
     if not test_cases:
