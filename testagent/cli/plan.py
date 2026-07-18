@@ -266,7 +266,7 @@ def format_tc_summary(test_cases: list[TestCase], show_steps: bool = False) -> s
 
     Args:
         test_cases: The list of ``TestCase`` objects to summarise.
-        show_steps: When ``True``, display each TC's operation steps inline.
+        show_steps: When ``True``, expand all steps inline.
 
     Returns:
         A multi-line string suitable for display, or an empty string when the
@@ -279,9 +279,11 @@ def format_tc_summary(test_cases: list[TestCase], show_steps: bool = False) -> s
     for tc in test_cases:
         priority_tag = f"[{tc.priority}]"
         core_tag = " [CORE]" if tc.is_core else ""
-        lines.append(f"  {tc.id}: {tc.title} {priority_tag}{core_tag}")
+        regression_tag = " [回归]" if tc.is_regression else ""
+        step_count = f" ({len(tc.steps)}步)" if tc.steps else ""
+        lines.append(f"  {tc.id}: {tc.title} {priority_tag}{core_tag}{regression_tag}{step_count}")
 
-        # ── Show steps inline ──────────────────────────────────────────
+        # ── Steps inline when expanded ────────────────────────────────
         if show_steps and tc.steps:
             for s in tc.steps:
                 action_icon = {
@@ -327,20 +329,59 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider:
         return False
 
     while True:
-        summary = format_tc_summary(test_cases, show_steps=True)
+        summary = format_tc_summary(test_cases, show_steps=False)
         typer.echo(summary)
         typer.echo("")
-        typer.echo("  [y] 执行所有用例  [e] 编辑用例（可修改步骤）  [n] 取消")
-        choice = typer.prompt("  请选择", default="y", show_default=False)
+        typer.echo("  [y] 执行  [v1] 查看用例1步骤  [r1,3] 标记回归  [e] 编辑  [n] 取消")
+        choice_raw = typer.prompt("  请选择", default="y", show_default=False)
+        choice = choice_raw.lower().strip()
 
-        if choice.lower() == "y":
+        if choice == "y":
             return True
-        if choice.lower() == "n":
+        if choice == "n":
             return False
-        if choice.lower() == "e":
+
+        # Combined commands: v1, v2, v3 (view details directly)
+        if choice.startswith("v") and len(choice) > 1:
+            try:
+                idx = int(choice[1:]) - 1
+                if 0 <= idx < len(test_cases):
+                    _show_tc_steps(test_cases[idx])
+                else:
+                    typer.echo(f"  编号 {choice[1:]} 超出范围")
+            except ValueError:
+                typer.echo("  无效格式，请输入 v1 / v2 / v3 ...")
+            continue
+
+        # Combined commands: r1, r1,3,5 (toggle regression directly)
+        if choice.startswith("r") and len(choice) > 1:
+            import re
+            nums = re.split(r"[,\s]+", choice[1:])
+            for n in nums:
+                if not n.strip():
+                    continue
+                try:
+                    idx = int(n.strip()) - 1
+                    if 0 <= idx < len(test_cases):
+                        test_cases[idx].is_regression = not test_cases[idx].is_regression
+                        status = "回归" if test_cases[idx].is_regression else "取消回归"
+                        typer.echo(f"    {test_cases[idx].id}: {status}")
+                    else:
+                        typer.echo(f"    编号 {n} 超出范围")
+                except ValueError:
+                    typer.echo(f"    无效编号: {n}")
+            continue
+
+        if choice == "v":
+            _tc_view_details(test_cases)
+            continue
+        if choice == "r":
+            _tc_mark_regression(test_cases)
+            continue
+        if choice == "e":
             _tc_editor(test_cases, llm_provider=llm_provider, app_package=app_package)
             continue
-        typer.echo("  无效输入，请输入 y / e / n")
+        typer.echo("  无效输入，请输入 y / v / r / e / n")
 
 
 def _tc_editor(test_cases: list[TestCase], llm_provider: Any = None, app_package: str = "") -> None:
@@ -644,6 +685,189 @@ def _display_steps(tc: TestCase) -> None:
         if s.tap_first:
             desc += f"  [先点: {s.tap_first}]"
         typer.echo(desc)
+
+
+# ── 查看用例详情（折叠展开）───────────────────────────────────────────────
+
+
+def _show_tc_steps(tc: TestCase) -> None:
+    """Print steps for a single test case (used by v1, v2, etc.)."""
+    typer.echo(f"\n  ── {tc.id}: {tc.title} ({len(tc.steps)}步) ──")
+    if not tc.steps:
+        typer.echo("    （无步骤）")
+        return
+    for s in tc.steps:
+        action_icon = {
+            "tap": "👆", "type": "⌨️", "swipe": "👉",
+            "assert": "✅", "launch": "🚀", "exec": "⚙️",
+            "screenshot": "📷", "wait": "⏳",
+        }.get(s.action, "  ")
+        desc = f"    {action_icon} #{s.step} [{s.action}]"
+        if s.target:
+            desc += f" → {s.target}"
+        if s.value:
+            desc += f"  value=\"{s.value[:50]}\""
+        if s.expected:
+            desc += f"  expect=\"{s.expected[:40]}\""
+        if s.tap_first:
+            desc += f"  [先点: {s.tap_first}]"
+        typer.echo(desc)
+
+
+def _tc_view_details(test_cases: list[TestCase]) -> None:
+    """Show steps for a specific test case by number (accordion-style)."""
+    if not test_cases:
+        typer.echo("  没有可查看的用例")
+        return
+
+    typer.echo("")
+    typer.echo("  ── 查看用例详情 ──")
+    typer.echo("  输入编号查看该用例的详细步骤（如: 1）")
+    for i, tc in enumerate(test_cases):
+        reg_mark = " [回归]" if tc.is_regression else ""
+        typer.echo(f"    {i+1}. {tc.id}: {tc.title} ({len(tc.steps)}步){reg_mark}")
+
+    while True:
+        choice = typer.prompt("  输入编号查看（b 返回）", default="b", show_default=False)
+        if choice.lower() == "b":
+            return
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(test_cases):
+                _show_tc_steps(test_cases[idx])
+            else:
+                typer.echo("  编号超出范围")
+        except ValueError:
+            typer.echo("  无效输入")
+
+
+# ── 标记回归用例 ──────────────────────────────────────────────────────────
+
+
+def _tc_mark_regression(test_cases: list[TestCase]) -> None:
+    """Toggle regression flag on individual test cases.
+
+    Shows current regression status and lets user toggle by number.
+    Only P0/P1 core flow cases should typically be marked as regression.
+    """
+    if not test_cases:
+        typer.echo("  没有可标记的用例")
+        return
+
+    typer.echo("")
+    typer.echo("  ── 标记回归用例 ──")
+    typer.echo("  按编号切换回归标记，被标记的用例首次执行后会自动生成脚本")
+    typer.echo("  后续回归执行时直接走脚本快速通道（不需要 LLM/Vision）")
+    typer.echo("  建议只标记 P0/P1 核心流程用例为回归")
+    typer.echo("")
+
+    while True:
+        for i, tc in enumerate(test_cases):
+            reg_mark = " [回归]" if tc.is_regression else ""
+            typer.echo(f"    {i+1}. [{tc.priority}] {tc.id}: {tc.title}{reg_mark}")
+        typer.echo("")
+        typer.echo("  输入编号切换标记（如: 1,3,5）输入 b 返回")
+        choice = typer.prompt("  请选择", default="b", show_default=False)
+
+        if choice.lower() == "b":
+            # Show summary of changes
+            reg_count = sum(1 for tc in test_cases if tc.is_regression)
+            typer.echo(f"  ✅ 已标记 {reg_count} 个回归用例")
+            return
+
+        # Parse: "1,3,5" or "1 3 5"
+        import re
+        tokens = re.split(r"[,\s]+", choice.strip())
+        for t in tokens:
+            try:
+                idx = int(t) - 1
+                if 0 <= idx < len(test_cases):
+                    test_cases[idx].is_regression = not test_cases[idx].is_regression
+                    status = "回归" if test_cases[idx].is_regression else "取消回归"
+                    typer.echo(f"    {test_cases[idx].id}: {status}")
+                else:
+                    typer.echo(f"    编号 {t} 超出范围")
+            except ValueError:
+                typer.echo(f"    无效编号: {t}")
+
+
+# ── 回归脚本生成 ──────────────────────────────────────────────────────────
+
+
+def _generate_regression_scripts(
+    test_cases: list[TestCase],
+    config: PlanConfig,
+    output_dir: str,
+    app_name: str = "",
+) -> None:
+    """Generate regression scripts for successfully executed regression TCs.
+
+    Only generates scripts for TCs that:
+    - Have ``is_regression == True``
+    - Were executed successfully (status == EXECUTED)
+    """
+    regression_tcs = [tc for tc in test_cases if tc.is_regression]
+    if not regression_tcs:
+        return
+
+    from testagent.regression.script_generator import ScriptGenerator
+    from testagent.regression.script_store import ScriptStore
+
+    generator = ScriptGenerator(output_dir=output_dir)
+    store = ScriptStore()  # 使用集中化存储（./scripts/）
+
+    generated = 0
+    for tc in regression_tcs:
+        if tc.execution.status != ExecutionStatus.EXECUTED:
+            typer.echo(f"  [Script skipped: {tc.id} — execution failed]")
+            continue
+
+        # Check if script already exists by TC ID
+        existing = store.load(tc.id)
+        if existing and existing.status.value != "deprecated":
+            typer.echo(f"  [Script exists: {tc.id} — skipping generation]")
+            tc.script_path = str(script_path)
+            continue
+
+        # Cross-run match: find similar script by title across ALL reports
+        if not existing:
+            matched = ScriptStore.find_across_reports(
+                title=tc.title,
+                app_package=config.app_package or "",
+                min_similarity=0.4,
+            )
+            if matched:
+                matched.tc_id = tc.id
+                matched.tc_title = tc.title
+                ver = getattr(config, "app_version", "")
+                if ver and ver not in matched.compatible_versions:
+                    matched.compatible_versions.append(ver)
+                script_path = store.save(matched)
+                tc.script_path = str(script_path)
+                typer.echo(f"  [Script matched: '{tc.title}' <- script from {matched.tc_id}]")
+                continue
+
+        # Generate new script
+        try:
+            # Use default screen size (1080x2400), coords are normalized
+            script = generator.generate(
+                tc=tc,
+                app_package=config.app_package or "",
+                app_name=app_name,
+                app_version=getattr(config, "app_version", ""),
+                platform=config.platform,
+                screen_width=1080,
+                screen_height=2400,
+            )
+            script_path = store.save(script)
+            tc.script_path = str(script_path)
+            typer.echo(f"  [Script generated: {tc.id} -> {script_path.name}]")
+            generated += 1
+        except Exception as e:
+            typer.echo(f"  [Script generation failed for {tc.id}: {e}]")
+
+    if generated:
+        typer.echo(f"  Generated {generated} regression script(s)")
 
 
 # ── main orchestration ───────────────────────────────────────────────────────
@@ -1503,6 +1727,9 @@ async def _plan_command_async(
     )
     executed_tcs = await engine.execute_all(test_cases)
     was_interrupted = engine._interrupted
+
+    # ── Phase 4b: Generate regression scripts for marked TCs ────────────
+    _generate_regression_scripts(test_cases, config, output_dir, app_name=skill_app_name or "")
 
     # ── Teardown: kill app and close session after all TCs ───────────────
     try:

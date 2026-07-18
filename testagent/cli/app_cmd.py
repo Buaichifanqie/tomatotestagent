@@ -612,6 +612,65 @@ async def _replay_command(
         typer.echo(f"\nDelta report: {html_path}")
 
 
+# ── 回归脚本管理 ──────────────────────────────────────────────────
+
+
+@app_typer.command()
+def list_scripts(
+    app_name: str = typer.Option("", "--app", "-p", help="按App名称筛选（如 bilibili）"),
+    platform: str = typer.Option("", "--platform", "-f", help="按平台筛选"),
+    detail: bool = typer.Option(False, "--detail", help="显示详细信息"),
+) -> None:
+    """查看所有回归测试脚本。"""
+    from testagent.regression.script_store import ScriptStore
+    store = ScriptStore()
+    all_scripts = store.list_scripts(app_name=app_name)
+    if platform:
+        all_scripts = [s for s in all_scripts if s.get("platform") == platform]
+    if not all_scripts:
+        typer.echo("暂无回归脚本。执行回归测试后会自动生成。")
+        return
+    typer.echo(f"回归脚本 ({len(all_scripts)} 个):\n")
+    for s in all_scripts:
+        st = {"active":"","unstable":" [不稳定]","expired":" [过期]","deprecated":" [废弃]"}.get(s.get("status",""),"")
+        pt = f" [{s.get('platform','android')}]" if detail else ""
+        typer.echo(f"  {s['tc_id']}: {s['tc_title'][:50]}{pt} [v{s.get('app_version','?')}]{st}")
+        typer.echo(f"    步骤:{s['step_count']}  运行:{s['run_count']}次  自愈:{s['heal_count']}次")
+        if detail:
+            typer.echo(f"    生成:{s.get('generated_at','?')[:19]}")
+        typer.echo("")
+
+
+@app_typer.command()
+def delete_script(tc_id: str = typer.Argument(..., help="TC ID")) -> None:
+    """删除指定回归测试脚本。"""
+    from testagent.regression.script_store import ScriptStore
+    store = ScriptStore()
+    if store.delete(tc_id):
+        typer.echo(f"Deleted: {tc_id}")
+    else:
+        typer.echo(f"Not found: {tc_id}")
+
+
+@app_typer.command()
+def clear_scripts(confirm: bool = typer.Option(False, "--yes", "-y")) -> None:
+    """清空所有回归脚本。"""
+    import shutil
+    from testagent.regression.script_store import ScriptStore
+    store = ScriptStore()
+    scripts = store.list_scripts()
+    if not scripts:
+        typer.echo("没有找到脚本。")
+        return
+    if not confirm:
+        typer.echo(f"将删除 {len(scripts)} 个脚本")
+        if not typer.confirm("确定?"):
+            return
+    shutil.rmtree(store._root)
+    store._root.mkdir(parents=True, exist_ok=True)
+    typer.echo(f"Cleared {len(scripts)} scripts")
+
+
 # ── 训练数据采集 ──────────────────────────────────────────────────
 
 @app_typer.command()

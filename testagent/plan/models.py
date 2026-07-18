@@ -169,6 +169,8 @@ class TestCase(BaseModel):
     execution: TCExecution = Field(default_factory=TCExecution)
     setup: list[dict[str, object]] = Field(default_factory=list)
     assertions: list[dict[str, object]] = Field(default_factory=list)
+    is_regression: bool = False      # marked for regression test
+    script_path: str = ""            # path to generated regression script
 
 
 class EvaluationOutput(BaseModel):

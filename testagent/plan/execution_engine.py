@@ -128,6 +128,7 @@ class ExecutionEngine:
         self._db_setup_done: bool = False
         self._consecutive_vision_timeouts: int = 0
         self._local_vision_engine: Any = None
+        self._script_replay_engine: Any = None
         self.device_udid: str = config.device_udid or ""
         self._platform_obj: Any = None
 
@@ -1111,6 +1112,113 @@ class ExecutionEngine:
 
         return test_cases
 
+    async def _try_script_replay(self, tc: TestCase) -> bool:
+        """Attempt to execute a regression TC via script replay.
+
+        Returns:
+            True if script replay completed (success or failure recorded).
+            False if no script available or not a regression TC.
+        """
+        if not tc.is_regression:
+            return False
+
+        from testagent.regression.script_store import ScriptStore
+        from testagent.regression.script_replay import ScriptReplayEngine
+        from testagent.regression.healing_engine import HealingEngine
+
+        store = ScriptStore()
+        script = store.load(tc.id, app_package=self.config.app_package or "")
+        if not script:
+            script = ScriptStore.find_across_reports(
+                title=tc.title,
+                app_package=self.config.app_package or "",
+                min_similarity=0.4,
+            )
+            if script:
+                self._log(f"  [Script replay: matched '{tc.title}' -> existing script '{script.tc_id}']")
+
+        if not script:
+            self._log(f"  [Script replay: no script for {tc.id}]")
+            return False
+
+        if not script:
+            self._log(f"  [Script replay: no script for {tc.id}]")
+            return False
+
+        # Check version compatibility
+        app_version = getattr(self.config, "app_version", "")
+        if not script.is_compatible_with(app_version):
+            self._log(f"  [Script replay: version mismatch (script={script.app_version}, app={app_version})]")
+            return False
+
+        # Ensure app is launched
+        await self._ensure_app_launched()
+
+        self._log(f"  [Script replay: {tc.id} ({len(script.steps)} steps)]")
+
+        # Create replay engine
+        pw, ph = await self._get_screen_size()
+        replay_engine = ScriptReplayEngine(
+            script_store=store,
+            healing_engine=HealingEngine(screen_width=pw, screen_height=ph),
+            appium_url=self.session_manager.appium_url or "",
+            session_id=self.session_manager.session_id or "",
+            device_udid=self.config.device_udid or "",
+        )
+
+        # Define executors
+        async def _tap(x: int, y: int, url: str, sid: str) -> None:
+            from testagent.mcp_servers.appium_server.tools import app_tap
+            await app_tap(x=x, y=y, appium_url=url, session_id=sid)
+
+        async def _type(x: int, y: int, text: str, url: str, sid: str) -> None:
+            from testagent.mcp_servers.appium_server.tools import app_tap as _at, app_type_text
+            await _at(x=x, y=y, appium_url=url, session_id=sid)
+            await asyncio.sleep(0.3)
+            if text:
+                await app_type_text(text=text, appium_url=url, session_id=sid)
+
+        async def _get_source() -> str:
+            from testagent.mcp_servers.appium_server.tools import app_get_source
+            r = await app_get_source(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            return r.get("source", "")
+
+        async def _exec_cmd(cmd: str) -> None:
+            from testagent.common.adb_utils import adb_command
+            await asyncio.to_thread(
+                adb_command, self.config.device_udid,
+                "shell", cmd, capture_output=True, timeout=15,
+            )
+
+        success = await replay_engine.replay(
+            script=script,
+            app_version=app_version,
+            tap_executor=_tap,
+            type_executor=_type,
+            source_fetcher=_get_source,
+            app_executor=_exec_cmd,
+        )
+
+        if success:
+            tc.execution.status = ExecutionStatus.EXECUTED
+            tc.execution.verdict = ExecutionVerdict.PASS
+            self._log(f"  [Script replay: PASS ({len(script.steps)} steps, {replay_engine.total_heals} heals)]")
+        else:
+            # Script replay failed — try self-healing first, then LLM fallback
+            self._log(f"  [Script replay: FAIL at step {len(replay_engine.step_results)}/{len(script.steps)}]")
+            if replay_engine.total_heals >= 3:
+                store.mark_unstable(tc.id)
+                self._log(f"  [Script marked unstable: too many heals ({replay_engine.total_heals})]")
+
+            # Switch to LLM mode for this TC
+            self._log("  [Falling back to LLM mode...]")
+            return False
+
+        return True
+
     async def _execute_single(self, tc: TestCase) -> None:
         """Execute a single test case.
 
@@ -1134,6 +1242,12 @@ class ExecutionEngine:
 
         # Clear action context stack for new TC to avoid cross-contamination
         self._clear_action_context()
+
+        # ── Regression script replay (bypasses LLM) ─────────────────
+        if tc.is_regression:
+            replayed = await self._try_script_replay(tc)
+            if replayed:
+                return
 
         if not self._check_precondition(tc):
             tc.execution.status = ExecutionStatus.BLOCKED
