@@ -82,6 +82,29 @@ class TestAgentSettings(BaseSettings):
     app_db_url: str = ""
 
     # 坐标缓存配置
+    # ── Local Vision (YOLOv8 + OCR) ────────────────────────────────
+    # Element source strategy: "multimodal" (default, existing), "yolo", "yolo_with_dom"
+    element_source: str = "multimodal"
+
+    # YOLO model paths and detection parameters
+    yolo_model_path: str = ""
+    yolo_default_model: str = "best.pt"
+    yolo_confidence_threshold: float = 0.25
+    yolo_iou_threshold: float = 0.45
+    yolo_device: str = "cpu"
+
+    # OCR engine: "rapidocr" or "easyocr"
+    ocr_engine: str = "rapidocr"
+    ocr_confidence_threshold: float = 0.5
+
+    # YOLO training directories
+    yolo_datasets_dir: str = "./datasets/yolo"
+    yolo_models_dir: str = "./models/yolo"
+
+    # Override LLM provider for local vision decisions (empty = use main llm_provider)
+    local_vision_llm_provider: str = ""
+
+    # ── Coordinate cache ───────────────────────────────────────────
     cache_enabled: bool = True
     cache_max_size: int = 1000
     cache_ttl_seconds: int = 1800
@@ -102,6 +125,7 @@ class TestAgentSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     def mask_secrets(self) -> dict[str, str]:

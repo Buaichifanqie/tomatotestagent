@@ -127,6 +127,7 @@ class ExecutionEngine:
         self._db_schema_cache: str = ""
         self._db_setup_done: bool = False
         self._consecutive_vision_timeouts: int = 0
+        self._local_vision_engine: Any = None
         self.device_udid: str = config.device_udid or ""
         self._platform_obj: Any = None
 
@@ -3316,12 +3317,11 @@ class ExecutionEngine:
         Takes a screenshot, sends it to the vision model with the target
         description, and parses the returned percentage coordinates into
         device-pixel coordinates.
-
-        Returns:
-            Dict with 'x' and 'y' keys if found,
-            Dict with 'suggestion' key if swipe suggested,
-            None if not found / error.
         """
+        # ── NEW: Dispatch to local vision strategy when configured ──
+        if self.config.element_source in ("yolo", "yolo_with_dom"):
+            return await self._local_vision_find_element(target, context)
+
         # Fast-fail: if Vision API has timed out 2+ times consecutively, skip
         if self._consecutive_vision_timeouts >= 2:
             self._log(f"  [Vision: skipping '{target}' — {self._consecutive_vision_timeouts} consecutive timeouts]")
@@ -3455,6 +3455,123 @@ class ExecutionEngine:
             f"found={found}, has_center={bool(coords.get('center'))}, "
             f"response={content[:200]}]"
         )
+        return None
+
+    # ── Local Vision (YOLO + OCR) integration ──────────────────────────────────
+
+    def _init_local_vision_engine(self) -> None:
+        """Lazy-init the local vision engine from settings."""
+        if self._local_vision_engine is not None:
+            return
+        try:
+            from testagent.config.settings import get_settings
+            from testagent.vision_local.color_analyzer import ColorAnalyzer
+            from testagent.vision_local.dom_parser import DomParser
+            from testagent.vision_local.engine import LocalVisionEngine
+            from testagent.vision_local.recognizer import PageElementRecognizer
+
+            settings = get_settings()
+            model_path = settings.yolo_model_path or ""
+            recognizer = None
+            if model_path:
+                recognizer = PageElementRecognizer(
+                    model_path=model_path,
+                    confidence_threshold=settings.yolo_confidence_threshold,
+                    iou_threshold=settings.yolo_iou_threshold,
+                    ocr_engine=settings.ocr_engine,
+                    ocr_confidence=settings.ocr_confidence_threshold,
+                    device=settings.yolo_device,
+                )
+            use_dom = self.config.element_source == "yolo_with_dom"
+            self._local_vision_engine = LocalVisionEngine(
+                dom_parser=DomParser(),
+                recognizer=recognizer,
+                use_dom=use_dom,
+            )
+            self._log("  [LocalVision engine initialized]")
+        except Exception as e:
+            self._log(f"  [LocalVision init failed: {e}]")
+            self._local_vision_engine = None
+
+    async def _local_vision_find_element(
+        self, target: str, context: str = ""
+    ) -> dict[str, Any] | None:
+        """Find element using local YOLO+OCR+DOM strategy.
+
+        Flow:
+        1. Take screenshot + get DOM XML
+        2. Run LocalVisionEngine.get_page_structure()
+        3. Run LocalVisionEngine.find_element_by_llm()
+        4. Return {x, y} or None
+        """
+        self._init_local_vision_engine()
+        if self._local_vision_engine is None:
+            self._log("  [LocalVision engine not available, falling back to multimodal]")
+            # Disable local vision and retry with multimodal
+            if hasattr(self.config, "element_source"):
+                self.config.element_source = "multimodal"
+            return await self._vision_find_element(target, context)
+
+        # 1. Take screenshot
+        scr_result = await app_screenshot(
+            appium_url=self.session_manager.appium_url,
+            session_id=self.session_manager.session_id,
+        )
+        screenshot_id = scr_result.get("screenshot_id", "")
+        b64 = ""
+        if screenshot_id:
+            from testagent.mcp_servers.shared_cache import get_screenshot
+
+            b64 = get_screenshot(screenshot_id) or ""
+
+        # 2. Get DOM XML
+        dom_xml = ""
+        try:
+            src_result = await app_get_source(
+                appium_url=self.session_manager.appium_url,
+                session_id=self.session_manager.session_id,
+            )
+            dom_xml = src_result.get("source", "")
+        except Exception as e:
+            self._log(f"  [LocalVision: DOM fetch failed (non-fatal): {e}]")
+
+        # 3. Get screen size
+        pw, ph = 1080, 2400
+        try:
+            pw, ph = await self._get_screen_size()
+        except Exception:
+            pass
+
+        # 4. Get page structure
+        self._log(f"  [LocalVision: analyzing page for '{target}']")
+        page_struct = await self._local_vision_engine.get_page_structure(
+            screenshot_base64=b64,
+            dom_xml=dom_xml,
+            page_width=pw,
+            page_height=ph,
+            source_hint="auto" if self.config.element_source == "yolo_with_dom" else "visual",
+        )
+
+        if not page_struct.get("elements") and not page_struct.get("element_count", 0) > 0:
+            self._log(f"  [LocalVision: no elements found for '{target}']")
+            return None
+
+        # 5. LLM decides which element matches
+        coords = await self._local_vision_engine.find_element_by_llm(
+            target=target,
+            page_structure=page_struct,
+            llm_provider=self._llm_provider,
+            skill_hard_rules=self._skill_hard_rules,
+        )
+
+        if coords:
+            self._log(
+                f"  [LocalVision: '{target}' -> ({coords['x']}, {coords['y']}) "
+                f"on {pw}x{ph}]"
+            )
+            return coords
+
+        self._log(f"  [LocalVision: '{target}' not found in structured data]")
         return None
 
     async def _vision_navigate_to_target(self, target: str) -> dict[str, int] | None:

@@ -255,6 +255,7 @@ class PlanConfig(BaseModel):
     max_workers: int = 1
     cache_enabled: bool = True
     cache_verify_after_tap: bool = False
+    element_source: str = "multimodal"
 
     def get_effective_system_port(self) -> int:
         """Return the system port to use for this device.

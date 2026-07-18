@@ -261,11 +261,12 @@ def setup_output_dir(plan_name: str, base_dir: str = "") -> str:
     return str(output_dir)
 
 
-def format_tc_summary(test_cases: list[TestCase]) -> str:
+def format_tc_summary(test_cases: list[TestCase], show_steps: bool = False) -> str:
     """Format a human-readable summary of generated test cases.
 
     Args:
         test_cases: The list of ``TestCase`` objects to summarise.
+        show_steps: When ``True``, display each TC's operation steps inline.
 
     Returns:
         A multi-line string suitable for display, or an empty string when the
@@ -280,7 +281,24 @@ def format_tc_summary(test_cases: list[TestCase]) -> str:
         core_tag = " [CORE]" if tc.is_core else ""
         lines.append(f"  {tc.id}: {tc.title} {priority_tag}{core_tag}")
 
-    lines.append("")
+        # ── Show steps inline ──────────────────────────────────────────
+        if show_steps and tc.steps:
+            for s in tc.steps:
+                action_icon = {
+                    "tap": "👆", "type": "⌨️", "swipe": "👉",
+                    "assert": "✅", "launch": "🚀", "exec": "⚙️",
+                    "screenshot": "📷", "wait": "⏳",
+                }.get(s.action, "  ")
+                step_desc = f"      {action_icon} Step {s.step}: [{s.action}]"
+                if s.target:
+                    step_desc += f" → {s.target}"
+                if s.value:
+                    step_desc += f"  (输入: {s.value[:40]}{'...' if len(s.value) > 40 else ''})"
+                if s.tap_first:
+                    step_desc += f"  [先点: {s.tap_first}]"
+                lines.append(step_desc)
+            lines.append("")
+
     lines.append(f"Total: {len(test_cases)} test case(s)")
     return "\n".join(lines)
 
@@ -299,7 +317,7 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider:
         when the user rejects or the list is empty.
     """
     if auto_yes:
-        summary = format_tc_summary(test_cases)
+        summary = format_tc_summary(test_cases, show_steps=True)
         if summary:
             typer.echo(summary)
         return True
@@ -309,10 +327,10 @@ def present_tc_to_user(test_cases: list[TestCase], auto_yes: bool, llm_provider:
         return False
 
     while True:
-        summary = format_tc_summary(test_cases)
+        summary = format_tc_summary(test_cases, show_steps=True)
         typer.echo(summary)
         typer.echo("")
-        typer.echo("  [y] 执行所有用例  [e] 编辑用例  [n] 取消")
+        typer.echo("  [y] 执行所有用例  [e] 编辑用例（可修改步骤）  [n] 取消")
         choice = typer.prompt("  请选择", default="y", show_default=False)
 
         if choice.lower() == "y":
@@ -539,42 +557,93 @@ def _tc_modify(test_cases: list[TestCase]) -> None:
 
 def _tc_edit_steps(tc: TestCase) -> None:
     """Edit steps of a test case interactively."""
-    typer.echo(f"\n  当前步骤 ({tc.id}):")
-    if tc.steps:
-        for s in tc.steps:
-            typer.echo(f"    {s.step}. [{s.action}] target={s.target} value={s.value}")
-    else:
+    typer.echo(f"\n  ── 编辑步骤: {tc.id} ──")
+    _display_steps(tc)
+
+    while True:
+        typer.echo("")
+        typer.echo("  [a] 添加步骤  [d] 删除步骤  [m] 修改步骤  [b] 返回")
+        action = typer.prompt("  请选择", default="b", show_default=False)
+
+        if action.lower() == "b":
+            return
+        elif action.lower() == "a":
+            step_num = len(tc.steps) + 1
+            typer.echo(f"\n  添加第 {step_num} 步:")
+            a = typer.prompt("    action", default="tap")
+            target = typer.prompt('    target (如 搜索框/登录按钮)', default="")
+            value = typer.prompt("    value（输入内容，留空跳过）", default="")
+            expected = typer.prompt("    expected（预期结果，留空跳过）", default="")
+            tap_first = typer.prompt("    tap_first（先点击的区域，留空跳过）", default="")
+            tc.steps.append(TestStep(
+                step=step_num, action=a, target=target,
+                value=value, expected=expected, tap_first=tap_first,
+            ))
+            _display_steps(tc)
+        elif action.lower() == "d":
+            if not tc.steps:
+                typer.echo("  没有可删除的步骤")
+                continue
+            idx_str = typer.prompt("  输入要删除的步骤编号")
+            try:
+                idx = int(idx_str) - 1
+            except ValueError:
+                typer.echo("  无效编号")
+                continue
+            if 0 <= idx < len(tc.steps):
+                removed = tc.steps.pop(idx)
+                for i, s in enumerate(tc.steps):
+                    s.step = i + 1
+                typer.echo(f"  ✅ 已删除步骤 {removed.step}: [{removed.action}] {removed.target}")
+                _display_steps(tc)
+            else:
+                typer.echo("  编号超出范围")
+        elif action.lower() == "m":
+            if not tc.steps:
+                typer.echo("  没有可修改的步骤")
+                continue
+            idx_str = typer.prompt("  输入要修改的步骤编号")
+            try:
+                idx = int(idx_str) - 1
+            except ValueError:
+                typer.echo("  无效编号")
+                continue
+            if not (0 <= idx < len(tc.steps)):
+                typer.echo("  编号超出范围")
+                continue
+            s = tc.steps[idx]
+            typer.echo(f"\n  修改步骤 {s.step}:")
+            s.action = typer.prompt("    action", default=s.action)
+            s.target = typer.prompt("    target", default=s.target)
+            s.value = typer.prompt("    value", default=s.value)
+            s.expected = typer.prompt("    expected", default=s.expected)
+            s.tap_first = typer.prompt("    tap_first", default=s.tap_first)
+            typer.echo("  ✅ 已修改")
+            _display_steps(tc)
+
+
+def _display_steps(tc: TestCase) -> None:
+    """Display steps of a test case in a clear table format."""
+    if not tc.steps:
         typer.echo("    （无步骤）")
-
+        return
     typer.echo("")
-    typer.echo("  [a] 添加步骤  [d] 删除步骤  [b] 返回")
-    action = typer.prompt("  请选择", default="b", show_default=False)
-
-    if action.lower() == "a":
-        step_num = len(tc.steps) + 1
-        a = typer.prompt(f"    步骤{step_num} action (tap/type/swipe/assert/launch/exec/screenshot/wait)")
-        target = typer.prompt(f"    步骤{step_num} target", default="")
-        value = typer.prompt(f"    步骤{step_num} value", default="")
-        tc.steps.append(TestStep(step=step_num, action=a, target=target, value=value))
-        typer.echo(f"  ✅ 已添加步骤 {step_num}")
-    elif action.lower() == "d":
-        if not tc.steps:
-            typer.echo("  没有可删除的步骤")
-            return
-        idx_str = typer.prompt("  输入要删除的步骤编号")
-        try:
-            idx = int(idx_str) - 1
-        except ValueError:
-            typer.echo("  无效编号")
-            return
-        if 0 <= idx < len(tc.steps):
-            removed = tc.steps.pop(idx)
-            # 重新编号
-            for i, s in enumerate(tc.steps):
-                s.step = i + 1
-            typer.echo(f"  ✅ 已删除步骤 {removed.step}: [{removed.action}] {removed.target}")
-        else:
-            typer.echo("  编号超出范围")
+    for s in tc.steps:
+        action_icon = {
+            "tap": "👆", "type": "⌨️", "swipe": "👉",
+            "assert": "✅", "launch": "🚀", "exec": "⚙️",
+            "screenshot": "📷", "wait": "⏳",
+        }.get(s.action, "  ")
+        desc = f"    {action_icon} #{s.step} [{s.action}]"
+        if s.target:
+            desc += f" → {s.target}"
+        if s.value:
+            desc += f"  value=\"{s.value[:50]}{'...' if len(s.value) > 50 else ''}\""
+        if s.expected:
+            desc += f"  expect=\"{s.expected[:40]}{'...' if len(s.expected) > 40 else ''}\""
+        if s.tap_first:
+            desc += f"  [先点: {s.tap_first}]"
+        typer.echo(desc)
 
 
 # ── main orchestration ───────────────────────────────────────────────────────
@@ -619,6 +688,7 @@ async def _plan_command_async(
     device_udid: str = "",
     appium_url: str = "http://localhost:4723",
     system_port: int = 8200,
+    element_source: str = "multimodal",
 ) -> tuple[str | None, OverallEvaluation | None, list[TestCase]]:
     """Async implementation of the full plan lifecycle.
 
@@ -749,6 +819,7 @@ async def _plan_command_async(
         device_udid=device_udid,
         appium_url=appium_url,
         system_port=system_port,
+        element_source=element_source,
     )
 
     # Create LLM provider once — shared between exploration, TC generation and execution
@@ -1765,6 +1836,7 @@ async def run_single_plan(
     name: str = "",
     log_fn: Any = None,
     resume_dir: str = "",
+    element_source: str = "multimodal",
 ) -> PlanResult:
     """Execute a single requirement document's full test lifecycle.
 
@@ -1805,6 +1877,7 @@ async def run_single_plan(
             appium_url=appium_url,
             auto_yes=auto_yes,
             resume_dir=resume_dir,
+            element_source=element_source,
         )
     except Exception as exc:
         duration_s = time.monotonic() - start_time
