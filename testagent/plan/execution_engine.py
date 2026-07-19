@@ -1131,7 +1131,7 @@ class ExecutionEngine:
         if not script:
             script = ScriptStore.find_across_reports(
                 title=tc.title,
-                app_package=self.config.app_package or "",
+                app_name=self.config.app_package or "",
                 min_similarity=0.4,
             )
             if script:

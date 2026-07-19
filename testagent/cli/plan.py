@@ -826,14 +826,14 @@ def _generate_regression_scripts(
         existing = store.load(tc.id)
         if existing and existing.status.value != "deprecated":
             typer.echo(f"  [Script exists: {tc.id} — skipping generation]")
-            tc.script_path = str(script_path)
+            tc.script_path = str(store._root / f"{tc.id}.json")
             continue
 
         # Cross-run match: find similar script by title across ALL reports
         if not existing:
             matched = ScriptStore.find_across_reports(
                 title=tc.title,
-                app_package=config.app_package or "",
+                app_name=app_name or config.app_package or "",
                 min_similarity=0.4,
             )
             if matched:
@@ -843,7 +843,7 @@ def _generate_regression_scripts(
                 if ver and ver not in matched.compatible_versions:
                     matched.compatible_versions.append(ver)
                 script_path = store.save(matched)
-                tc.script_path = str(script_path)
+                tc.script_path = str(store._root / f"{tc.id}.json")
                 typer.echo(f"  [Script matched: '{tc.title}' <- script from {matched.tc_id}]")
                 continue
 
@@ -852,15 +852,15 @@ def _generate_regression_scripts(
             # Use default screen size (1080x2400), coords are normalized
             script = generator.generate(
                 tc=tc,
-                app_package=config.app_package or "",
                 app_name=app_name,
+                app_package=config.app_package or "",
                 app_version=getattr(config, "app_version", ""),
                 platform=config.platform,
                 screen_width=1080,
                 screen_height=2400,
             )
             script_path = store.save(script)
-            tc.script_path = str(script_path)
+            tc.script_path = str(store._root / f"{tc.id}.json")
             typer.echo(f"  [Script generated: {tc.id} -> {script_path.name}]")
             generated += 1
         except Exception as e:
