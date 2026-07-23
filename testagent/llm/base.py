@@ -33,7 +33,7 @@ class ILLMProvider(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float = 0.1,
     ) -> LLMResponse: ...
 
     async def embed(self, text: str) -> list[float]: ...

@@ -1066,7 +1066,7 @@ async def _plan_command_async(
                 system=TC_GENERATION_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": text}],
                 max_tokens=32768,
-                temperature=0,
+                temperature=0.1,
             )
             for block in response.content:
                 if block.get("type") == "text":
@@ -1074,6 +1074,32 @@ async def _plan_command_async(
             return ""
 
         return _call  # return async callable directly (no asyncio.run wrapper)
+
+    def _build_critic_callable() -> Any:
+        """Build a callable for Critic (uses Judge model, different from Actor)."""
+        from testagent.llm.openai_provider import OpenAIProvider
+        import types
+        critic = object.__new__(OpenAIProvider)
+        critic._api_key = settings.critic_api_key.get_secret_value() if settings.critic_api_key else settings.openai_api_key.get_secret_value()
+        critic._model = settings.critic_model or settings.openai_model
+        critic._base_url = settings.critic_api_url or settings.openai_base_url
+        critic._client = None
+        critic._rate_limiter = types.SimpleNamespace(acquire=lambda p: __import__('asyncio').sleep(0))
+        critic._budget_manager = types.SimpleNamespace(check_budget=lambda t, m: True, record=lambda t, m, r: None)
+
+        async def _call(text: str) -> str:
+            response = await critic_provider.chat(
+                system="你是一个严谨的测试架构师，专注于发现用例覆盖的盲区。",
+                messages=[{"role": "user", "content": text}],
+                max_tokens=8192,
+                temperature=0.1,
+            )
+            for block in response.content:
+                if block.get("type") == "text":
+                    return str(block.get("text", ""))
+            return ""
+
+        return _call
 
     # ── Phase 1.5: App UI Exploration (disabled — 0 elements, wastes time) ──
     ui_context_map = None
@@ -1396,6 +1422,16 @@ async def _plan_command_async(
         except Exception as exc:
             typer.echo(f"  [RetrievalTrace save skipped: {exc}]")
 
+    # ── Phase 2a: Inject standard cases (P0/P1 library) ────────────────
+    from testagent.plan.standard_case_lib import StandardCaseLib
+
+    std_lib = StandardCaseLib()
+    std_prompt = std_lib.format_as_prompt(app_name=skill_app_name or "")
+    if std_prompt:
+        enhanced_prd = f"{enhanced_prd}\n\n{std_prompt}"
+        std_count = len(std_lib.load_all(app_name=skill_app_name or ""))
+        typer.echo(f"  [Standard cases: {std_count} P0/P1 cases loaded]")
+
     ts_gen = TestCaseGenerator(llm_provider=_build_llm_callable())
 
     _console = Console()
@@ -1404,6 +1440,25 @@ async def _plan_command_async(
     with _console.status("[bold green]Generating test cases, please wait...", spinner="dots"):
         test_cases = await ts_gen.generate(enhanced_prd, plan_name=name)
     token_tracker.end_generation()
+
+    # ── Phase 2b: Actor-Critic cross-validation ─────────────────────────
+    if test_cases:
+        from testagent.plan.cross_validate import cross_validate, generate_supplementary
+
+        try:
+            missing = await cross_validate(requirement, test_cases, _build_critic_callable())
+            if missing:
+                typer.echo(f"  [Cross-validate: {len(missing)} missing scenario(s)]")
+                for m in missing:
+                    typer.echo(f"    - {m[:80]}")
+                sup = await generate_supplementary(
+                    requirement, test_cases, missing, _build_critic_callable(),
+                )
+                if sup:
+                    test_cases.extend(sup)
+                    typer.echo(f"  [+{len(sup)} supplementary case(s) added]")
+        except Exception as exc:
+            typer.echo(f"  [Cross-validate skipped: {exc}]")
 
     if not test_cases:
         typer.echo("No test cases generated. Aborting.")
@@ -1459,6 +1514,21 @@ async def _plan_command_async(
     if not present_tc_to_user(test_cases, auto_yes=auto_yes, llm_provider=llm_provider, app_package=app_package or ""):
         typer.echo("Execution cancelled by user.")
         return None, None, []
+
+    # Save P0/P1 cases to standard library
+    if skill_app_name:
+        try:
+            from testagent.plan.standard_case_lib import StandardCaseLib
+            std_lib = StandardCaseLib()
+            saved = 0
+            for tc in test_cases:
+                if tc.priority in ("P0", "P1"):
+                    std_lib.save(tc, app_name=skill_app_name)
+                    saved += 1
+            if saved:
+                typer.echo(f"  [Standard library: {saved} P0/P1 cases saved]")
+        except Exception as exc:
+            typer.echo(f"  [Standard library save skipped: {exc}]")
 
     # ── Phase 3.5: Delta extraction and learning ─────────────────────────
     if memory_app_id:

@@ -88,6 +88,9 @@ _ENV_KEY_MAP = {
     "judge_api_key": "TESTAGENT_JUDGE_API_KEY",
     "judge_api_url": "TESTAGENT_JUDGE_API_URL",
     "judge_model": "TESTAGENT_JUDGE_MODEL",
+    "critic_api_key": "TESTAGENT_CRITIC_API_KEY",
+    "critic_api_url": "TESTAGENT_CRITIC_API_URL",
+    "critic_model": "TESTAGENT_CRITIC_MODEL",
 }
 
 _DISPLAY_LABELS = {
@@ -101,12 +104,16 @@ _DISPLAY_LABELS = {
     "judge_api_key": "API Key",
     "judge_api_url": "API URL",
     "judge_model": "Model",
+    "critic_api_key": "API Key",
+    "critic_api_url": "API URL",
+    "critic_model": "Model",
 }
 
 _KEY_GROUP = {
     "LLM": ["llm_provider", "openai_api_key", "openai_base_url", "openai_model"],
     "Vision / 多模态": ["vision_api_key", "vision_api_url", "vision_model"],
     "AI 裁判 (Judge)": ["judge_api_key", "judge_api_url", "judge_model"],
+    "Critic (用例校验)": ["critic_api_key", "critic_api_url", "critic_model"],
 }
 
 
@@ -218,7 +225,7 @@ def configure(
     has_flags = any([
         llm_provider, llm_api_key, llm_base_url, llm_model,
         vision_api_key, vision_api_url, vision_model,
-        judge_api_key, judge_api_url, judge_model,
+        judge_api_key, judge_api_url, judge_model, critic_api_key, critic_api_url, critic_model,
     ])
 
     if has_flags:
@@ -242,6 +249,12 @@ def configure(
             updates["TESTAGENT_JUDGE_API_URL"] = judge_api_url
         if judge_model is not None:
             updates["TESTAGENT_JUDGE_MODEL"] = judge_model
+        if critic_api_key is not None:
+            updates["TESTAGENT_CRITIC_API_KEY"] = critic_api_key
+        if critic_api_url is not None:
+            updates["TESTAGENT_CRITIC_API_URL"] = critic_api_url
+        if critic_model is not None:
+            updates["TESTAGENT_CRITIC_MODEL"] = critic_model
     else:
         # ── 交互模式 ─────────────────────────────────
         typer.echo("配置 LLM 和 Vision 多模态模型 API")

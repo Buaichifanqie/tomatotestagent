@@ -78,6 +78,12 @@ class TestAgentSettings(BaseSettings):
     judge_timeout: int = 120
     judge_fps: float = 1.0  # 视频抽帧频率，1.0 = 每秒1帧
 
+    # Critic 模型配置（Actor-Critic 交叉校验使用，纯文本 LLM，与多模态 Judge 不同用途）
+    critic_api_key: SecretStr = SecretStr("")
+    critic_api_url: str = ""
+    critic_model: str = ""
+    critic_timeout: int = 60
+
     # 被测应用数据库（db_toolkit 使用）
     app_db_url: str = ""
 

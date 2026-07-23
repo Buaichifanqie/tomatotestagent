@@ -60,7 +60,7 @@ class LocalProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 4096,
-        temperature: float = 0.7,
+        temperature: float = 0.1,
         priority: int = PRIORITY_EXECUTOR,
     ) -> LLMResponse:
         await self._rate_limiter.acquire(priority)
