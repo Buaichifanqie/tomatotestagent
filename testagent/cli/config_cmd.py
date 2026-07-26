@@ -208,6 +208,15 @@ def configure(
     judge_model: str | None = typer.Option(
         None, "--judge-model", help="AI 裁判模型名称"
     ),
+    critic_api_key: str | None = typer.Option(
+        None, "--critic-api-key", help="Critic API Key（用例校验用，纯文本 LLM）"
+    ),
+    critic_api_url: str | None = typer.Option(
+        None, "--critic-api-url", help="Critic API URL"
+    ),
+    critic_model: str | None = typer.Option(
+        None, "--critic-model", help="Critic 模型名称"
+    ),
 ) -> None:
     """配置 LLM 和 Vision 多模态模型的 API 信息。
 
@@ -339,6 +348,30 @@ def configure(
         )
         if val:
             updates["TESTAGENT_JUDGE_MODEL"] = val
+
+        typer.echo("")
+        typer.echo("-- Critic (用例校验) 配置 --")
+        typer.echo("  （可选，不设置则使用 Actor 的 LLM 配置）")
+        current_key = _current("critic_api_key")
+        val = typer.prompt("  API Key（留空跳过）", default=current_key or "", show_default=False)
+        if val:
+            updates["TESTAGENT_CRITIC_API_KEY"] = val
+
+        val = typer.prompt(
+            "  API URL",
+            default=_current("critic_api_url", "https://api.deepseek.com"),
+            show_default=False,
+        )
+        if val:
+            updates["TESTAGENT_CRITIC_API_URL"] = val
+
+        val = typer.prompt(
+            "  Model",
+            default=_current("critic_model", "deepseek-v4-flash"),
+            show_default=False,
+        )
+        if val:
+            updates["TESTAGENT_CRITIC_MODEL"] = val
 
     _write_env(updates)
 

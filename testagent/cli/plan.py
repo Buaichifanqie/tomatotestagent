@@ -1446,9 +1446,11 @@ async def _plan_command_async(
         from testagent.plan.cross_validate import cross_validate, generate_supplementary
 
         try:
-            missing = await cross_validate(requirement, test_cases, _build_critic_callable())
+            missing = await cross_validate(enhanced_prd or requirement, test_cases, _build_critic_callable())
             if missing:
                 typer.echo(f"  [Cross-validate: {len(missing)} missing scenario(s)]")
+            else:
+                typer.echo(f"  [Cross-validate: no missing scenarios]")
                 for m in missing:
                     typer.echo(f"    - {m[:80]}")
                 sup = await generate_supplementary(
